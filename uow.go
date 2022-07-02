@@ -12,7 +12,6 @@ import (
 var (
 	ErrNestedTransaction = errors.New("uow: transaction cannot be nested")
 	ErrAlreadyLocked     = errors.New("uow: already locked")
-	ErrContextNotFound   = errors.New("uow: UnitOfWork not found in context")
 )
 
 const logPrefix = "[uow]"
@@ -72,23 +71,12 @@ func NewTx(tx *sql.Tx) *UnitOfWork {
 	}
 }
 
-func (uow *UnitOfWork) atomic(ctx context.Context, opts ...*sql.TxOptions) (*UnitOfWork, error) {
+func (uow *UnitOfWork) atomic(ctx context.Context, opt *sql.TxOptions) (*UnitOfWork, error) {
 	if uow.IsTx() {
 		return nil, ErrNestedTransaction
 	}
 
-	var tx *sql.Tx
-	var err error
-
-	switch len(opts) {
-	case 0:
-		tx, err = uow.db.Begin()
-	case 1:
-		tx, err = uow.db.BeginTx(ctx, opts[0])
-	default:
-		panic("uow: multiple *sql.TxOptions")
-	}
-
+	tx, err := uow.db.BeginTx(ctx, opt)
 	if err != nil {
 		return nil, err
 	}
@@ -123,21 +111,19 @@ func (uow *UnitOfWork) Rollback() (err error) {
 }
 
 // AtomicFn wraps the operation in a transaction.
-func (uow *UnitOfWork) AtomicFn(ctx context.Context, fn func(*UnitOfWork) error, opts ...*sql.TxOptions) (err error) {
+func (uow *UnitOfWork) AtomicFn(ctx context.Context, fn func(*UnitOfWork) error, opt *sql.TxOptions) (err error) {
 	if uow.IsTx() {
 		return ErrNestedTransaction
 	}
 
-	tx, err := uow.atomic(ctx, opts...)
+	tx, err := uow.atomic(ctx, opt)
 	if err != nil {
 		return err
 	}
 
 	defer func() {
-		if err := tx.Rollback(); err != nil {
-			if uow.Logger != nil {
-				uow.Logger.Printf("rollback failed: %v\n", err)
-			}
+		if err := tx.Rollback(); err != nil && uow.Logger != nil {
+			uow.Logger.Printf("failed to rollback: %v\n", err)
 		}
 	}()
 
@@ -152,30 +138,11 @@ func (uow *UnitOfWork) AtomicFn(ctx context.Context, fn func(*UnitOfWork) error,
 // containing the pointer of UnitOfWork as an argument instead of the pointer
 // UnitOfWork directly.
 func (uow *UnitOfWork) AtomicFnContext(ctx context.Context, fn func(ctx context.Context) error, opts ...*sql.TxOptions) (err error) {
-	if uow.IsTx() {
-		return ErrNestedTransaction
-	}
+	return uow.AtomicFn(ctx, func(uow *UnitOfWork) error {
+		ctx = UowContext.WithValue(ctx, uow)
 
-	tx, err := uow.atomic(ctx, opts...)
-	if err != nil {
-		return err
-	}
-
-	defer func() {
-		if err := tx.Rollback(); err != nil {
-			if uow.Logger != nil {
-				uow.Logger.Printf("rollback failed: %v\n", err)
-			}
-		}
-	}()
-
-	ctx = UowContext.WithValue(ctx, tx)
-
-	if err := fn(ctx); err != nil {
-		return err
-	}
-
-	return tx.Commit()
+		return fn(ctx)
+	}, getTxOptions(opts...))
 }
 
 // AtomicLock locks the given key. If multiple operations lock the same key, it
@@ -187,22 +154,18 @@ func (uow *UnitOfWork) AtomicLock(ctx context.Context, n int, fn func(uow *UnitO
 		}
 
 		return fn(uow)
-	}, opts...)
+	}, getTxOptions(opts...))
 }
 
 // AtomicLockContext is similar to AtomicLock, except it passes the context
 // containing the pointer of UnitOfWork as an argument instead of the pointer
 // UnitOfWork directly.
 func (uow *UnitOfWork) AtomicLockContext(ctx context.Context, n int, fn func(ctx context.Context) error, opts ...*sql.TxOptions) error {
-	return uow.AtomicFn(ctx, func(uow *UnitOfWork) error {
-		if _, err := uow.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, n); err != nil {
-			return err
-		}
-
+	return uow.AtomicLock(ctx, n, func(uow *UnitOfWork) error {
 		ctx = UowContext.WithValue(ctx, uow)
 
 		return fn(ctx)
-	}, opts...)
+	}, getTxOptions(opts...))
 }
 
 // AtomicTryLock locks the given key. If multiple operations lock the same key,
@@ -216,26 +179,18 @@ func (uow *UnitOfWork) AtomicTryLock(ctx context.Context, n int, fn func(uow *Un
 		}
 
 		if locked {
-			return fmt.Errorf("%w: %d", ErrAlreadyLocked, n)
+			return fmt.Errorf("%w: key=(%d)", ErrAlreadyLocked, n)
 		}
 
 		return fn(uow)
-	}, opts...)
+	}, getTxOptions(opts...))
 }
 
 // AtomicTryLockContext is similar to AtomicTryLock, except it passes the
 // context containing the pointer of UnitOfWork as an argument instead of the
 // pointer UnitOfWork directly.
 func (uow *UnitOfWork) AtomicTryLockContext(ctx context.Context, n int, fn func(ctx context.Context) error, opts ...*sql.TxOptions) error {
-	return uow.AtomicFn(ctx, func(uow *UnitOfWork) error {
-		var locked bool
-		if err := uow.QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock($1)`, n).Scan(&locked); err != nil {
-			return err
-		}
-
-		if locked {
-			return fmt.Errorf("%w: %d", ErrAlreadyLocked, n)
-		}
+	return uow.AtomicTryLock(ctx, n, func(uow *UnitOfWork) error {
 
 		ctx = UowContext.WithValue(ctx, uow)
 
@@ -252,29 +207,30 @@ func (uow *UnitOfWork) AtomicTryLock2(ctx context.Context, m, n int, fn func(uow
 		}
 
 		if locked {
-			return fmt.Errorf("%w: %d", ErrAlreadyLocked, n)
+			return fmt.Errorf("%w: key=(%d, %d)", ErrAlreadyLocked, m, n)
 		}
 
 		return fn(uow)
-	}, opts...)
+	}, getTxOptions(opts...))
 }
 
 // AtomicTryLock2Context is similar to AtomicTryLock2, except it passes the
 // context containing the pointer of UnitOfWork as an argument instead of the
 // pointer UnitOfWork directly.
 func (uow *UnitOfWork) AtomicTryLock2Context(ctx context.Context, m, n int, fn func(ctx context.Context) error, opts ...*sql.TxOptions) error {
-	return uow.AtomicFn(ctx, func(uow *UnitOfWork) error {
-		var locked bool
-		if err := uow.QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock($1, $2)`, m, n).Scan(&locked); err != nil {
-			return err
-		}
-
-		if locked {
-			return fmt.Errorf("%w: %d", ErrAlreadyLocked, n)
-		}
+	return uow.AtomicTryLock2(ctx, m, n, func(uow *UnitOfWork) error {
 
 		ctx = UowContext.WithValue(ctx, uow)
 
 		return fn(ctx)
 	}, opts...)
+}
+
+func getTxOptions(opts ...*sql.TxOptions) *sql.TxOptions {
+	switch len(opts) {
+	case 1:
+		return opts[0]
+	default:
+		return nil
+	}
 }
