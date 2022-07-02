@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"sync"
 )
 
@@ -51,8 +52,7 @@ var _ UOW = (*UnitOfWork)(nil)
 
 // NewLogger returns an instance of the logger with the prefix set.
 func NewLogger() *log.Logger {
-	logger := log.Default()
-	logger.SetPrefix(logPrefix)
+	logger := log.New(os.Stderr, logPrefix, log.LstdFlags|log.Lmsgprefix)
 
 	return logger
 }
