@@ -32,6 +32,23 @@ type IDB interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
+// UOW represents the operations by UnitOfWork.
+type UOW interface {
+	IsTx() bool
+	Commit() error
+	Rollback() error
+	AtomicFn(ctx context.Context, fn func(*UnitOfWork) error, opt *sql.TxOptions) (err error)
+	AtomicFnContext(ctx context.Context, fn func(ctx context.Context) error, opts ...*sql.TxOptions) (err error)
+	AtomicLock(ctx context.Context, n int, fn func(uow *UnitOfWork) error, opts ...*sql.TxOptions) error
+	AtomicLockContext(ctx context.Context, n int, fn func(ctx context.Context) error, opts ...*sql.TxOptions) error
+	AtomicTryLock(ctx context.Context, n int, fn func(uow *UnitOfWork) error, opts ...*sql.TxOptions) error
+	AtomicTryLockContext(ctx context.Context, n int, fn func(ctx context.Context) error, opts ...*sql.TxOptions) error
+	AtomicTryLock2(ctx context.Context, m, n int, fn func(uow *UnitOfWork) error, opts ...*sql.TxOptions) error
+	AtomicTryLock2Context(ctx context.Context, m, n int, fn func(ctx context.Context) error, opts ...*sql.TxOptions) error
+}
+
+var _ UOW = (*UnitOfWork)(nil)
+
 // NewLogger returns an instance of the logger with the prefix set.
 func NewLogger() *log.Logger {
 	logger := log.Default()
@@ -71,7 +88,10 @@ func NewTx(tx *sql.Tx) *UnitOfWork {
 	}
 }
 
-func (uow *UnitOfWork) atomic(ctx context.Context, opt *sql.TxOptions) (*UnitOfWork, error) {
+// Atomic creates a new UnitOfPointer with the underlying db transaction
+// driver. Not recommended to be used directly, since it is easy to forget to
+// commit and/or rollback. Use AtomicFn instead.
+func (uow *UnitOfWork) Atomic(ctx context.Context, opt *sql.TxOptions) (*UnitOfWork, error) {
 	if uow.IsTx() {
 		return nil, ErrNestedTransaction
 	}
@@ -116,7 +136,7 @@ func (uow *UnitOfWork) AtomicFn(ctx context.Context, fn func(*UnitOfWork) error,
 		return ErrNestedTransaction
 	}
 
-	tx, err := uow.atomic(ctx, opt)
+	tx, err := uow.Atomic(ctx, opt)
 	if err != nil {
 		return err
 	}
