@@ -116,7 +116,7 @@ func (uow *UnitOfWork) Commit() (err error) {
 // Rollback rolls back a transaction.
 func (uow *UnitOfWork) Rollback() (err error) {
 	uow.once.Do(func() {
-		err = uow.tx.Commit()
+		err = uow.tx.Rollback()
 	})
 
 	return
