@@ -15,7 +15,7 @@ var (
 	ErrAlreadyLocked     = errors.New("uow: already locked")
 )
 
-const logPrefix = "[uow]"
+const logPrefix = "[uow] "
 
 // UowContext represents the key for the context containing the pointer of UnitOfWork.
 var UowContext = key[*UnitOfWork]("uow")
