@@ -39,6 +39,7 @@ type UOW interface {
 	IsTx() bool
 	Commit() error
 	Rollback() error
+	BeginTx(ctx context.Context, opt *sql.TxOptions) (*UnitOfWork, error)
 	RunInTx(ctx context.Context, fn func(*UnitOfWork) error, opts ...*sql.TxOptions) (err error)
 	RunInTxContext(ctx context.Context, fn func(ctx context.Context) error, opts ...*sql.TxOptions) (err error)
 	Lock(ctx context.Context, n int, fn func(uow *UnitOfWork) error, opts ...*sql.TxOptions) error
@@ -89,10 +90,10 @@ func NewTx(tx *sql.Tx) *UnitOfWork {
 	}
 }
 
-// Tx creates a new UnitOfPointer with the underlying db transaction
+// BeginTx creates a new UnitOfPointer with the underlying db transaction
 // driver. Not recommended to be used directly, since it is easy to forget to
 // commit and/or rollback. Use RunInTx instead.
-func (uow *UnitOfWork) Tx(ctx context.Context, opt *sql.TxOptions) (*UnitOfWork, error) {
+func (uow *UnitOfWork) BeginTx(ctx context.Context, opt *sql.TxOptions) (*UnitOfWork, error) {
 	if uow.IsTx() {
 		return nil, ErrNestedTransaction
 	}
@@ -137,7 +138,7 @@ func (uow *UnitOfWork) RunInTx(ctx context.Context, fn func(*UnitOfWork) error, 
 		return ErrNestedTransaction
 	}
 
-	tx, err := uow.Tx(ctx, getTxOptions(opts...))
+	tx, err := uow.BeginTx(ctx, getTxOptions(opts...))
 	if err != nil {
 		return err
 	}
