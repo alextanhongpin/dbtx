@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"sync"
 )
 
 var (
@@ -36,6 +35,8 @@ type DB interface {
 
 // UOW represents the operations by UnitOfWork.
 type UOW interface {
+	DB() DB
+	DBCtx(ctx context.Context) DB
 	IsTx() bool
 	Commit() error
 	Rollback() error
@@ -61,10 +62,8 @@ func NewLogger() *log.Logger {
 
 // UnitOfWork represents a unit of work.
 type UnitOfWork struct {
-	tx *sql.Tx
-	db *sql.DB
-	DB
-	once   sync.Once
+	tx     *sql.Tx
+	db     *sql.DB
 	Logger *log.Logger
 }
 
@@ -72,12 +71,8 @@ type UnitOfWork struct {
 func New(db *sql.DB) *UnitOfWork {
 	uow := &UnitOfWork{
 		db:     db,
-		DB:     db,
 		Logger: NewLogger(),
 	}
-
-	// Consume the 'Once', since it will only be used for transaction.
-	uow.once.Do(func() {})
 
 	return uow
 }
@@ -86,8 +81,25 @@ func New(db *sql.DB) *UnitOfWork {
 func NewTx(tx *sql.Tx) *UnitOfWork {
 	return &UnitOfWork{
 		tx: tx,
-		DB: tx,
 	}
+}
+
+func (uow *UnitOfWork) DB() DB {
+	if uow.IsTx() {
+		return uow.tx
+	}
+
+	return uow.db
+}
+
+// DBCtx returns the UoW from the context if provided, else returns the default UoW.
+func (uow *UnitOfWork) DBCtx(ctx context.Context) DB {
+	uowCtx, ok := UowContext.Value(ctx)
+	if ok {
+		return uowCtx.DB()
+	}
+
+	return uow.DB()
 }
 
 // BeginTx creates a new UnitOfPointer with the underlying db transaction
@@ -115,21 +127,13 @@ func (uow *UnitOfWork) IsTx() bool {
 }
 
 // Commit commits a transaction.
-func (uow *UnitOfWork) Commit() (err error) {
-	uow.once.Do(func() {
-		err = uow.tx.Commit()
-	})
-
-	return
+func (uow *UnitOfWork) Commit() error {
+	return uow.tx.Commit()
 }
 
 // Rollback rolls back a transaction.
-func (uow *UnitOfWork) Rollback() (err error) {
-	uow.once.Do(func() {
-		err = uow.tx.Rollback()
-	})
-
-	return
+func (uow *UnitOfWork) Rollback() error {
+	return uow.tx.Rollback()
 }
 
 // RunInTx wraps the operation in a transaction.
@@ -171,7 +175,7 @@ func (uow *UnitOfWork) RunInTxContext(ctx context.Context, fn func(ctx context.C
 // will wait for the previous operation to complete.
 func (uow *UnitOfWork) Lock(ctx context.Context, n int, fn func(uow *UnitOfWork) error, opts ...*sql.TxOptions) error {
 	return uow.RunInTx(ctx, func(uow *UnitOfWork) error {
-		if _, err := uow.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, n); err != nil {
+		if _, err := uow.DB().ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, n); err != nil {
 			return err
 		}
 
@@ -195,7 +199,7 @@ func (uow *UnitOfWork) LockContext(ctx context.Context, n int, fn func(ctx conte
 func (uow *UnitOfWork) TryLock(ctx context.Context, n int, fn func(uow *UnitOfWork) error, opts ...*sql.TxOptions) error {
 	return uow.RunInTx(ctx, func(uow *UnitOfWork) error {
 		var locked bool
-		if err := uow.QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock($1)`, n).Scan(&locked); err != nil {
+		if err := uow.DB().QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock($1)`, n).Scan(&locked); err != nil {
 			return err
 		}
 
@@ -223,7 +227,7 @@ func (uow *UnitOfWork) TryLockContext(ctx context.Context, n int, fn func(ctx co
 func (uow *UnitOfWork) TryLock2(ctx context.Context, m, n int, fn func(uow *UnitOfWork) error, opts ...*sql.TxOptions) error {
 	return uow.RunInTx(ctx, func(uow *UnitOfWork) error {
 		var locked bool
-		if err := uow.QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock($1, $2)`, m, n).Scan(&locked); err != nil {
+		if err := uow.DB().QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock($1, $2)`, m, n).Scan(&locked); err != nil {
 			return err
 		}
 
