@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math/big"
 )
 
 var (
@@ -43,8 +44,8 @@ type UOW interface {
 	RunInTxContext(ctx context.Context, fn func(ctx context.Context) error, opts ...*sql.TxOptions) (err error)
 	Lock(ctx context.Context, n int, fn func(uow *UnitOfWork) error, opts ...*sql.TxOptions) error
 	LockContext(ctx context.Context, n int, fn func(ctx context.Context) error, opts ...*sql.TxOptions) error
-	TryLock(ctx context.Context, n int, fn func(uow *UnitOfWork) error, opts ...*sql.TxOptions) error
-	TryLockContext(ctx context.Context, n int, fn func(ctx context.Context) error, opts ...*sql.TxOptions) error
+	TryLock(ctx context.Context, n *big.Int, fn func(uow *UnitOfWork) error, opts ...*sql.TxOptions) error
+	TryLockContext(ctx context.Context, n *big.Int, fn func(ctx context.Context) error, opts ...*sql.TxOptions) error
 	TryLock2(ctx context.Context, m, n int, fn func(uow *UnitOfWork) error, opts ...*sql.TxOptions) error
 	TryLock2Context(ctx context.Context, m, n int, fn func(ctx context.Context) error, opts ...*sql.TxOptions) error
 }
@@ -188,7 +189,7 @@ func (uow *UnitOfWork) LockContext(ctx context.Context, n int, fn func(ctx conte
 
 // TryLock locks the given key. If multiple operations lock the same key, only
 // the first will succeed. The rest will fail with the error ErrAlreadyLocked.
-func (uow *UnitOfWork) TryLock(ctx context.Context, n int, fn func(uow *UnitOfWork) error, opts ...*sql.TxOptions) error {
+func (uow *UnitOfWork) TryLock(ctx context.Context, n *big.Int, fn func(uow *UnitOfWork) error, opts ...*sql.TxOptions) error {
 	return uow.RunInTx(ctx, func(uow *UnitOfWork) error {
 		var locked bool
 		if err := uow.DB().QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock($1)`, n).Scan(&locked); err != nil {
@@ -206,7 +207,7 @@ func (uow *UnitOfWork) TryLock(ctx context.Context, n int, fn func(uow *UnitOfWo
 // TryLockContext is similar to TryLock, except it passes the context
 // containing the pointer of UnitOfWork as an argument instead of the pointer
 // UnitOfWork directly.
-func (uow *UnitOfWork) TryLockContext(ctx context.Context, n int, fn func(ctx context.Context) error, opts ...*sql.TxOptions) error {
+func (uow *UnitOfWork) TryLockContext(ctx context.Context, n *big.Int, fn func(ctx context.Context) error, opts ...*sql.TxOptions) error {
 	return uow.TryLock(ctx, n, func(uow *UnitOfWork) error {
 
 		ctx = UowContext.WithValue(ctx, uow)
