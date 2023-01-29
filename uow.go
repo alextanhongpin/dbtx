@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
-	"os"
 )
 
 var (
@@ -53,25 +51,16 @@ type UOW interface {
 
 var _ UOW = (*UnitOfWork)(nil)
 
-// NewLogger returns an instance of the logger with the prefix set.
-func NewLogger() *log.Logger {
-	logger := log.New(os.Stderr, logPrefix, log.LstdFlags|log.Lmsgprefix)
-
-	return logger
-}
-
 // UnitOfWork represents a unit of work.
 type UnitOfWork struct {
-	tx     *sql.Tx
-	db     *sql.DB
-	Logger *log.Logger
+	tx *sql.Tx
+	db *sql.DB
 }
 
 // New returns a pointer to UnitOfWork.
 func New(db *sql.DB) *UnitOfWork {
 	uow := &UnitOfWork{
-		db:     db,
-		Logger: NewLogger(),
+		db: db,
 	}
 
 	return uow
@@ -116,7 +105,6 @@ func (uow *UnitOfWork) BeginTx(ctx context.Context, opt *sql.TxOptions) (*UnitOf
 	}
 
 	t := NewTx(tx)
-	t.Logger = uow.Logger
 
 	return t, nil
 }
@@ -148,16 +136,20 @@ func (uow *UnitOfWork) RunInTx(ctx context.Context, fn func(*UnitOfWork) error, 
 	}
 
 	defer func() {
-		if err := tx.Rollback(); err != nil && uow.Logger != nil {
-			uow.Logger.Printf("failed to rollback: %v\n", err)
+		if p := recover(); p != nil {
+			// A panic occur, rollback and repanic.
+			err = tx.Rollback()
+			panic(p)
+		} else if err != nil {
+			// Something went wrong, rollback, but keep the original error.
+			_ = tx.Rollback()
+		} else {
+			// Success, commit.
+			err = tx.Commit()
 		}
 	}()
 
-	if err := fn(tx); err != nil {
-		return err
-	}
-
-	return tx.Commit()
+	return fn(tx)
 }
 
 // RunInTxContext is similar to RunInTx, except it passes the context
