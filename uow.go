@@ -5,16 +5,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"math/big"
 )
 
+// Errors
 var (
 	ErrNestedTransaction = errors.New("uow: transaction cannot be nested")
-	ErrAlreadyLocked     = errors.New("uow: already locked")
-	ErrConstructor       = errors.New("uow: constructor accepts 0 or 1 sql.TxOptions")
+	ErrLockWithoutTx     = errors.New("uow: lock must be carried out in transaction")
 )
-
-const logPrefix = "[uow] "
 
 // UowContext represents the key for the context containing the pointer of UnitOfWork.
 var UowContext = key[*UnitOfWork]("uow")
@@ -34,22 +31,11 @@ type DB interface {
 
 // UOW represents the operations by UnitOfWork.
 type UOW interface {
-	DB() DB
-	DBCtx(ctx context.Context) DB
-	IsTx() bool
-	Commit() error
-	Rollback() error
-	BeginTx(ctx context.Context, opt *sql.TxOptions) (*UnitOfWork, error)
-	RunInTx(ctx context.Context, fn func(*UnitOfWork) error, opts ...*sql.TxOptions) (err error)
-	RunInTxContext(ctx context.Context, fn func(ctx context.Context) error, opts ...*sql.TxOptions) (err error)
-	Lock(ctx context.Context, n int, fn func(uow *UnitOfWork) error, opts ...*sql.TxOptions) error
-	LockContext(ctx context.Context, n int, fn func(ctx context.Context) error, opts ...*sql.TxOptions) error
-	TryLock(ctx context.Context, n *big.Int, fn func(uow *UnitOfWork) error, opts ...*sql.TxOptions) error
-	TryLockContext(ctx context.Context, n *big.Int, fn func(ctx context.Context) error, opts ...*sql.TxOptions) error
-	TryLock2(ctx context.Context, m, n int, fn func(uow *UnitOfWork) error, opts ...*sql.TxOptions) error
-	TryLock2Context(ctx context.Context, m, n int, fn func(ctx context.Context) error, opts ...*sql.TxOptions) error
+	DB(ctx context.Context) DB
+	RunInTx(ctx context.Context, fn func(txCtx context.Context) error, opts ...Option) (err error)
 }
 
+// Ensures the struct UnitOfWork implements the interface.
 var _ UOW = (*UnitOfWork)(nil)
 
 // UnitOfWork represents a unit of work.
@@ -60,78 +46,34 @@ type UnitOfWork struct {
 
 // New returns a pointer to UnitOfWork.
 func New(db *sql.DB) *UnitOfWork {
-	uow := &UnitOfWork{
+	return &UnitOfWork{
 		db: db,
 	}
-
-	return uow
 }
 
-// NewTx returns a UnitOfWork with transaction.
-func NewTx(tx *sql.Tx) *UnitOfWork {
-	return &UnitOfWork{
-		tx: tx,
-	}
-}
-
-func (uow *UnitOfWork) DB() DB {
-	if uow.IsTx() {
-		return uow.tx
-	}
-
-	return uow.db
-}
-
-// DBCtx returns the UoW from the context if provided, else returns the default UoW.
-func (uow *UnitOfWork) DBCtx(ctx context.Context) DB {
+// DB returns the underlying db from the context if provided, else returns the
+// default UoW.
+func (uow *UnitOfWork) DB(ctx context.Context) DB {
 	uowCtx, ok := UowContext.Value(ctx)
 	if ok {
-		return uowCtx.DB()
+		return uowCtx.underlying()
 	}
 
-	return uow.DB()
+	return uow.underlying()
 }
 
-// BeginTx creates a new UnitOfPointer with the underlying db transaction
-// driver. Not recommended to be used directly, since it is easy to forget to
-// commit and/or rollback. Use RunInTx instead.
-func (uow *UnitOfWork) BeginTx(ctx context.Context, opt *sql.TxOptions) (*UnitOfWork, error) {
-	if uow.IsTx() {
-		return nil, ErrNestedTransaction
+// RunInTx wraps the operation in a transaction. If a context containing tx is
+// passed in, then it will use the context tx. Transaction cannot be nested.
+func (uow *UnitOfWork) RunInTx(ctx context.Context, fn func(context.Context) error, opts ...Option) (err error) {
+	if isTxContext(ctx) {
+		return fn(ctx)
 	}
 
-	tx, err := uow.db.BeginTx(ctx, opt)
-	if err != nil {
-		return nil, err
-	}
-
-	t := NewTx(tx)
-
-	return t, nil
-}
-
-// IsTx returns true if the underlying type is a transaction.
-func (uow *UnitOfWork) IsTx() bool {
-	return uow.tx != nil
-}
-
-// Commit commits a transaction.
-func (uow *UnitOfWork) Commit() error {
-	return uow.tx.Commit()
-}
-
-// Rollback rolls back a transaction.
-func (uow *UnitOfWork) Rollback() error {
-	return uow.tx.Rollback()
-}
-
-// RunInTx wraps the operation in a transaction.
-func (uow *UnitOfWork) RunInTx(ctx context.Context, fn func(*UnitOfWork) error, opts ...*sql.TxOptions) (err error) {
-	if uow.IsTx() {
+	if uow.isTx() {
 		return ErrNestedTransaction
 	}
 
-	tx, err := uow.BeginTx(ctx, getTxOptions(opts...))
+	tx, err := uow.db.BeginTx(ctx, getUowOptions(opts...).Tx)
 	if err != nil {
 		return err
 	}
@@ -150,107 +92,88 @@ func (uow *UnitOfWork) RunInTx(ctx context.Context, fn func(*UnitOfWork) error, 
 		}
 	}()
 
-	return fn(tx)
-}
-
-// RunInTxContext is similar to RunInTx, except it passes the context
-// containing the pointer of UnitOfWork as an argument instead of the pointer
-// UnitOfWork directly.
-func (uow *UnitOfWork) RunInTxContext(ctx context.Context, fn func(ctx context.Context) error, opts ...*sql.TxOptions) (err error) {
-	return uow.RunInTx(ctx, func(uow *UnitOfWork) error {
-		ctx = UowContext.WithValue(ctx, uow)
-
-		return fn(ctx)
-	}, opts...)
+	txCtx := UowContext.WithValue(ctx, newTx(tx))
+	return fn(txCtx)
 }
 
 // Lock locks the given key. If multiple operations lock the same key, it
 // will wait for the previous operation to complete.
-func (uow *UnitOfWork) Lock(ctx context.Context, n int, fn func(uow *UnitOfWork) error, opts ...*sql.TxOptions) error {
-	return uow.RunInTx(ctx, func(uow *UnitOfWork) error {
-		if _, err := uow.DB().ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, n); err != nil {
-			return err
-		}
+// Lock must be run within a transaction context, panics otherwise.
+func Lock(ctx context.Context, key LockKey) error {
+	uowCtx := UowContext.MustValue(ctx)
+	if !uowCtx.isTx() {
+		return fmt.Errorf("%w: %s", ErrLockWithoutTx, key)
+	}
 
-		return fn(uow)
-	}, opts...)
-}
+	tx := uowCtx.tx
 
-// LockContext is similar to Lock, except it passes the context containing the
-// pointer of UnitOfWork as an argument instead of the pointer UnitOfWork
-// directly.
-func (uow *UnitOfWork) LockContext(ctx context.Context, n int, fn func(ctx context.Context) error, opts ...*sql.TxOptions) error {
-	return uow.Lock(ctx, n, func(uow *UnitOfWork) error {
-		ctx = UowContext.WithValue(ctx, uow)
-
-		return fn(ctx)
-	}, opts...)
+	switch v := key.(type) {
+	case *intLockKey:
+		_, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1, $2)`, v.m, v.n)
+		return err
+	case *bigIntLockKey:
+		_, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, v.b)
+		return err
+	default:
+		panic("sql: invalid LockKey")
+	}
 }
 
 // TryLock locks the given key. If multiple operations lock the same key, only
 // the first will succeed. The rest will fail with the error ErrAlreadyLocked.
-func (uow *UnitOfWork) TryLock(ctx context.Context, n *big.Int, fn func(uow *UnitOfWork) error, opts ...*sql.TxOptions) error {
-	return uow.RunInTx(ctx, func(uow *UnitOfWork) error {
-		var locked bool
-		if err := uow.DB().QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock($1)`, n).Scan(&locked); err != nil {
-			return err
-		}
-
-		if locked {
-			return fmt.Errorf("%w: key=(%d)", ErrAlreadyLocked, n)
-		}
-
-		return fn(uow)
-	}, opts...)
-}
-
-// TryLockContext is similar to TryLock, except it passes the context
-// containing the pointer of UnitOfWork as an argument instead of the pointer
-// UnitOfWork directly.
-func (uow *UnitOfWork) TryLockContext(ctx context.Context, n *big.Int, fn func(ctx context.Context) error, opts ...*sql.TxOptions) error {
-	return uow.TryLock(ctx, n, func(uow *UnitOfWork) error {
-
-		ctx = UowContext.WithValue(ctx, uow)
-
-		return fn(ctx)
-	}, opts...)
-}
-
-// TryLock2 is similar to TryLock, but locks the key tuple.
-func (uow *UnitOfWork) TryLock2(ctx context.Context, m, n int, fn func(uow *UnitOfWork) error, opts ...*sql.TxOptions) error {
-	return uow.RunInTx(ctx, func(uow *UnitOfWork) error {
-		var locked bool
-		if err := uow.DB().QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock($1, $2)`, m, n).Scan(&locked); err != nil {
-			return err
-		}
-
-		if locked {
-			return fmt.Errorf("%w: key=(%d, %d)", ErrAlreadyLocked, m, n)
-		}
-
-		return fn(uow)
-	}, opts...)
-}
-
-// TryLock2Context is similar to TryLock2, except it passes the context
-// containing the pointer of UnitOfWork as an argument instead of the pointer
-// UnitOfWork directly.
-func (uow *UnitOfWork) TryLock2Context(ctx context.Context, m, n int, fn func(ctx context.Context) error, opts ...*sql.TxOptions) error {
-	return uow.TryLock2(ctx, m, n, func(uow *UnitOfWork) error {
-
-		ctx = UowContext.WithValue(ctx, uow)
-
-		return fn(ctx)
-	}, opts...)
-}
-
-func getTxOptions(opts ...*sql.TxOptions) *sql.TxOptions {
-	switch len(opts) {
-	case 0:
-		return nil
-	case 1:
-		return opts[0]
-	default:
-		panic(ErrConstructor)
+// TryLock must be run within a transaction context, panics otherwise.
+func TryLock(ctx context.Context, key LockKey) (locked bool, err error) {
+	uowCtx := UowContext.MustValue(ctx)
+	if !uowCtx.isTx() {
+		return false, fmt.Errorf("%w: %s", ErrLockWithoutTx, key)
 	}
+
+	tx := uowCtx.tx
+
+	// locked will be true if the key is locked successfully.
+	switch v := key.(type) {
+	case *intLockKey:
+		err = tx.QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock($1, $2)`, v.m, v.n).Scan(&locked)
+	case *bigIntLockKey:
+		err = tx.QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock($1)`, v.b).Scan(&locked)
+	default:
+		panic("sql: invalid LockKey")
+	}
+
+	return
+}
+
+// underlying returns the underlying db client.
+func (uow *UnitOfWork) underlying() DB {
+	if uow.isTx() {
+		return uow.tx
+	}
+
+	return uow.db
+}
+
+// isTx returns true if the underlying type is a transaction.
+func (uow *UnitOfWork) isTx() bool {
+	return uow.tx != nil
+}
+
+// newTx returns a UnitOfWork with transaction.
+func newTx(tx *sql.Tx) *UnitOfWork {
+	return &UnitOfWork{
+		tx: tx,
+	}
+}
+
+func getUowOptions(opts ...Option) *UowOption {
+	var opt UowOption
+	for _, o := range opts {
+		o(&opt)
+	}
+
+	return &opt
+}
+
+func isTxContext(ctx context.Context) bool {
+	uowCtx, ok := UowContext.Value(ctx)
+	return ok && uowCtx.isTx()
 }
