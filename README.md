@@ -68,3 +68,128 @@ func (uc *authUseCase) Create(ctx context.Context, name string) error {
 	})
 }
 ```
+
+
+## Outbox Pattern
+
+One common usecase when wrapping operations in a transaction is to implement Outbox pattern.
+
+For simple usecases, we can just persist the events in-memory and flush them when the transaction commits. For a more scalable (?) solution, consider using Debezium.
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/alextanhongpin/uow"
+)
+
+func main() {
+	u := &OutboxUow{repo: &mockOutboxRepo{}, UOW: &mockUow{}}
+	uc := &authUsecase{uow: u}
+	fmt.Println(uc.Login(context.Background(), "john@appleseed.com"))
+}
+
+type mockUow struct{}
+
+func (m *mockUow) IsTx() bool                    { return true }
+func (m *mockUow) DB(ctx context.Context) uow.DB { return nil }
+func (m *mockUow) RunInTx(ctx context.Context, fn func(txContext context.Context) error, opts ...uow.Option) error {
+	return fn(ctx)
+}
+
+type mockOutboxRepo struct{}
+
+func (r *mockOutboxRepo) Save(ctx context.Context, events ...Event) error {
+	if len(events) == 0 {
+		return nil
+	}
+
+	fmt.Println("[mockOutboxRepo] Save", events)
+	return nil
+}
+
+var _ uow.UOW = (*OutboxUow)(nil)
+
+type outboxRepo interface {
+	Save(ctx context.Context, events ...Event) error
+}
+
+type Outbox interface {
+	Fire(events ...Event)
+}
+
+type outbox struct {
+	events []Event
+}
+
+func (o *outbox) Fire(events ...Event) {
+	fmt.Println("fire", events)
+	o.events = append(o.events, events...)
+}
+
+type Event struct {
+	Type string
+	Data any
+}
+
+type contextKey string
+
+var outboxContextKey contextKey = "outbox"
+
+func withValue(ctx context.Context, o Outbox) context.Context {
+	return context.WithValue(ctx, outboxContextKey, o)
+}
+
+func value(ctx context.Context) (Outbox, bool) {
+	o, ok := ctx.Value(outboxContextKey).(Outbox)
+	return o, ok
+}
+
+// OutboxUow is a customized UOW that allows persisting events on transaction commit.
+type OutboxUow struct {
+	uow.UOW
+	repo outboxRepo
+}
+
+func (u *OutboxUow) RunInTx(ctx context.Context, fn func(ctx context.Context) error, opts ...uow.Option) error {
+	return u.UOW.RunInTx(ctx, func(txCtx context.Context) error {
+		// A new outbox is created per-request.
+		o := new(outbox)
+
+		// The context containing the outbox is passed down.
+		if err := fn(withValue(txCtx, o)); err != nil {
+			return err
+		}
+
+		// Flush events
+		return u.repo.Save(txCtx, o.events...)
+	})
+}
+
+type authUsecase struct {
+	uow *OutboxUow
+}
+
+func (uc *authUsecase) Login(ctx context.Context, email string) error {
+	// NOTE: if passing dependencies through context is not to your liking, you
+	// can also pass the outbox as the second argument. Example:
+	//
+	// return uc.uow.RunInTx(ctx, func(txCtx context.Context, outbox Outbox) error {
+	return uc.uow.RunInTx(ctx, func(txCtx context.Context) error {
+		// Retrieve the outbox.
+		outbox, ok := value(txCtx)
+		if ok {
+			// Fire events. These events will be saved in the same transaction.
+			outbox.Fire(
+				Event{Type: "user_created", Data: map[string]any{"email": email}},
+				Event{Type: "logged_in", Data: map[string]any{"email": email}},
+			)
+		}
+
+		return nil
+	})
+}
+```
