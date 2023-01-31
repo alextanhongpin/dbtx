@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/alextanhongpin/uow"
+	"github.com/alextanhongpin/uow/postgres/lock"
 	_ "github.com/lib/pq"
 	"github.com/ory/dockertest"
 	"github.com/ory/dockertest/docker"
@@ -114,7 +115,7 @@ func TestUOWNested(t *testing.T) {
 func TestUOWIntLockKey(t *testing.T) {
 	u := uow.New(db)
 	err := u.RunInTx(context.Background(), func(ctx context.Context) error {
-		return uow.Lock(ctx, uow.IntLockKey(1, 2))
+		return lock.Lock(ctx, lock.IntKey(1, 2))
 	})
 	if err != nil {
 		t.Error(err)
@@ -124,11 +125,11 @@ func TestUOWIntLockKey(t *testing.T) {
 func TestUOWIntLockKeyLocked(t *testing.T) {
 	u := uow.New(db)
 	err := u.RunInTx(context.Background(), func(txCtx context.Context) error {
-		locked1, err := uow.TryLock(txCtx, uow.IntLockKey(1, 1))
+		locked1, err := lock.TryLock(txCtx, lock.IntKey(1, 1))
 		if err != nil {
 			return err
 		}
-		locked2, err := uow.TryLock(txCtx, uow.IntLockKey(1, 1))
+		locked2, err := lock.TryLock(txCtx, lock.IntKey(1, 1))
 		if err != nil {
 			return err
 		}
@@ -145,7 +146,7 @@ func TestUOWIntLockKeyLocked(t *testing.T) {
 func TestUOWBigIntLockKey(t *testing.T) {
 	u := uow.New(db)
 	err := u.RunInTx(context.Background(), func(ctx context.Context) error {
-		return uow.Lock(ctx, uow.BigIntLockKey(big.NewInt(10)))
+		return lock.Lock(ctx, lock.BigIntKey(big.NewInt(10)))
 	})
 	if err != nil {
 		t.Error(err)
@@ -161,12 +162,12 @@ func TestUOWBigIntLockKeyLocked(t *testing.T) {
 		defer wg.Done()
 
 		err := u.RunInTx(context.Background(), func(ctx context.Context) error {
-			locked, err := uow.TryLock(ctx, uow.BigIntLockKey(big.NewInt(1)))
+			locked, err := lock.TryLock(ctx, lock.BigIntKey(big.NewInt(1)))
 			if err != nil {
 				return err
 			}
 
-			time.Sleep(1 * time.Second)
+			time.Sleep(200 * time.Millisecond)
 			t.Logf("goroutine locked=%t\n", locked)
 			return nil
 		})
@@ -175,17 +176,17 @@ func TestUOWBigIntLockKeyLocked(t *testing.T) {
 		}
 	}()
 
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	err := u.RunInTx(context.Background(), func(ctx context.Context) error {
 		// Both locked1 and locked2 will always be true in the same transaction.
 		// Only when locking with the same key in another transaction will result
 		// in false.
-		locked1, err := uow.TryLock(ctx, uow.BigIntLockKey(big.NewInt(1)))
+		locked1, err := lock.TryLock(ctx, lock.BigIntKey(big.NewInt(1)))
 		if err != nil {
 			return err
 		}
 
-		locked2, err := uow.TryLock(ctx, uow.BigIntLockKey(big.NewInt(1)))
+		locked2, err := lock.TryLock(ctx, lock.BigIntKey(big.NewInt(1)))
 		if err != nil {
 			return err
 		}

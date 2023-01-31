@@ -7,23 +7,25 @@ import (
 
 var ErrContextNotFound = errors.New("uow: UnitOfWork not found in context")
 
-type key[T any] string
+type contextKey string
 
-func (k key[T]) WithValue(ctx context.Context, v T) context.Context {
-	return context.WithValue(ctx, k, v)
+// uowContextKey represents the key for the context containing the pointer of UnitOfWork.
+var uowContextKey = contextKey("uow")
+
+func Value(ctx context.Context) (*UnitOfWork, bool) {
+	uow, ok := ctx.Value(uowContextKey).(*UnitOfWork)
+	return uow, ok
 }
 
-func (k key[T]) Value(ctx context.Context) (t T, ok bool) {
-	t, ok = ctx.Value(k).(T)
-
-	return
-}
-
-func (k key[T]) MustValue(ctx context.Context) T {
-	t, ok := ctx.Value(k).(T)
+func MustValue(ctx context.Context) *UnitOfWork {
+	uow, ok := Value(ctx)
 	if !ok {
 		panic(ErrContextNotFound)
 	}
 
-	return t
+	return uow
+}
+
+func WithValue(ctx context.Context, uow *UnitOfWork) context.Context {
+	return context.WithValue(ctx, uowContextKey, uow)
 }

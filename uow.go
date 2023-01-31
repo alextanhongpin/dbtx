@@ -4,17 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 )
 
-// Errors
-var (
-	ErrNestedTransaction = errors.New("uow: transaction cannot be nested")
-	ErrLockWithoutTx     = errors.New("uow: lock must be carried out in transaction")
-)
-
-// UowContext represents the key for the context containing the pointer of UnitOfWork.
-var UowContext = key[*UnitOfWork]("uow")
+var ErrNestedTx = errors.New("uow: transaction cannot be nested")
 
 // DB represents the common db operations.
 type DB interface {
@@ -31,6 +23,7 @@ type DB interface {
 
 // UOW represents the operations by UnitOfWork.
 type UOW interface {
+	IsTx() bool
 	DB(ctx context.Context) DB
 	RunInTx(ctx context.Context, fn func(txCtx context.Context) error, opts ...Option) (err error)
 }
@@ -54,7 +47,7 @@ func New(db *sql.DB) *UnitOfWork {
 // DB returns the underlying db from the context if provided, else returns the
 // default UoW.
 func (uow *UnitOfWork) DB(ctx context.Context) DB {
-	uowCtx, ok := UowContext.Value(ctx)
+	uowCtx, ok := Value(ctx)
 	if ok {
 		return uowCtx.underlying()
 	}
@@ -69,8 +62,8 @@ func (uow *UnitOfWork) RunInTx(ctx context.Context, fn func(context.Context) err
 		return fn(ctx)
 	}
 
-	if uow.isTx() {
-		return ErrNestedTransaction
+	if uow.IsTx() {
+		return ErrNestedTx
 	}
 
 	tx, err := uow.db.BeginTx(ctx, getUowOptions(opts...).Tx)
@@ -92,68 +85,21 @@ func (uow *UnitOfWork) RunInTx(ctx context.Context, fn func(context.Context) err
 		}
 	}()
 
-	txCtx := UowContext.WithValue(ctx, newTx(tx))
+	txCtx := WithValue(ctx, newTx(tx))
 	return fn(txCtx)
-}
-
-// Lock locks the given key. If multiple operations lock the same key, it
-// will wait for the previous operation to complete.
-// Lock must be run within a transaction context, panics otherwise.
-func Lock(ctx context.Context, key LockKey) error {
-	uowCtx := UowContext.MustValue(ctx)
-	if !uowCtx.isTx() {
-		return fmt.Errorf("%w: %s", ErrLockWithoutTx, key)
-	}
-
-	tx := uowCtx.tx
-
-	switch v := key.(type) {
-	case *intLockKey:
-		_, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1, $2)`, v.m, v.n)
-		return err
-	case *bigIntLockKey:
-		_, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, v.b)
-		return err
-	default:
-		panic("sql: invalid LockKey")
-	}
-}
-
-// TryLock locks the given key. If multiple operations lock the same key, only
-// the first will succeed. The rest will fail with the error ErrAlreadyLocked.
-// TryLock must be run within a transaction context, panics otherwise.
-func TryLock(ctx context.Context, key LockKey) (locked bool, err error) {
-	uowCtx := UowContext.MustValue(ctx)
-	if !uowCtx.isTx() {
-		return false, fmt.Errorf("%w: %s", ErrLockWithoutTx, key)
-	}
-
-	tx := uowCtx.tx
-
-	// locked will be true if the key is locked successfully.
-	switch v := key.(type) {
-	case *intLockKey:
-		err = tx.QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock($1, $2)`, v.m, v.n).Scan(&locked)
-	case *bigIntLockKey:
-		err = tx.QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock($1)`, v.b).Scan(&locked)
-	default:
-		panic("sql: invalid LockKey")
-	}
-
-	return
 }
 
 // underlying returns the underlying db client.
 func (uow *UnitOfWork) underlying() DB {
-	if uow.isTx() {
+	if uow.IsTx() {
 		return uow.tx
 	}
 
 	return uow.db
 }
 
-// isTx returns true if the underlying type is a transaction.
-func (uow *UnitOfWork) isTx() bool {
+// IsTx returns true if the underlying type is a transaction.
+func (uow *UnitOfWork) IsTx() bool {
 	return uow.tx != nil
 }
 
@@ -164,6 +110,11 @@ func newTx(tx *sql.Tx) *UnitOfWork {
 	}
 }
 
+func isTxContext(ctx context.Context) bool {
+	uow, ok := Value(ctx)
+	return ok && uow.IsTx()
+}
+
 func getUowOptions(opts ...Option) *UowOption {
 	var opt UowOption
 	for _, o := range opts {
@@ -171,9 +122,4 @@ func getUowOptions(opts ...Option) *UowOption {
 	}
 
 	return &opt
-}
-
-func isTxContext(ctx context.Context) bool {
-	uowCtx, ok := UowContext.Value(ctx)
-	return ok && uowCtx.isTx()
 }
