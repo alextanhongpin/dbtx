@@ -3,10 +3,7 @@ package uow
 import (
 	"context"
 	"database/sql"
-	"errors"
 )
-
-var ErrNestedTx = errors.New("uow: transaction cannot be nested")
 
 // DB represents the common db operations.
 type DB interface {
@@ -57,13 +54,14 @@ func (uow *UnitOfWork) DB(ctx context.Context) DB {
 
 // RunInTx wraps the operation in a transaction. If a context containing tx is
 // passed in, then it will use the context tx. Transaction cannot be nested.
+// The transaction can only be committed by the parent.
 func (uow *UnitOfWork) RunInTx(ctx context.Context, fn func(context.Context) error, opts ...Option) (err error) {
 	if isTxContext(ctx) {
 		return fn(ctx)
 	}
 
 	if uow.IsTx() {
-		return ErrNestedTx
+		return fn(WithValue(ctx, uow))
 	}
 
 	tx, err := uow.db.BeginTx(ctx, getUowOptions(opts...).Tx)
@@ -85,8 +83,7 @@ func (uow *UnitOfWork) RunInTx(ctx context.Context, fn func(context.Context) err
 		}
 	}()
 
-	txCtx := WithValue(ctx, newTx(tx))
-	return fn(txCtx)
+	return fn(WithValue(ctx, newTx(tx)))
 }
 
 // underlying returns the underlying db client.
