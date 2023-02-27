@@ -2,7 +2,7 @@
 
 [![](https://godoc.org/github.com/alextanhongpin/uow?status.svg)](http://godoc.org/github.com/alextanhongpin/uow)
 
-Unit of Work implementation with golang. Abstracts the complexity in setting transactions across different repository.
+Unit of Work implementation with golang. Abstracts the complexity in setting transactions across different repository. Read more about it in this blog [Simplying Transactions in Golang with Unit of Work Pattern](https://alextanhongpin.github.io/blog/post/003-unit-of-work).
 
 
 ## Transaction-ready Repository
