@@ -1,4 +1,4 @@
-package uow
+package bun
 
 import (
 	"context"
@@ -10,7 +10,7 @@ var ErrContextNotFound = errors.New("uow: UnitOfWork not found in context")
 type contextKey string
 
 // uowContextKey represents the key for the context containing the pointer of UnitOfWork.
-var uowContextKey = contextKey("uow_ctx")
+var uowContextKey = contextKey("bun_uow_ctx")
 
 func Value(ctx context.Context) (*UnitOfWork, bool) {
 	uow, ok := ctx.Value(uowContextKey).(*UnitOfWork)
