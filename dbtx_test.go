@@ -1,4 +1,4 @@
-package uow_test
+package dbtx_test
 
 import (
 	"context"
@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alextanhongpin/uow"
-	"github.com/alextanhongpin/uow/postgres/lock"
+	"github.com/alextanhongpin/dbtx"
+	"github.com/alextanhongpin/dbtx/postgres/lock"
 	_ "github.com/lib/pq"
 	"github.com/ory/dockertest"
 	"github.com/ory/dockertest/docker"
@@ -44,10 +44,10 @@ func TestSQL(t *testing.T) {
 	t.Log("got n:", n)
 }
 
-func TestUOW(t *testing.T) {
-	u := uow.New(db)
-	err := u.RunInTx(context.Background(), func(ctx context.Context) error {
-		tx := u.DB(ctx)
+func TestAtomic(t *testing.T) {
+	tx := dbtx.New(db)
+	err := tx.RunInTx(context.Background(), func(ctx context.Context) error {
+		tx := tx.DB(ctx)
 		res, err := tx.Exec(`insert into numbers(n) values ($1)`, 1)
 		if err != nil {
 			return err
@@ -77,11 +77,11 @@ func TestUOW(t *testing.T) {
 	t.Logf("count is %d\n", c)
 }
 
-func TestUOWNested(t *testing.T) {
-	u := uow.New(db)
-	err := u.RunInTx(context.Background(), func(ctx1 context.Context) error {
-		return u.RunInTx(ctx1, func(ctx2 context.Context) error {
-			tx := u.DB(ctx2)
+func TestAtomicNested(t *testing.T) {
+	tx := dbtx.New(db)
+	err := tx.RunInTx(context.Background(), func(ctx1 context.Context) error {
+		return tx.RunInTx(ctx1, func(ctx2 context.Context) error {
+			tx := tx.DB(ctx2)
 			res, err := tx.Exec(`insert into numbers(n) values ($1)`, 1)
 			if err != nil {
 				return err
@@ -112,9 +112,9 @@ func TestUOWNested(t *testing.T) {
 	t.Logf("count is %d\n", c)
 }
 
-func TestUOWIntLockKey(t *testing.T) {
-	u := uow.New(db)
-	err := u.RunInTx(context.Background(), func(ctx context.Context) error {
+func TestAtomicIntLockKey(t *testing.T) {
+	tx := dbtx.New(db)
+	err := tx.RunInTx(context.Background(), func(ctx context.Context) error {
 		return lock.Lock(ctx, lock.IntKey(1, 2))
 	})
 	if err != nil {
@@ -122,9 +122,9 @@ func TestUOWIntLockKey(t *testing.T) {
 	}
 }
 
-func TestUOWIntLockKeyLocked(t *testing.T) {
-	u := uow.New(db)
-	err := u.RunInTx(context.Background(), func(txCtx context.Context) error {
+func TestAtomicIntLockKeyLocked(t *testing.T) {
+	tx := dbtx.New(db)
+	err := tx.RunInTx(context.Background(), func(txCtx context.Context) error {
 		locked1, err := lock.TryLock(txCtx, lock.IntKey(1, 1))
 		if err != nil {
 			return err
@@ -143,9 +143,9 @@ func TestUOWIntLockKeyLocked(t *testing.T) {
 	}
 }
 
-func TestUOWBigIntLockKey(t *testing.T) {
-	u := uow.New(db)
-	err := u.RunInTx(context.Background(), func(ctx context.Context) error {
+func TestAtomicBigIntLockKey(t *testing.T) {
+	tx := dbtx.New(db)
+	err := tx.RunInTx(context.Background(), func(ctx context.Context) error {
 		return lock.Lock(ctx, lock.BigIntKey(big.NewInt(10)))
 	})
 	if err != nil {
@@ -153,15 +153,15 @@ func TestUOWBigIntLockKey(t *testing.T) {
 	}
 }
 
-func TestUOWBigIntLockKeyLocked(t *testing.T) {
-	u := uow.New(db)
+func TestAtomicBigIntLockKeyLocked(t *testing.T) {
+	tx := dbtx.New(db)
 	var wg sync.WaitGroup
 	wg.Add(1)
 
 	go func() {
 		defer wg.Done()
 
-		err := u.RunInTx(context.Background(), func(ctx context.Context) error {
+		err := tx.RunInTx(context.Background(), func(ctx context.Context) error {
 			locked, err := lock.TryLock(ctx, lock.BigIntKey(big.NewInt(1)))
 			if err != nil {
 				return err
@@ -177,7 +177,7 @@ func TestUOWBigIntLockKeyLocked(t *testing.T) {
 	}()
 
 	time.Sleep(100 * time.Millisecond)
-	err := u.RunInTx(context.Background(), func(ctx context.Context) error {
+	err := tx.RunInTx(context.Background(), func(ctx context.Context) error {
 		// Both locked1 and locked2 will always be true in the same transaction.
 		// Only when locking with the same key in another transaction will result
 		// in false.

@@ -1,15 +1,15 @@
-package uow
+package dbtx
 
 import "database/sql"
 
-type UowOption struct {
+type AtomicOption struct {
 	Tx *sql.TxOptions
 }
 
-type Option func(o *UowOption)
+type Option func(o *AtomicOption)
 
 func TxOptions(tx *sql.TxOptions) Option {
-	return func(o *UowOption) {
+	return func(o *AtomicOption) {
 		o.Tx = tx
 	}
 }

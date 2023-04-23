@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	uowbun "github.com/alextanhongpin/uow/bun"
+	buntx "github.com/alextanhongpin/dbtx/bun"
 	_ "github.com/lib/pq"
 	"github.com/ory/dockertest/v3"
 	"github.com/ory/dockertest/v3/docker"
@@ -31,7 +31,7 @@ func TestMain(m *testing.M) {
 
 func TestBun(t *testing.T) {
 	// Setup unit of work.
-	u := uowbun.New(bunDB)
+	u := buntx.New(bunDB)
 	ctx := context.Background()
 	err := u.RunInTx(ctx, func(ctx context.Context) error {
 		tx := u.DB(ctx)

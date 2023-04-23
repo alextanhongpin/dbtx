@@ -1,4 +1,4 @@
-package uow
+package dbtx
 
 import (
 	"context"
@@ -18,53 +18,53 @@ type DB interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-// UOW represents the operations by UnitOfWork.
-type UOW interface {
+// atomic represents the database atomic operations in a transactions.
+type atomic interface {
 	IsTx() bool
 	DB(ctx context.Context) DB
 	RunInTx(ctx context.Context, fn func(txCtx context.Context) error, opts ...Option) (err error)
 }
 
-// Ensures the struct UnitOfWork implements the interface.
-var _ UOW = (*UnitOfWork)(nil)
+// Ensures the struct Atomic implements the interface.
+var _ atomic = (*Atomic)(nil)
 
-// UnitOfWork represents a unit of work.
-type UnitOfWork struct {
+// Atomic represents a unit of work.
+type Atomic struct {
 	tx *sql.Tx
 	db *sql.DB
 }
 
-// New returns a pointer to UnitOfWork.
-func New(db *sql.DB) *UnitOfWork {
-	return &UnitOfWork{
+// New returns a pointer to Atomic.
+func New(db *sql.DB) *Atomic {
+	return &Atomic{
 		db: db,
 	}
 }
 
 // DB returns the underlying db from the context if provided, else returns the
-// default UoW.
-func (uow *UnitOfWork) DB(ctx context.Context) DB {
-	uowCtx, ok := Value(ctx)
+// default Atomic.
+func (a *Atomic) DB(ctx context.Context) DB {
+	atmCtx, ok := Value(ctx)
 	if ok {
-		return uowCtx.underlying()
+		return atmCtx.underlying()
 	}
 
-	return uow.underlying()
+	return a.underlying()
 }
 
 // RunInTx wraps the operation in a transaction. If a context containing tx is
 // passed in, then it will use the context tx. Transaction cannot be nested.
 // The transaction can only be committed by the parent.
-func (uow *UnitOfWork) RunInTx(ctx context.Context, fn func(context.Context) error, opts ...Option) (err error) {
+func (a *Atomic) RunInTx(ctx context.Context, fn func(context.Context) error, opts ...Option) (err error) {
 	if isTxContext(ctx) {
 		return fn(ctx)
 	}
 
-	if uow.IsTx() {
-		return fn(WithValue(ctx, uow))
+	if a.IsTx() {
+		return fn(WithValue(ctx, a))
 	}
 
-	tx, err := uow.db.BeginTx(ctx, getUowOptions(opts...).Tx)
+	tx, err := a.db.BeginTx(ctx, getOptions(opts...).Tx)
 	if err != nil {
 		return err
 	}
@@ -87,33 +87,33 @@ func (uow *UnitOfWork) RunInTx(ctx context.Context, fn func(context.Context) err
 }
 
 // underlying returns the underlying db client.
-func (uow *UnitOfWork) underlying() DB {
-	if uow.IsTx() {
-		return uow.tx
+func (a *Atomic) underlying() DB {
+	if a.IsTx() {
+		return a.tx
 	}
 
-	return uow.db
+	return a.db
 }
 
 // IsTx returns true if the underlying type is a transaction.
-func (uow *UnitOfWork) IsTx() bool {
-	return uow.tx != nil
+func (a *Atomic) IsTx() bool {
+	return a.tx != nil
 }
 
-// newTx returns a UnitOfWork with transaction.
-func newTx(tx *sql.Tx) *UnitOfWork {
-	return &UnitOfWork{
+// newTx returns a Atomic with transaction.
+func newTx(tx *sql.Tx) *Atomic {
+	return &Atomic{
 		tx: tx,
 	}
 }
 
 func isTxContext(ctx context.Context) bool {
-	uow, ok := Value(ctx)
-	return ok && uow.IsTx()
+	a, ok := Value(ctx)
+	return ok && a.IsTx()
 }
 
-func getUowOptions(opts ...Option) *UowOption {
-	var opt UowOption
+func getOptions(opts ...Option) *AtomicOption {
+	var opt AtomicOption
 	for _, o := range opts {
 		o(&opt)
 	}

@@ -5,27 +5,27 @@ import (
 	"errors"
 )
 
-var ErrContextNotFound = errors.New("uow: UnitOfWork not found in context")
+var ErrContextNotFound = errors.New("dbtx: Atomic not found in context")
 
 type contextKey string
 
-// uowContextKey represents the key for the context containing the pointer of UnitOfWork.
-var uowContextKey = contextKey("bun_uow_ctx")
+// atmContextKey represents the key for the context containing the pointer of Atomic.
+var atmContextKey = contextKey("bun_atm_ctx")
 
-func Value(ctx context.Context) (*UnitOfWork, bool) {
-	uow, ok := ctx.Value(uowContextKey).(*UnitOfWork)
-	return uow, ok
+func Value(ctx context.Context) (*Atomic, bool) {
+	atm, ok := ctx.Value(atmContextKey).(*Atomic)
+	return atm, ok
 }
 
-func MustValue(ctx context.Context) *UnitOfWork {
-	uow, ok := Value(ctx)
+func MustValue(ctx context.Context) *Atomic {
+	atm, ok := Value(ctx)
 	if !ok {
 		panic(ErrContextNotFound)
 	}
 
-	return uow
+	return atm
 }
 
-func WithValue(ctx context.Context, uow *UnitOfWork) context.Context {
-	return context.WithValue(ctx, uowContextKey, uow)
+func WithValue(ctx context.Context, atm *Atomic) context.Context {
+	return context.WithValue(ctx, atmContextKey, atm)
 }

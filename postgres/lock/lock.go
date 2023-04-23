@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/alextanhongpin/uow"
+	"github.com/alextanhongpin/dbtx"
 )
 
 var ErrLockOutsideTx = errors.New("lock: lock must be carried out in transaction")
@@ -14,12 +14,12 @@ var ErrLockOutsideTx = errors.New("lock: lock must be carried out in transaction
 // will wait for the previous operation to complete.
 // Lock must be run within a transaction context, panics otherwise.
 func Lock(ctx context.Context, key Key) error {
-	uowCtx := uow.MustValue(ctx)
-	if !uowCtx.IsTx() {
+	txCtx := dbtx.MustValue(ctx)
+	if !txCtx.IsTx() {
 		return fmt.Errorf("%w: %s", ErrLockOutsideTx, key)
 	}
 
-	tx := uowCtx.DB(ctx)
+	tx := txCtx.DB(ctx)
 
 	switch v := key.(type) {
 	case *intKey:
@@ -37,12 +37,12 @@ func Lock(ctx context.Context, key Key) error {
 // the first will succeed. The rest will fail with the error ErrAlreadyLocked.
 // TryLock must be run within a transaction context, panics otherwise.
 func TryLock(ctx context.Context, key Key) (locked bool, err error) {
-	uowCtx := uow.MustValue(ctx)
-	if !uowCtx.IsTx() {
+	txCtx := dbtx.MustValue(ctx)
+	if !txCtx.IsTx() {
 		return false, fmt.Errorf("%w: %s", ErrLockOutsideTx, key)
 	}
 
-	tx := uowCtx.DB(ctx)
+	tx := txCtx.DB(ctx)
 
 	// locked will be true if the key is locked successfully.
 	switch v := key.(type) {

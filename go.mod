@@ -1,4 +1,4 @@
-module github.com/alextanhongpin/uow
+module github.com/alextanhongpin/dbtx
 
 go 1.18
 
