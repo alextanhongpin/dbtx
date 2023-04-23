@@ -5,7 +5,7 @@ import (
 	"errors"
 )
 
-var ErrContextNotFound = errors.New("dbtx: Atomic not found in context")
+var ErrContextNotFound = errors.New("buntx: Atomic not found in context")
 
 type contextKey string
 
