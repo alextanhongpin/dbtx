@@ -1,4 +1,4 @@
-package bun_test
+package buntx_test
 
 import (
 	"context"
@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	buntx "github.com/alextanhongpin/dbtx/bun"
+	"github.com/alextanhongpin/dbtx/buntx"
 	_ "github.com/lib/pq"
 	"github.com/ory/dockertest/v3"
 	"github.com/ory/dockertest/v3/docker"
