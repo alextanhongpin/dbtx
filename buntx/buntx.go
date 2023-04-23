@@ -6,9 +6,12 @@ import (
 	"github.com/uptrace/bun"
 )
 
+// DB is an alias to bun.IDB.
+type DB = bun.IDB
+
 type atomic interface {
 	IsTx() bool
-	DB(ctx context.Context) bun.IDB
+	DB(ctx context.Context) DB
 	RunInTx(ctx context.Context, fn func(context.Context) error) error
 }
 
