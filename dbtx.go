@@ -56,7 +56,7 @@ func (a *Atomic) DB(ctx context.Context) DB {
 // passed in, then it will use the context tx. Transaction cannot be nested.
 // The transaction can only be committed by the parent.
 func (a *Atomic) RunInTx(ctx context.Context, fn func(context.Context) error, opts ...Option) (err error) {
-	if isTxContext(ctx) {
+	if IsTx(ctx) {
 		return fn(ctx)
 	}
 
@@ -107,7 +107,7 @@ func newTx(tx *sql.Tx) *Atomic {
 	}
 }
 
-func isTxContext(ctx context.Context) bool {
+func IsTx(ctx context.Context) bool {
 	a, ok := Value(ctx)
 	return ok && a.IsTx()
 }

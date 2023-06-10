@@ -42,7 +42,17 @@ func TestSQL(t *testing.T) {
 func TestAtomic(t *testing.T) {
 	db := containers.PostgresDB(t)
 	tx := dbtx.New(db)
-	err := tx.RunInTx(context.Background(), func(ctx context.Context) error {
+	ctx := context.Background()
+
+	if dbtx.IsTx(ctx) {
+		t.Fatal("dbtx.IsTx: want false, got true")
+	}
+
+	err := tx.RunInTx(ctx, func(ctx context.Context) error {
+		if !dbtx.IsTx(ctx) {
+			t.Fatal("dbtx.IsTx: want true, got false")
+		}
+
 		tx := tx.DB(ctx)
 		res, err := tx.Exec(`insert into numbers(n) values ($1)`, 1)
 		if err != nil {
