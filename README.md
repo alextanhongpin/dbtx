@@ -10,9 +10,9 @@ Unit of Work implementation with golang. Abstracts the complexity in setting tra
 // atomic represents the database atomic operations in a transactions.
 type atomic interface {
 	IsTx() bool
-	DBTx(ctx context.Context) DB
-	DB() DB
-	Tx(ctx context.Context) DB
+	DBTx(ctx context.Context) DBTX
+	DB() *sql.DB
+	Tx(ctx context.Context) *sql.Tx
 	RunInTx(ctx context.Context, fn func(txCtx context.Context) error) (err error)
 }
 ```

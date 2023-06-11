@@ -70,10 +70,10 @@ func IsTx(ctx context.Context) bool {
 
 // Tx returns the DBTX from the context, only if the underlying type is a
 // *sql.Tx.
-func Tx(ctx context.Context) (DBTX, bool) {
+func Tx(ctx context.Context) (*sql.Tx, bool) {
 	atmCtx, ok := Value(ctx)
 	if ok && atmCtx.IsTx() {
-		return atmCtx.underlying(), true
+		return atmCtx.tx, true
 	}
 
 	return nil, false

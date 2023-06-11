@@ -29,8 +29,8 @@ type DBTX interface {
 type atomic interface {
 	IsTx() bool
 	DBTx(ctx context.Context) DBTX
-	DB() DBTX
-	Tx(ctx context.Context) DBTX
+	DB() *sql.DB
+	Tx(ctx context.Context) *sql.Tx
 	RunInTx(ctx context.Context, fn func(txCtx context.Context) error) (err error)
 }
 
@@ -62,7 +62,7 @@ func (a *Atomic) DBTx(ctx context.Context) DBTX {
 	return a.underlying()
 }
 
-func (a *Atomic) DB() DBTX {
+func (a *Atomic) DB() *sql.DB {
 	if a.IsTx() {
 		panic(ErrIsTransaction)
 	}
@@ -71,10 +71,10 @@ func (a *Atomic) DB() DBTX {
 }
 
 // Tx returns the *sql.Tx from context.
-func (a *Atomic) Tx(ctx context.Context) DBTX {
+func (a *Atomic) Tx(ctx context.Context) *sql.Tx {
 	atm, ok := Value(ctx)
 	if ok && atm.IsTx() {
-		return atm.underlying()
+		return atm.tx
 	}
 
 	panic(ErrNonTransaction)
