@@ -15,6 +15,7 @@ var (
 	atomicContextkey         = contextKey("atm_ctx")
 	readOnlyContextKey       = contextKey("ro_ctx")
 	isolationLevelContextKey = contextKey("iso_ctx")
+	depthContextKey          = contextKey("depth_ctx")
 )
 
 func Value(ctx context.Context) (*Atomic, bool) {
@@ -33,6 +34,16 @@ func MustValue(ctx context.Context) *Atomic {
 
 func WithValue(ctx context.Context, atm *Atomic) context.Context {
 	return context.WithValue(ctx, atomicContextkey, atm)
+}
+
+func IncDepth(ctx context.Context) context.Context {
+	n := Depth(ctx)
+	return context.WithValue(ctx, depthContextKey, n+1)
+}
+
+func Depth(ctx context.Context) int {
+	depth, _ := ctx.Value(depthContextKey).(int)
+	return depth
 }
 
 func ReadOnly(ctx context.Context, readOnly bool) context.Context {
@@ -57,7 +68,20 @@ func IsTx(ctx context.Context) bool {
 	return ok && a.IsTx()
 }
 
-func DBTX(ctx context.Context) (DB, bool) {
+// Tx returns the DBTX from the context, only if the underlying type is a
+// *sql.Tx.
+func Tx(ctx context.Context) (DBTX, bool) {
+	atmCtx, ok := Value(ctx)
+	if ok && atmCtx.IsTx() {
+		return atmCtx.underlying(), true
+	}
+
+	return nil, false
+}
+
+// DBTx returns the DBTX from the context, which can be either *sql.DB or
+// *sql.Tx.
+func DBTx(ctx context.Context) (DBTX, bool) {
 	atmCtx, ok := Value(ctx)
 	if ok {
 		return atmCtx.underlying(), true

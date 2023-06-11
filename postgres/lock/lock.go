@@ -8,7 +8,10 @@ import (
 	"github.com/alextanhongpin/dbtx"
 )
 
-var ErrLockOutsideTx = errors.New("lock: lock must be carried out in transaction")
+var (
+	ErrLockOutsideTx = errors.New("lock: lock must be carried out in transaction")
+	ErrInvalidKey    = errors.New("lock: invalid key")
+)
 
 // Lock locks the given key. If multiple operations lock the same key, it
 // will wait for the previous operation to complete.
@@ -19,7 +22,7 @@ func Lock(ctx context.Context, key Key) error {
 		return fmt.Errorf("%w: %s", ErrLockOutsideTx, key)
 	}
 
-	tx := txCtx.DB(ctx)
+	tx := txCtx.Tx(ctx)
 
 	switch v := key.(type) {
 	case *intKey:
@@ -29,7 +32,7 @@ func Lock(ctx context.Context, key Key) error {
 		_, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, v.b)
 		return err
 	default:
-		panic("sql: invalid Key")
+		panic(ErrInvalidKey)
 	}
 }
 
@@ -42,7 +45,7 @@ func TryLock(ctx context.Context, key Key) (locked bool, err error) {
 		return false, fmt.Errorf("%w: %s", ErrLockOutsideTx, key)
 	}
 
-	tx := txCtx.DB(ctx)
+	tx := txCtx.Tx(ctx)
 
 	// locked will be true if the key is locked successfully.
 	switch v := key.(type) {
@@ -51,7 +54,7 @@ func TryLock(ctx context.Context, key Key) (locked bool, err error) {
 	case *bigIntKey:
 		err = tx.QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock($1)`, v.b).Scan(&locked)
 	default:
-		panic("sql: invalid Key")
+		panic(ErrInvalidKey)
 	}
 
 	return

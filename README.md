@@ -10,8 +10,27 @@ Unit of Work implementation with golang. Abstracts the complexity in setting tra
 // atomic represents the database atomic operations in a transactions.
 type atomic interface {
 	IsTx() bool
-	DB(ctx context.Context) DB
+	DBTx(ctx context.Context) DB
+	DB() DB
+	Tx(ctx context.Context) DB
 	RunInTx(ctx context.Context, fn func(txCtx context.Context) error) (err error)
+}
+```
+
+
+## Enforce Tx
+
+If an operation must be absolutely carried out in a transaction, use `dbtx.Tx(ctx)` to ensure the context contains the `*sql.Tx`:
+
+```go
+func (r *userRepository) Create(ctx context.Context, name string) error {
+	tx, ok := dbtx.Tx(ctx)
+	if !ok {
+		panic(dbtx.ErrNonTransaction)
+	}
+
+	_, err := tx.Exec(`insert into users (name) values ($1)`, name)
+	return err
 }
 ```
 
@@ -32,7 +51,7 @@ type atomic interface {
 }
 
 type dbCtx interface {
-	DB(ctx context.Context) dbtx.DB
+	DBTx(ctx context.Context) dbtx.DBTX
 }
 
 type atomicDBCtx interface {
@@ -57,12 +76,12 @@ type userRepository struct {
 	db *sql.DB
 }
 
-func (r *userRepository) DB(ctx context.Context) dbtx.DB {
+func (r *userRepository) DB(ctx context.Context) dbtx.DBTX {
 	// Obtain either a *sql.DB/*sql.Tx from the context, or use the current
 	// repository's *sql.DB.
 	// A convenient method *dbtx.DB(ctx) is provided (see account repository
 	// below).
-	v, ok := dbtx.DBTX(ctx)
+	v, ok := dbtx.DBTx(ctx)
 	if ok {
 		return v
 	}
@@ -82,7 +101,7 @@ type accountRepository struct {
 }
 
 func (r *accountRepository) Create(ctx context.Context, name string) error {
-	db := r.dbtx.DB(ctx)
+	db := r.dbtx.DBTx(ctx)
 	_, err := db.Exec(`insert into accounts (name) values ($1)`, name)
 	return err
 }
@@ -95,7 +114,7 @@ type authUseCase struct {
 
 func (uc *authUseCase) Create(ctx context.Context, name string) error {
 	return uc.dbtx.RunInTx(ctx, func(ctx context.Context) error {
-	  // You can pass in options to override *sql.TxOptions.
+		// You can pass in options to override *sql.TxOptions.
 		ctx = dbtx.ReadOnly(ctx, false)
 		ctx = dbtx.IsolationLevel(ctx, sql.LevelDefault)
 		err := uc.userRepo.Create(ctx, name)

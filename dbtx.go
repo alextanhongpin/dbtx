@@ -3,10 +3,17 @@ package dbtx
 import (
 	"context"
 	"database/sql"
+	"errors"
 )
 
-// DB represents the common db operations.
-type DB interface {
+var (
+	ErrNonTransaction    = errors.New("dbtx: underlying type is not a transaction")
+	ErrIsTransaction     = errors.New("dbtx: underlying type is transaction")
+	ErrNestedTransaction = errors.New("dbtx: transactions cannot be nested")
+)
+
+// DBTX represents the common db operations for both *sql.DB and *sql.Tx.
+type DBTX interface {
 	Exec(query string, args ...any) (sql.Result, error)
 	Prepare(query string) (*sql.Stmt, error)
 	Query(query string, args ...any) (*sql.Rows, error)
@@ -21,7 +28,9 @@ type DB interface {
 // atomic represents the database atomic operations in a transactions.
 type atomic interface {
 	IsTx() bool
-	DB(ctx context.Context) DB
+	DBTx(ctx context.Context) DBTX
+	DB() DBTX
+	Tx(ctx context.Context) DBTX
 	RunInTx(ctx context.Context, fn func(txCtx context.Context) error) (err error)
 }
 
@@ -41,15 +50,34 @@ func New(db *sql.DB) *Atomic {
 	}
 }
 
-// DB returns the underlying db from the context if provided, else returns the
-// default Atomic.
-func (a *Atomic) DB(ctx context.Context) DB {
-	atmCtx, ok := Value(ctx)
+// DBTx returns the DBTX from the context, which can be either *sql.DB or
+// *sql.Tx.
+// Returns the atomic underlying type if the context is empty.
+func (a *Atomic) DBTx(ctx context.Context) DBTX {
+	atm, ok := Value(ctx)
 	if ok {
-		return atmCtx.underlying()
+		return atm.underlying()
 	}
 
 	return a.underlying()
+}
+
+func (a *Atomic) DB() DBTX {
+	if a.IsTx() {
+		panic(ErrIsTransaction)
+	}
+
+	return a.db
+}
+
+// Tx returns the *sql.Tx from context.
+func (a *Atomic) Tx(ctx context.Context) DBTX {
+	atm, ok := Value(ctx)
+	if ok && atm.IsTx() {
+		return atm.underlying()
+	}
+
+	panic(ErrNonTransaction)
 }
 
 // RunInTx wraps the operation in a transaction. If a context containing tx is
@@ -57,11 +85,12 @@ func (a *Atomic) DB(ctx context.Context) DB {
 // The transaction can only be committed by the parent.
 func (a *Atomic) RunInTx(ctx context.Context, fn func(context.Context) error) (err error) {
 	if IsTx(ctx) {
+		ctx = IncDepth(ctx)
 		return fn(ctx)
 	}
 
 	if a.IsTx() {
-		return fn(WithValue(ctx, a))
+		panic(ErrNestedTransaction)
 	}
 
 	tx, err := a.db.BeginTx(ctx, TxOptions(ctx))
@@ -87,7 +116,7 @@ func (a *Atomic) RunInTx(ctx context.Context, fn func(context.Context) error) (e
 }
 
 // underlying returns the underlying db client.
-func (a *Atomic) underlying() DB {
+func (a *Atomic) underlying() DBTX {
 	if a.IsTx() {
 		return a.tx
 	}

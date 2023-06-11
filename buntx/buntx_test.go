@@ -27,7 +27,7 @@ func TestBun(t *testing.T) {
 	u := buntx.New(bunDB)
 	ctx := context.Background()
 	err := u.RunInTx(ctx, func(ctx context.Context) error {
-		tx := u.DB(ctx)
+		tx := u.Tx(ctx)
 
 		var id int64
 		err := tx.NewRaw(`insert into users(name) values (?) returning id`, "john").Scan(ctx, &id)
