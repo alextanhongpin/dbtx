@@ -4,6 +4,16 @@
 
 Unit of Work implementation with golang. Abstracts the complexity in setting transactions across different repository. Read more about it in this blog [Simplying Transactions in Golang with Unit of Work Pattern](https://alextanhongpin.github.io/blog/post/003-unit-of-work).
 
+## Interface
+
+```go
+// atomic represents the database atomic operations in a transactions.
+type atomic interface {
+	IsTx() bool
+	DB(ctx context.Context) DB
+	RunInTx(ctx context.Context, fn func(txCtx context.Context) error) (err error)
+}
+```
 
 ## Transaction-ready Repository
 
@@ -18,18 +28,25 @@ import (
 )
 
 type atomic interface {
-	IsTx() bool
+	RunInTx(ctx context.Context, fn func(txCtx context.Context) error) (err error)
+}
+
+type dbCtx interface {
 	DB(ctx context.Context) dbtx.DB
-	RunInTx(ctx context.Context, fn func(txCtx context.Context) error, opts ...Option) (err error)
+}
+
+type atomicDBCtx interface {
+	atomic
+	dbCtx
 }
 
 func main() {
 	var db *sql.DB
 	u := dbtx.New(db)
-	userRepo := &userRepository{dbtx: u}
+	userRepo := &userRepository{db: db}
 	accountRepo := &accountRepository{dbtx: u}
 	uc := &authUseCase{
-		dbtx:         u,
+		dbtx:        u,
 		userRepo:    userRepo,
 		accountRepo: accountRepo,
 	}
@@ -37,18 +54,31 @@ func main() {
 }
 
 type userRepository struct {
-	dbtx atomic
+	db *sql.DB
+}
+
+func (r *userRepository) DB(ctx context.Context) dbtx.DB {
+	// Obtain either a *sql.DB/*sql.Tx from the context, or use the current
+	// repository's *sql.DB.
+	// A convenient method *dbtx.DB(ctx) is provided (see account repository
+	// below).
+	v, ok := dbtx.DBTX(ctx)
+	if ok {
+		return v
+	}
+
+	return r.db
 }
 
 func (r *userRepository) Create(ctx context.Context, name string) error {
 	// This will obtain the Tx from the context, otherwise it will fallback to Db.
-	db := r.dbtx.DB(ctx)
+	db := r.DB(ctx)
 	_, err := db.Exec(`insert into users (name) values ($1)`, name)
 	return err
 }
 
 type accountRepository struct {
-	dbtx atomic
+	dbtx atomicDBCtx
 }
 
 func (r *accountRepository) Create(ctx context.Context, name string) error {
@@ -65,6 +95,9 @@ type authUseCase struct {
 
 func (uc *authUseCase) Create(ctx context.Context, name string) error {
 	return uc.dbtx.RunInTx(ctx, func(ctx context.Context) error {
+	  // You can pass in options to override *sql.TxOptions.
+		ctx = dbtx.ReadOnly(ctx, false)
+		ctx = dbtx.IsolationLevel(ctx, sql.LevelDefault)
 		err := uc.userRepo.Create(ctx, name)
 		if err != nil {
 			return err
@@ -88,25 +121,107 @@ package main
 import (
 	"context"
 	"fmt"
-
-	"github.com/alextanhongpin/dbtx"
 )
 
+type atomic interface {
+	IsTx() bool
+	RunInTx(ctx context.Context, fn func(txCtx context.Context) error) (err error)
+}
+
 func main() {
-	u := &OutboxAtomic{repo: &mockOutboxRepo{}, Atomic: &mockAtomic{}}
-	uc := &authUsecase{dbtx: u}
+	repo := newMockOutboxRepo()
+	atm := newMockAtomic()
+	outbox := newOutboxAtomic(repo, atm)
+	uc := &authUsecase{dbtx: outbox}
 	fmt.Println(uc.Login(context.Background(), "john@appleseed.com"))
+}
+
+type authUsecase struct {
+	dbtx atomic
+}
+
+func (uc *authUsecase) Login(ctx context.Context, email string) error {
+	// NOTE: if passing dependencies through context is not to your liking, you
+	// can also pass the outbox as the second argument. Example:
+	//
+	// return uc.dbtx.RunInTx(ctx, func(txCtx context.Context, outbox Outbox) error {
+	return uc.dbtx.RunInTx(ctx, func(txCtx context.Context) error {
+		// Retrieve the outbox.
+		outbox, ok := outboxValue(txCtx)
+		if ok {
+			// Fire events. These events will be saved in the same transaction.
+			outbox.Fire(
+				Event{Type: "user_created", Data: map[string]any{"email": email}},
+				Event{Type: "logged_in", Data: map[string]any{"email": email}},
+			)
+		}
+
+		return nil
+	})
+}
+
+type Event struct {
+	Type string
+	Data any
+}
+
+type contextKey string
+
+var outboxContextKey contextKey = "outbox"
+
+func withOutboxValue(ctx context.Context, o Outbox) context.Context {
+	return context.WithValue(ctx, outboxContextKey, o)
+}
+
+func outboxValue(ctx context.Context) (Outbox, bool) {
+	o, ok := ctx.Value(outboxContextKey).(Outbox)
+	return o, ok
+}
+
+// OutboxAtomic is a customized UOW that allows persisting events on transaction commit.
+type OutboxAtomic struct {
+	atomic
+	repo outboxRepo
+}
+
+func newOutboxAtomic(repo outboxRepo, atm atomic) *OutboxAtomic {
+	return &OutboxAtomic{
+		atomic: atm,
+		repo:   repo,
+	}
+}
+
+func (u *OutboxAtomic) RunInTx(ctx context.Context, fn func(ctx context.Context) error) error {
+	return u.atomic.RunInTx(ctx, func(txCtx context.Context) error {
+		// A new outbox is created per-request.
+		o := new(outbox)
+
+		// The context containing the outbox is passed down.
+		if err := fn(withOutboxValue(txCtx, o)); err != nil {
+			return err
+		}
+
+		// Flush events
+		return u.repo.Save(txCtx, o.events...)
+	})
 }
 
 type mockAtomic struct{}
 
-func (m *mockAtomic) IsTx() bool                    { return true }
-func (m *mockAtomic) DB(ctx context.Context) dbtx.DB { return nil }
-func (m *mockAtomic) RunInTx(ctx context.Context, fn func(txContext context.Context) error, opts ...dbtx.Option) error {
+func newMockAtomic() *mockAtomic {
+	return new(mockAtomic)
+}
+
+func (m *mockAtomic) IsTx() bool { return true }
+func (m *mockAtomic) RunInTx(ctx context.Context, fn func(txContext context.Context) error) error {
 	return fn(ctx)
 }
 
 type mockOutboxRepo struct{}
+
+func newMockOutboxRepo() *mockOutboxRepo {
+	return new(mockOutboxRepo)
+}
 
 func (r *mockOutboxRepo) Save(ctx context.Context, events ...Event) error {
 	if len(events) == 0 {
@@ -134,68 +249,5 @@ type outbox struct {
 func (o *outbox) Fire(events ...Event) {
 	fmt.Println("fire", events)
 	o.events = append(o.events, events...)
-}
-
-type Event struct {
-	Type string
-	Data any
-}
-
-type contextKey string
-
-var outboxContextKey contextKey = "outbox"
-
-func withValue(ctx context.Context, o Outbox) context.Context {
-	return context.WithValue(ctx, outboxContextKey, o)
-}
-
-func value(ctx context.Context) (Outbox, bool) {
-	o, ok := ctx.Value(outboxContextKey).(Outbox)
-	return o, ok
-}
-
-// OutboxAtomic is a customized UOW that allows persisting events on transaction commit.
-type OutboxAtomic struct {
-	atomic
-	repo outboxRepo
-}
-
-func (u *OutboxAtomic) RunInTx(ctx context.Context, fn func(ctx context.Context) error, opts ...dbtx.Option) error {
-	return u.Atomic.RunInTx(ctx, func(txCtx context.Context) error {
-		// A new outbox is created per-request.
-		o := new(outbox)
-
-		// The context containing the outbox is passed down.
-		if err := fn(withValue(txCtx, o)); err != nil {
-			return err
-		}
-
-		// Flush events
-		return u.repo.Save(txCtx, o.events...)
-	})
-}
-
-type authUsecase struct {
-	dbtx *OutboxAtomic
-}
-
-func (uc *authUsecase) Login(ctx context.Context, email string) error {
-	// NOTE: if passing dependencies through context is not to your liking, you
-	// can also pass the outbox as the second argument. Example:
-	//
-	// return uc.dbtx.RunInTx(ctx, func(txCtx context.Context, outbox Outbox) error {
-	return uc.dbtx.RunInTx(ctx, func(txCtx context.Context) error {
-		// Retrieve the outbox.
-		outbox, ok := value(txCtx)
-		if ok {
-			// Fire events. These events will be saved in the same transaction.
-			outbox.Fire(
-				Event{Type: "user_created", Data: map[string]any{"email": email}},
-				Event{Type: "logged_in", Data: map[string]any{"email": email}},
-			)
-		}
-
-		return nil
-	})
 }
 ```

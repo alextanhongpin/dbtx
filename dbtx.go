@@ -22,7 +22,7 @@ type DB interface {
 type atomic interface {
 	IsTx() bool
 	DB(ctx context.Context) DB
-	RunInTx(ctx context.Context, fn func(txCtx context.Context) error, opts ...Option) (err error)
+	RunInTx(ctx context.Context, fn func(txCtx context.Context) error) (err error)
 }
 
 // Ensures the struct Atomic implements the interface.
@@ -55,7 +55,7 @@ func (a *Atomic) DB(ctx context.Context) DB {
 // RunInTx wraps the operation in a transaction. If a context containing tx is
 // passed in, then it will use the context tx. Transaction cannot be nested.
 // The transaction can only be committed by the parent.
-func (a *Atomic) RunInTx(ctx context.Context, fn func(context.Context) error, opts ...Option) (err error) {
+func (a *Atomic) RunInTx(ctx context.Context, fn func(context.Context) error) (err error) {
 	if IsTx(ctx) {
 		return fn(ctx)
 	}
@@ -64,7 +64,7 @@ func (a *Atomic) RunInTx(ctx context.Context, fn func(context.Context) error, op
 		return fn(WithValue(ctx, a))
 	}
 
-	tx, err := a.db.BeginTx(ctx, getOptions(opts...).Tx)
+	tx, err := a.db.BeginTx(ctx, TxOptions(ctx))
 	if err != nil {
 		return err
 	}
@@ -105,18 +105,4 @@ func newTx(tx *sql.Tx) *Atomic {
 	return &Atomic{
 		tx: tx,
 	}
-}
-
-func IsTx(ctx context.Context) bool {
-	a, ok := Value(ctx)
-	return ok && a.IsTx()
-}
-
-func getOptions(opts ...Option) *AtomicOption {
-	var opt AtomicOption
-	for _, o := range opts {
-		o(&opt)
-	}
-
-	return &opt
 }
