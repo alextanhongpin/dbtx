@@ -15,8 +15,7 @@ var (
 )
 
 type Locker struct {
-	db  *sql.DB
-	err error
+	db *sql.DB
 }
 
 func New(db *sql.DB) *Locker {
