@@ -93,7 +93,13 @@ func (a *Atomic) RunInTx(ctx context.Context, fn func(context.Context) error) (e
 		panic(ErrNestedTransaction)
 	}
 
-	tx, err := a.db.BeginTx(ctx, TxOptions(ctx))
+	return RunInTx(ctx, a.db, TxOptions(ctx), func(tx *sql.Tx) error {
+		return fn(WithValue(ctx, NewTx(tx)))
+	})
+}
+
+func RunInTx(ctx context.Context, db *sql.DB, opt *sql.TxOptions, fn func(tx *sql.Tx) error) (err error) {
+	tx, err := db.BeginTx(ctx, opt)
 	if err != nil {
 		return err
 	}
@@ -112,7 +118,7 @@ func (a *Atomic) RunInTx(ctx context.Context, fn func(context.Context) error) (e
 		}
 	}()
 
-	return fn(WithValue(ctx, newTx(tx)))
+	return fn(tx)
 }
 
 // underlying returns the underlying db client.
@@ -129,8 +135,8 @@ func (a *Atomic) IsTx() bool {
 	return a.tx != nil
 }
 
-// newTx returns a Atomic with transaction.
-func newTx(tx *sql.Tx) *Atomic {
+// NewTx returns a Atomic with transaction.
+func NewTx(tx *sql.Tx) *Atomic {
 	return &Atomic{
 		tx: tx,
 	}

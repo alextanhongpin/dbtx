@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"math/big"
 	"os"
 	"sync"
 	"testing"
@@ -96,7 +95,7 @@ func TestAtomic(t *testing.T) {
 
 		return ErrIntentional
 	})
-	assert.ErrorIs(err, ErrIntentional)
+	assert.ErrorIs(err, ErrIntentional, err)
 	assertNoRows(t, newNumberRepo(atm), 42)
 }
 
@@ -154,35 +153,37 @@ func TestAtomicNested(t *testing.T) {
 	assertNoRows(t, newNumberRepo(atm), 42)
 }
 
-func TestAtomicIntLockKey(t *testing.T) {
+func TestAtomicIntKeyPair(t *testing.T) {
 	db := containers.PostgresDB(t)
 	tx := dbtx.New(db)
 	err := tx.RunInTx(context.Background(), func(ctx context.Context) error {
-		return lock.Lock(ctx, lock.IntKey(1, 2))
+		return lock.Lock(ctx, lock.NewIntKeyPair(1, 2))
 	})
 	if err != nil {
 		t.Error(err)
 	}
 }
 
-func TestAtomicIntLockKeyLocked(t *testing.T) {
+func TestAtomicIntKeyPairLocked(t *testing.T) {
 	db := containers.PostgresDB(t)
 	tx := dbtx.New(db)
 	err := tx.RunInTx(context.Background(), func(txCtx context.Context) error {
-		locked1, err := lock.TryLock(txCtx, lock.IntKey(1, 1))
-		if err != nil {
+		err := lock.TryLock(txCtx, lock.NewIntKeyPair(1, 1))
+		locked1 := errors.Is(err, lock.ErrAlreadyLocked)
+		if err != nil && !locked1 {
 			return err
 		}
 
-		locked2, err := lock.TryLock(txCtx, lock.IntKey(1, 1))
-		if err != nil {
+		err = lock.TryLock(txCtx, lock.NewIntKeyPair(1, 1))
+		locked2 := errors.Is(err, lock.ErrAlreadyLocked)
+		if err != nil && !locked2 {
 			return err
 		}
 
 		// Within the same transaction, calling TryLock twice will return true.
 		// If called from another transaction, the TryLock will return false.
-		assert.True(t, locked1)
-		assert.True(t, locked2)
+		assert.False(t, locked1)
+		assert.False(t, locked2)
 		t.Logf("locked1=%t, locked2=%t", locked1, locked2)
 
 		return nil
@@ -192,21 +193,21 @@ func TestAtomicIntLockKeyLocked(t *testing.T) {
 	}
 }
 
-func TestAtomicBigIntLockKey(t *testing.T) {
+func TestAtomicIntLockKey(t *testing.T) {
 	db := containers.PostgresDB(t)
 	tx := dbtx.New(db)
 	err := tx.RunInTx(context.Background(), func(ctx context.Context) error {
-		return lock.Lock(ctx, lock.BigIntKey(big.NewInt(10)))
+		return lock.Lock(ctx, lock.NewIntKey(10))
 	})
 	if err != nil {
 		t.Error(err)
 	}
 }
 
-func TestAtomicBigIntLockKeyLocked(t *testing.T) {
+func TestAtomicIntLockKeyLocked(t *testing.T) {
 	db := containers.PostgresDB(t)
 	atm := dbtx.New(db)
-	key := lock.BigIntKey(big.NewInt(1))
+	key := lock.NewIntKey(10)
 
 	assert := assert.New(t)
 
@@ -218,12 +219,13 @@ func TestAtomicBigIntLockKeyLocked(t *testing.T) {
 
 		ctx := context.Background()
 		err := atm.RunInTx(ctx, func(txCtx context.Context) error {
-			locked, err := lock.TryLock(txCtx, key)
-			if err != nil {
+			err := lock.TryLock(txCtx, key)
+			locked := errors.Is(err, lock.ErrAlreadyLocked)
+			if err != nil && !locked {
 				return err
 			}
 
-			assert.True(locked)
+			assert.False(locked)
 			t.Logf("goroutine0: locked=%t\n", locked)
 			time.Sleep(200 * time.Millisecond)
 
@@ -238,13 +240,15 @@ func TestAtomicBigIntLockKeyLocked(t *testing.T) {
 		// Both locked1 and locked2 will always be true in the same transaction.
 		// Only when locking with the same key in another transaction will result
 		// in false.
-		locked1, err := lock.TryLock(txCtx, key)
-		if err != nil {
+		err := lock.TryLock(txCtx, key)
+		locked1 := errors.Is(err, lock.ErrAlreadyLocked)
+		if err != nil && !locked1 {
 			return err
 		}
 
-		locked2, err := lock.TryLock(txCtx, key)
-		if err != nil {
+		err = lock.TryLock(txCtx, key)
+		locked2 := errors.Is(err, lock.ErrAlreadyLocked)
+		if err != nil && !locked2 {
 			return err
 		}
 
@@ -259,6 +263,40 @@ func TestAtomicBigIntLockKeyLocked(t *testing.T) {
 	})
 	assert.Nil(err)
 	wg.Wait()
+}
+
+func TestAtomicLocker(t *testing.T) {
+	assert := assert.New(t)
+
+	db := containers.PostgresDB(t)
+
+	// Arrange.
+	ctx := context.Background()
+	key := lock.NewStrKey("The meaning of life...")
+	defer func(start time.Time) {
+		t.Log(time.Since(start))
+	}(time.Now())
+
+	locker := lock.New(db)
+
+	// We intentionally forget to unlock Lock1, which will lock forever.
+	// But it didn't because we are smart and added a timeout.
+	ctx, cancel := context.WithTimeout(ctx, 1*time.Second)
+	defer cancel()
+
+	// Lock1 locks the key successfully. Forgetting to call unlock locks the key
+	// forever unless a timeout is set.
+	_, err := locker.TryLock(ctx, key)
+	assert.False(errors.Is(err, lock.ErrAlreadyLocked))
+
+	// Lock2 fails when locking the same key.
+	unlock2, err := locker.TryLock(ctx, key)
+	defer unlock2()
+	assert.True(errors.Is(err, lock.ErrAlreadyLocked))
+	t.Log(err)
+
+	// Although we sleep for 2s, the Lock1 is unlocked after 1s.
+	time.Sleep(2 * time.Second)
 }
 
 func migrate(db *sql.DB) error {
@@ -290,7 +328,7 @@ func assertNoRows(t *testing.T, repo *numberRepo, n int) {
 	t.Helper()
 
 	i, err := repo.Find(context.Background(), n)
-	assert.ErrorIs(t, err, sql.ErrNoRows)
+	assert.ErrorIs(t, err, sql.ErrNoRows, err)
 	assert.Equal(t, 0, i)
 }
 

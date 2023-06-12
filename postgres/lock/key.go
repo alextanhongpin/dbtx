@@ -2,36 +2,68 @@ package lock
 
 import (
 	"fmt"
-	"math/big"
+	"hash/fnv"
 )
 
-type Key interface {
-	fmt.Stringer
-	isKey()
+type Key struct {
+	x, y uint32
+	z    uint64
+	pair bool
+	repr string
 }
 
-type bigIntKey struct {
-	b *BigInt
+func NewIntKey(z uint64) *Key {
+	return &Key{
+		z:    z,
+		repr: fmt.Sprintf("Key(%d)", z),
+	}
 }
 
-func BigIntKey(n *big.Int) *bigIntKey {
-	return &bigIntKey{&BigInt{n: n}}
+func NewIntKeyPair(x, y uint32) *Key {
+	return &Key{
+		x:    x,
+		y:    y,
+		pair: true,
+		repr: fmt.Sprintf("Key(%d, %d)", x, y),
+	}
 }
 
-func (*bigIntKey) isKey() {}
-func (key *bigIntKey) String() string {
-	return fmt.Sprintf("Key(%s)", key.b.n.String())
+func (k *Key) String() string {
+	return k.repr
 }
 
-type intKey struct {
-	m, n int
+func NewStrKey(z string) *Key {
+	return &Key{
+		z:    Hash64(z),
+		repr: fmt.Sprintf("Key(%q)", z),
+	}
 }
 
-func IntKey(m, n int) *intKey {
-	return &intKey{m, n}
+func NewStrKeyPair(x, y string) *Key {
+	return &Key{
+		x:    Hash32(x),
+		y:    Hash32(y),
+		pair: true,
+		repr: fmt.Sprintf("Key(%q, %q)", x, y),
+	}
 }
 
-func (*intKey) isKey() {}
-func (key *intKey) String() string {
-	return fmt.Sprintf("Key(%d, %d)", key.m, key.n)
+func Hash32(key string) uint32 {
+	hash := fnv.New32()
+	_, err := hash.Write([]byte(key))
+	if err != nil {
+		panic(err)
+	}
+
+	return hash.Sum32()
+}
+
+func Hash64(key string) uint64 {
+	hash := fnv.New64()
+	_, err := hash.Write([]byte(key))
+	if err != nil {
+		panic(err)
+	}
+
+	return hash.Sum64()
 }

@@ -3,7 +3,7 @@ module github.com/alextanhongpin/dbtx
 go 1.18
 
 require (
-	github.com/alextanhongpin/core v0.0.0-20230607152421-928214424147
+	github.com/alextanhongpin/core v0.0.0-20230611075134-7931f56f7ac2
 	github.com/lib/pq v1.10.9
 	github.com/stretchr/testify v1.8.2
 	github.com/uptrace/bun v1.1.14
