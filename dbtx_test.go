@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"math"
 	"os"
 	"sync"
 	"testing"
@@ -193,11 +194,17 @@ func TestAtomicIntKeyPairLocked(t *testing.T) {
 	}
 }
 
-func TestAtomicIntLockKey(t *testing.T) {
+func TestAtomicLockBoundary(t *testing.T) {
+	assert := assert.New(t)
+
 	db := containers.PostgresDB(t)
 	tx := dbtx.New(db)
 	err := tx.RunInTx(context.Background(), func(ctx context.Context) error {
-		return lock.Lock(ctx, lock.NewIntKey(10))
+		assert.Nil(lock.Lock(ctx, lock.NewIntKeyPair(math.MinInt32, math.MaxInt32)))
+		assert.Nil(lock.Lock(ctx, lock.NewIntKey(math.MinInt64)))
+		assert.Nil(lock.Lock(ctx, lock.NewIntKey(math.MaxInt64)))
+
+		return nil
 	})
 	if err != nil {
 		t.Error(err)
