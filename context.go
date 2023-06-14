@@ -70,7 +70,9 @@ func IsTx(ctx context.Context) bool {
 
 // Tx returns the DBTX from the context, only if the underlying type is a
 // *sql.Tx.
-func Tx(ctx context.Context) (*sql.Tx, bool) {
+// We still return the DBTX interface here, to avoid client from manually
+// calling the tx.Commit.
+func Tx(ctx context.Context) (DBTX, bool) {
 	atmCtx, ok := Value(ctx)
 	if ok && atmCtx.IsTx() {
 		return atmCtx.tx, true

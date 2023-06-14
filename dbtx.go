@@ -30,7 +30,7 @@ type atomic interface {
 	IsTx() bool
 	DBTx(ctx context.Context) DBTX
 	DB() *sql.DB
-	Tx(ctx context.Context) *sql.Tx
+	Tx(ctx context.Context) DBTX
 	RunInTx(ctx context.Context, fn func(txCtx context.Context) error) (err error)
 }
 
@@ -70,8 +70,11 @@ func (a *Atomic) DB() *sql.DB {
 	return a.db
 }
 
-// Tx returns the *sql.Tx from context.
-func (a *Atomic) Tx(ctx context.Context) *sql.Tx {
+// Tx returns the *sql.Tx from context. The return type is still a DBTX
+// interface to avoid client from calling tx.Commit.
+// When dealing with nested transaction, only the parent of the transaction can
+// commit the transaction.
+func (a *Atomic) Tx(ctx context.Context) DBTX {
 	atm, ok := Value(ctx)
 	if ok && atm.IsTx() {
 		return atm.tx
