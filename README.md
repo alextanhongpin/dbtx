@@ -12,7 +12,7 @@ type atomic interface {
 	IsTx() bool
 	DBTx(ctx context.Context) DBTX
 	DB(ctx context.Context) DBTX
-	Tx(ctx context.Context) *sql.Tx
+	Tx(ctx context.Context) DBTX
 	RunInTx(ctx context.Context, fn func(txCtx context.Context) error) (err error)
 }
 ```
