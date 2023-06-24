@@ -29,7 +29,7 @@ type DBTX interface {
 type atomic interface {
 	IsTx() bool
 	DBTx(ctx context.Context) DBTX
-	DB() *sql.DB
+	DB(ctx context.Context) DBTX
 	Tx(ctx context.Context) DBTX
 	RunInTx(ctx context.Context, fn func(txCtx context.Context) error) (err error)
 }
@@ -56,18 +56,22 @@ func New(db *sql.DB) *Atomic {
 func (a *Atomic) DBTx(ctx context.Context) DBTX {
 	atm, ok := Value(ctx)
 	if ok {
-		return atm.underlying()
+		return atm.underlying(ctx)
 	}
 
-	return a.underlying()
+	return a.underlying(ctx)
 }
 
-func (a *Atomic) DB() *sql.DB {
+// DB returns the underlying *sql.DB as DBTX interface, to avoid the caller to
+// init a new transaction.
+// This also allows wrapping the *sql.DB with other implementations, such as
+// recorder.
+func (a *Atomic) DB(ctx context.Context) DBTX {
 	if a.IsTx() {
 		panic(ErrIsTransaction)
 	}
 
-	return a.db
+	return a.underlying(ctx)
 }
 
 // Tx returns the *sql.Tx from context. The return type is still a DBTX
@@ -77,7 +81,7 @@ func (a *Atomic) DB() *sql.DB {
 func (a *Atomic) Tx(ctx context.Context) DBTX {
 	atm, ok := Value(ctx)
 	if ok && atm.IsTx() {
-		return atm.tx
+		return atm.underlying(ctx)
 	}
 
 	panic(ErrNonTransaction)
@@ -125,12 +129,21 @@ func RunInTx(ctx context.Context, db *sql.DB, opt *sql.TxOptions, fn func(tx *sq
 }
 
 // underlying returns the underlying db client.
-func (a *Atomic) underlying() DBTX {
+func (a *Atomic) underlying(ctx context.Context) DBTX {
 	if a.IsTx() {
-		return a.tx
+		return a.withLogger(ctx, a.tx)
 	}
 
-	return a.db
+	return a.withLogger(ctx, a.db)
+}
+
+func (a *Atomic) withLogger(ctx context.Context, dbtx DBTX) DBTX {
+	l, ok := LoggerValue(ctx)
+	if ok {
+		return NewRecorder(dbtx, l)
+	}
+
+	return dbtx
 }
 
 // IsTx returns true if the underlying type is a transaction.

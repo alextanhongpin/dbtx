@@ -16,6 +16,7 @@ var (
 	readOnlyContextKey       = contextKey("ro_ctx")
 	isolationLevelContextKey = contextKey("iso_ctx")
 	depthContextKey          = contextKey("depth_ctx")
+	loggerContextKey         = contextKey("log_ctx")
 )
 
 func Value(ctx context.Context) (*Atomic, bool) {
@@ -75,7 +76,7 @@ func IsTx(ctx context.Context) bool {
 func Tx(ctx context.Context) (DBTX, bool) {
 	atmCtx, ok := Value(ctx)
 	if ok && atmCtx.IsTx() {
-		return atmCtx.tx, true
+		return atmCtx.underlying(ctx), true
 	}
 
 	return nil, false
@@ -86,8 +87,17 @@ func Tx(ctx context.Context) (DBTX, bool) {
 func DBTx(ctx context.Context) (DBTX, bool) {
 	atmCtx, ok := Value(ctx)
 	if ok {
-		return atmCtx.underlying(), true
+		return atmCtx.underlying(ctx), true
 	}
 
 	return nil, false
+}
+
+func WithLoggerValue(ctx context.Context, l logger) context.Context {
+	return context.WithValue(ctx, loggerContextKey, l)
+}
+
+func LoggerValue(ctx context.Context) (logger, bool) {
+	l, ok := ctx.Value(loggerContextKey).(logger)
+	return l, ok
 }

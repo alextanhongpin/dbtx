@@ -11,7 +11,7 @@ Unit of Work implementation with golang. Abstracts the complexity in setting tra
 type atomic interface {
 	IsTx() bool
 	DBTx(ctx context.Context) DBTX
-	DB() *sql.DB
+	DB(ctx context.Context) DBTX
 	Tx(ctx context.Context) *sql.Tx
 	RunInTx(ctx context.Context, fn func(txCtx context.Context) error) (err error)
 }

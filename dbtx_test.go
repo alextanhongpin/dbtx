@@ -39,6 +39,28 @@ func TestSQL(t *testing.T) {
 	assert.Equal(t, 2, n)
 }
 
+func TestLoggerContext(t *testing.T) {
+	db := pgtest.DB(t)
+	atm := dbtx.New(db)
+	ctx := context.Background()
+	logger := &InMemoryLogger{}
+	ctx = dbtx.WithLoggerValue(ctx, logger)
+
+	var n int
+	if err := atm.DB(ctx).QueryRow("select 1 + $1", 1).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	assert.Equal(t, 2, n)
+
+	var m int
+	atm.RunInTx(ctx, func(ctx context.Context) error {
+		return atm.Tx(ctx).QueryRow("select 2 + $1", 2).Scan(&m)
+	})
+	assert.Equal(t, 4, m)
+
+	t.Log(logger.Logs)
+}
+
 func TestAtomicContext(t *testing.T) {
 	db := pgtest.DB(t)
 	atm := dbtx.New(db)
@@ -373,4 +395,22 @@ func (r *numberRepo) Create(ctx context.Context, n int) (int64, error) {
 	}
 
 	return rows, nil
+}
+
+type Log struct {
+	Method string
+	Query  string
+	Args   []any
+}
+
+type InMemoryLogger struct {
+	Logs []Log
+}
+
+func (l *InMemoryLogger) Log(method, query string, args ...any) {
+	l.Logs = append(l.Logs, Log{
+		Method: method,
+		Query:  query,
+		Args:   args,
+	})
 }
