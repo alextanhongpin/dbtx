@@ -7,7 +7,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/alextanhongpin/core/test/containers"
+	"github.com/alextanhongpin/core/storage/pg/pgtest"
 	"github.com/alextanhongpin/dbtx/buntx"
 	_ "github.com/lib/pq"
 )
@@ -15,14 +15,14 @@ import (
 const postgresVersion = "15.1-alpine"
 
 func TestMain(m *testing.M) {
-	stop := containers.StartPostgres(postgresVersion, migrate)
+	stop := pgtest.InitDB(postgresVersion, migrate)
 	code := m.Run()
 	stop() // os.Exit does not care about defer.
 	os.Exit(code)
 }
 
 func TestBun(t *testing.T) {
-	bunDB := containers.PostgresBunDB(t)
+	bunDB := pgtest.BunDB(t)
 	// Setup unit of work.
 	u := buntx.New(bunDB)
 	ctx := context.Background()

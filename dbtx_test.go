@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alextanhongpin/core/test/containers"
+	"github.com/alextanhongpin/core/storage/pg/pgtest"
 	"github.com/alextanhongpin/dbtx"
 	"github.com/alextanhongpin/dbtx/postgres/lock"
 	_ "github.com/lib/pq"
@@ -22,7 +22,7 @@ const postgresVersion = "15.1-alpine"
 var ErrIntentional = errors.New("intentional error")
 
 func TestMain(m *testing.M) {
-	stop := containers.StartPostgres(postgresVersion, migrate)
+	stop := pgtest.InitDB(pgtest.Tag(postgresVersion), pgtest.Hook(migrate))
 	code := m.Run()
 	stop()
 	os.Exit(code)
@@ -30,7 +30,7 @@ func TestMain(m *testing.M) {
 
 func TestSQL(t *testing.T) {
 	var n int
-	db := containers.PostgresDB(t)
+	db := pgtest.DB(t)
 	err := db.QueryRow("select 1 + 1").Scan(&n)
 	if err != nil {
 		t.Fatal(err)
@@ -40,7 +40,7 @@ func TestSQL(t *testing.T) {
 }
 
 func TestAtomicContext(t *testing.T) {
-	db := containers.PostgresDB(t)
+	db := pgtest.DB(t)
 	atm := dbtx.New(db)
 	ctx := context.Background()
 
@@ -85,7 +85,7 @@ func TestAtomicContext(t *testing.T) {
 func TestAtomic(t *testing.T) {
 	assert := assert.New(t)
 
-	db := containers.PostgresDB(t)
+	db := pgtest.DB(t)
 	atm := dbtx.New(db)
 	ctx := context.Background()
 
@@ -104,7 +104,7 @@ func TestAtomic(t *testing.T) {
 func TestPanic(t *testing.T) {
 	assert := assert.New(t)
 
-	db := containers.PostgresDB(t)
+	db := pgtest.DB(t)
 	atm := dbtx.New(db)
 	ctx := context.Background()
 
@@ -125,7 +125,7 @@ func TestPanic(t *testing.T) {
 // transaction.
 func TestAtomicNested(t *testing.T) {
 	assert := assert.New(t)
-	db := containers.PostgresDB(t)
+	db := pgtest.DB(t)
 	atm := dbtx.New(db)
 	ctx0 := context.Background()
 	assert.Equal(0, dbtx.Depth(ctx0))
@@ -155,7 +155,7 @@ func TestAtomicNested(t *testing.T) {
 }
 
 func TestAtomicIntKeyPair(t *testing.T) {
-	db := containers.PostgresDB(t)
+	db := pgtest.DB(t)
 	tx := dbtx.New(db)
 	err := tx.RunInTx(context.Background(), func(ctx context.Context) error {
 		return lock.Lock(ctx, lock.NewIntKeyPair(1, 2))
@@ -166,7 +166,7 @@ func TestAtomicIntKeyPair(t *testing.T) {
 }
 
 func TestAtomicIntKeyPairLocked(t *testing.T) {
-	db := containers.PostgresDB(t)
+	db := pgtest.DB(t)
 	tx := dbtx.New(db)
 	err := tx.RunInTx(context.Background(), func(txCtx context.Context) error {
 		err := lock.TryLock(txCtx, lock.NewIntKeyPair(1, 1))
@@ -197,7 +197,7 @@ func TestAtomicIntKeyPairLocked(t *testing.T) {
 func TestAtomicLockBoundary(t *testing.T) {
 	assert := assert.New(t)
 
-	db := containers.PostgresDB(t)
+	db := pgtest.DB(t)
 	tx := dbtx.New(db)
 	err := tx.RunInTx(context.Background(), func(ctx context.Context) error {
 		assert.Nil(lock.Lock(ctx, lock.NewIntKeyPair(math.MinInt32, math.MaxInt32)))
@@ -212,7 +212,7 @@ func TestAtomicLockBoundary(t *testing.T) {
 }
 
 func TestAtomicIntLockKeyLocked(t *testing.T) {
-	db := containers.PostgresDB(t)
+	db := pgtest.DB(t)
 	atm := dbtx.New(db)
 	key := lock.NewIntKey(10)
 
@@ -275,7 +275,7 @@ func TestAtomicIntLockKeyLocked(t *testing.T) {
 func TestAtomicLocker(t *testing.T) {
 	assert := assert.New(t)
 
-	db := containers.PostgresDB(t)
+	db := pgtest.DB(t)
 
 	// Arrange.
 	ctx := context.Background()
