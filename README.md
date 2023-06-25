@@ -285,7 +285,7 @@ func (uc *UserUsecase) CreateUser(ctx, email string) error {
 		return err
 	}
 
-	if err := uc.CreateUser(ctx, tx, email); err != nil {
+	if err := uc.CreateUserTx(ctx, tx, email); err != nil {
 		return err
 	}
 
