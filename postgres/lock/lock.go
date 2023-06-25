@@ -35,8 +35,8 @@ func (l *Locker) lock(ctx context.Context, key *Key, lockFn func(ctx context.Con
 	ch := make(chan error)
 
 	go func() {
-		_ = dbtx.RunInTx(ctx, l.db, nil, func(tx *sql.Tx) error {
-			txCtx := dbtx.WithValue(ctx, dbtx.NewTx(tx))
+		atm := dbtx.New(l.db)
+		atm.RunInTx(ctx, func(txCtx context.Context) error {
 			err := lockFn(txCtx, key)
 			ch <- err
 			// If there is an error, just end early.
@@ -57,12 +57,11 @@ func (l *Locker) lock(ctx context.Context, key *Key, lockFn func(ctx context.Con
 // will wait for the previous operation to complete.
 // Lock must be run within a transaction context, panics otherwise.
 func Lock(ctx context.Context, key *Key) error {
-	txCtx := dbtx.MustValue(ctx)
-	if !txCtx.IsTx() {
+	tx, ok := dbtx.Tx(ctx)
+	if !ok {
 		return fmt.Errorf("%w: %s", ErrLockOutsideTx, key)
 	}
 
-	tx := txCtx.Tx(ctx)
 	if key.pair {
 		_, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1, $2)`, key.x, key.y)
 		return err
@@ -76,26 +75,24 @@ func Lock(ctx context.Context, key *Key) error {
 // the first will succeed. The rest will fail with the error ErrAlreadyLocked.
 // TryLock must be run within a transaction context, panics otherwise.
 func TryLock(ctx context.Context, key *Key) error {
-	txCtx := dbtx.MustValue(ctx)
-	if !txCtx.IsTx() {
+	tx, ok := dbtx.Tx(ctx)
+	if !ok {
 		return fmt.Errorf("%w: %s", ErrLockOutsideTx, key)
 	}
 
-	tx := txCtx.Tx(ctx)
-
 	// locked will be true if the key is locked successfully.
-	var locked bool
+	var isLockAcquired bool
 	var err error
 	if key.pair {
-		err = tx.QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock($1, $2)`, key.x, key.y).Scan(&locked)
+		err = tx.QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock($1, $2)`, key.x, key.y).Scan(&isLockAcquired)
 	} else {
-		err = tx.QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock($1)`, key.z).Scan(&locked)
+		err = tx.QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock($1)`, key.z).Scan(&isLockAcquired)
 	}
 	if err != nil {
 		return err
 	}
 
-	if !locked {
+	if !isLockAcquired {
 		return fmt.Errorf("%w: %s", ErrAlreadyLocked, key)
 	}
 

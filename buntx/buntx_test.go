@@ -15,7 +15,7 @@ import (
 const postgresVersion = "15.1-alpine"
 
 func TestMain(m *testing.M) {
-	stop := pgtest.InitDB(postgresVersion, migrate)
+	stop := pgtest.InitDB(pgtest.Tag(postgresVersion), pgtest.Hook(migrate))
 	code := m.Run()
 	stop() // os.Exit does not care about defer.
 	os.Exit(code)

@@ -18,7 +18,7 @@ type DBTX = bun.IDB
 type atomic interface {
 	IsTx() bool
 	DBTx(ctx context.Context) DBTX
-	DB() DBTX
+	DB(ctx context.Context) DBTX
 	Tx(ctx context.Context) DBTX
 	RunInTx(ctx context.Context, fn func(context.Context) error) error
 }
@@ -29,7 +29,6 @@ var _ atomic = (*Atomic)(nil)
 type Atomic struct {
 	db *bun.DB
 	tx *bun.Tx
-	//db bun.IDB
 }
 
 func New(db *bun.DB) *Atomic {
@@ -44,7 +43,7 @@ func (a *Atomic) IsTx() bool {
 
 func (a *Atomic) DBTx(ctx context.Context) bun.IDB {
 	atm, ok := Value(ctx)
-	if ok {
+	if ok && atm.IsTx() {
 		return atm.underlying()
 	}
 
@@ -53,19 +52,19 @@ func (a *Atomic) DBTx(ctx context.Context) bun.IDB {
 
 func (a *Atomic) Tx(ctx context.Context) bun.IDB {
 	atm, ok := Value(ctx)
-	if !ok && atm.IsTx() {
-		return atm.tx
+	if ok && atm.IsTx() {
+		return atm.underlying()
 	}
 
 	panic(ErrNonTransaction)
 }
 
-func (a *Atomic) DB() bun.IDB {
+func (a *Atomic) DB(ctx context.Context) bun.IDB {
 	if a.IsTx() {
 		panic(ErrIsTransaction)
 	}
 
-	return a.db
+	return a.underlying()
 }
 
 func (a *Atomic) RunInTx(ctx context.Context, fn func(ctx context.Context) error) error {

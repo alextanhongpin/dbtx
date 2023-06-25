@@ -40,11 +40,14 @@ func TestSQL(t *testing.T) {
 }
 
 func TestLoggerContext(t *testing.T) {
-	db := pgtest.DB(t)
-	atm := dbtx.New(db)
-	ctx := context.Background()
 	logger := &InMemoryLogger{}
-	ctx = dbtx.WithLoggerValue(ctx, logger)
+	withLogger := dbtx.Middleware(func(d dbtx.DBTX) dbtx.DBTX {
+		return dbtx.NewRecorder(d, logger)
+	})
+
+	db := pgtest.DB(t)
+	atm := dbtx.New(db, withLogger)
+	ctx := context.Background()
 
 	var n int
 	if err := atm.DB(ctx).QueryRow("select 1 + $1", 1).Scan(&n); err != nil {

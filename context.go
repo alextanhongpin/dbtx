@@ -16,7 +16,6 @@ var (
 	readOnlyContextKey       = contextKey("ro_ctx")
 	isolationLevelContextKey = contextKey("iso_ctx")
 	depthContextKey          = contextKey("depth_ctx")
-	loggerContextKey         = contextKey("log_ctx")
 )
 
 func Value(ctx context.Context) (*Atomic, bool) {
@@ -91,13 +90,4 @@ func DBTx(ctx context.Context) (DBTX, bool) {
 	}
 
 	return nil, false
-}
-
-func WithLoggerValue(ctx context.Context, l logger) context.Context {
-	return context.WithValue(ctx, loggerContextKey, l)
-}
-
-func LoggerValue(ctx context.Context) (logger, bool) {
-	l, ok := ctx.Value(loggerContextKey).(logger)
-	return l, ok
 }

@@ -39,14 +39,16 @@ var _ atomic = (*Atomic)(nil)
 
 // Atomic represents a unit of work.
 type Atomic struct {
-	tx *sql.Tx
-	db *sql.DB
+	tx   *sql.Tx
+	db   *sql.DB
+	opts []Option
 }
 
 // New returns a pointer to Atomic.
-func New(db *sql.DB) *Atomic {
+func New(db *sql.DB, opts ...Option) *Atomic {
 	return &Atomic{
-		db: db,
+		db:   db,
+		opts: opts,
 	}
 }
 
@@ -101,7 +103,7 @@ func (a *Atomic) RunInTx(ctx context.Context, fn func(context.Context) error) (e
 	}
 
 	return RunInTx(ctx, a.db, TxOptions(ctx), func(tx *sql.Tx) error {
-		return fn(WithValue(ctx, NewTx(tx)))
+		return fn(WithValue(ctx, NewTx(tx, a.opts...)))
 	})
 }
 
@@ -131,16 +133,18 @@ func RunInTx(ctx context.Context, db *sql.DB, opt *sql.TxOptions, fn func(tx *sq
 // underlying returns the underlying db client.
 func (a *Atomic) underlying(ctx context.Context) DBTX {
 	if a.IsTx() {
-		return a.withLogger(ctx, a.tx)
+		return a.apply(a.tx)
 	}
 
-	return a.withLogger(ctx, a.db)
+	return a.apply(a.db)
 }
 
-func (a *Atomic) withLogger(ctx context.Context, dbtx DBTX) DBTX {
-	l, ok := LoggerValue(ctx)
-	if ok {
-		return NewRecorder(dbtx, l)
+func (a *Atomic) apply(dbtx DBTX) DBTX {
+	for _, opt := range a.opts {
+		switch t := (opt).(type) {
+		case Middleware:
+			dbtx = t(dbtx)
+		}
 	}
 
 	return dbtx
@@ -152,8 +156,9 @@ func (a *Atomic) IsTx() bool {
 }
 
 // NewTx returns a Atomic with transaction.
-func NewTx(tx *sql.Tx) *Atomic {
+func NewTx(tx *sql.Tx, opts ...Option) *Atomic {
 	return &Atomic{
-		tx: tx,
+		tx:   tx,
+		opts: opts,
 	}
 }
