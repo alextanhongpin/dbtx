@@ -41,12 +41,13 @@ func TestSQL(t *testing.T) {
 
 func TestLoggerContext(t *testing.T) {
 	logger := &InMemoryLogger{}
-	withLogger := dbtx.Middleware(func(d dbtx.DBTX) dbtx.DBTX {
-		return dbtx.NewRecorder(d, logger)
-	})
+	tracer := &InMemoryTracer{}
 
 	db := pgtest.DB(t)
-	atm := dbtx.New(db, withLogger)
+	atm := dbtx.New(db,
+		dbtx.WithLogger(logger),
+		dbtx.WithTracer(tracer),
+	)
 	ctx := context.Background()
 
 	var n int
@@ -61,7 +62,11 @@ func TestLoggerContext(t *testing.T) {
 	})
 	assert.Equal(t, 4, m)
 
+	t.Log("LOG")
 	t.Log(logger.Logs)
+
+	t.Log("TRACE")
+	t.Log(tracer.Events)
 }
 
 func TestAtomicContext(t *testing.T) {
@@ -410,10 +415,18 @@ type InMemoryLogger struct {
 	Logs []Log
 }
 
-func (l *InMemoryLogger) Log(method, query string, args ...any) {
+func (l *InMemoryLogger) Log(ctx context.Context, method, query string, args ...any) {
 	l.Logs = append(l.Logs, Log{
 		Method: method,
 		Query:  query,
 		Args:   args,
 	})
+}
+
+type InMemoryTracer struct {
+	Events []dbtx.Event
+}
+
+func (l *InMemoryTracer) Trace(ctx context.Context, event dbtx.Event) {
+	l.Events = append(l.Events, event)
 }
