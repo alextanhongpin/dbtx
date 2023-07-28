@@ -17,12 +17,12 @@ func TestOutbox(t *testing.T) {
 	wf := &mockWriterFlusher{}
 	o := outbox.New(atm, wf)
 
-	msg := outbox.Message{
-		ID:            "fake-id",
-		AggregateID:   "aggregate-id",
-		AggregateType: "aggregate-type",
-		Type:          "event-type",
-		Payload:       json.RawMessage(`{}`),
+	msg := &message{
+		id:            "fake-id",
+		aggregateID:   "aggregate-id",
+		aggregateType: "aggregate-type",
+		typ:           "event-type",
+		payload:       json.RawMessage(`{}`),
 	}
 
 	assert := assert.New(t)
@@ -37,8 +37,9 @@ func TestOutbox(t *testing.T) {
 	})
 	assert.Nil(err)
 
-	assert.ElementsMatch(wf.flush, []outbox.Message{msg})
-	assert.ElementsMatch(wf.write, []outbox.Message{msg})
+	msgs := []outbox.Message{msg}
+	assert.ElementsMatch(wf.write, msgs)
+	assert.ElementsMatch(wf.flush, msgs)
 }
 
 type mockAtomic struct{}
@@ -60,4 +61,32 @@ func (m *mockWriterFlusher) Write(ctx context.Context, msgs []outbox.Message) er
 func (m *mockWriterFlusher) Flush(ctx context.Context, msgs []outbox.Message) error {
 	m.flush = msgs
 	return nil
+}
+
+type message struct {
+	id            string
+	aggregateID   string
+	aggregateType string
+	typ           string
+	payload       json.RawMessage
+}
+
+func (m *message) ID() string {
+	return m.id
+}
+
+func (m *message) AggregateID() string {
+	return m.aggregateID
+}
+
+func (m *message) AggregateType() string {
+	return m.aggregateType
+}
+
+func (m *message) Type() string {
+	return m.typ
+}
+
+func (m *message) Payload() json.RawMessage {
+	return m.payload
 }

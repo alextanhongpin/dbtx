@@ -78,11 +78,14 @@ func Value(ctx context.Context) (queuer, bool) {
 	return o, ok
 }
 
+// Message is an outbox message.
+// We use interface to allow hiding the actual message implementation.
+// The format is based on here:
 // https://debezium.io/blog/2019/02/19/reliable-microservices-data-exchange-with-the-outbox-pattern/
-type Message struct {
-	ID            string
-	AggregateID   string
-	AggregateType string
-	Type          string
-	Payload       json.RawMessage
+type Message interface {
+	ID() string
+	AggregateID() string
+	AggregateType() string
+	Type() string
+	Payload() json.RawMessage
 }
