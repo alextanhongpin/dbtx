@@ -4,6 +4,7 @@ go 1.18
 
 require (
 	github.com/alextanhongpin/core v0.0.0-20230624162651-f3c1ae694478
+	github.com/jmoiron/sqlx v1.3.5
 	github.com/lib/pq v1.10.9
 	github.com/stretchr/testify v1.8.4
 	github.com/uptrace/bun v1.1.14
@@ -49,7 +50,7 @@ require (
 	github.com/xeipuuv/gojsonschema v1.2.0 // indirect
 	golang.org/x/crypto v0.10.0 // indirect
 	golang.org/x/mod v0.11.0 // indirect
-	golang.org/x/sys v0.9.0 // indirect
+	golang.org/x/sys v0.10.0 // indirect
 	golang.org/x/tools v0.10.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
