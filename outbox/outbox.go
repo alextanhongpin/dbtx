@@ -13,19 +13,17 @@ type atomic interface {
 	RunInTx(ctx context.Context, fn func(txCtx context.Context) error) (err error)
 }
 
-// flusher flush the messages after it has been written.
+// flusher flushes the outbox events that are already written to the persistent
+// storage.
+// The events can be flushed to a message broker, or a queue.
 type flusher interface {
-	Flush(ctx context.Context, messages []Message) error
+	Flush(ctx context.Context, events []Event) error
 }
 
-// write writes the outbox messages to a persistent
-// storage which supports transaction.
+// writer writes the outbox events to a persistent storage which supports
+// transaction.
 type writer interface {
-	Write(ctx context.Context, messages []Message) error
-}
-
-type queuer interface {
-	Queue(msgs ...Message)
+	Write(ctx context.Context, events []Event) error
 }
 
 type writerFlusher interface {
@@ -48,41 +46,89 @@ func New(atm atomic, wf writerFlusher) *Outbox {
 func (o *Outbox) RunInTx(ctx context.Context, fn func(context.Context) error) error {
 	ob := new(outbox)
 	err := o.atomic.RunInTx(ctx, func(txCtx context.Context) error {
-		if err := fn(withValue(txCtx, ob)); err != nil {
+		txCtx = context.WithValue(txCtx, outboxCtxKey, ob)
+		if err := fn(txCtx); err != nil {
 			return err
 		}
 
-		return o.Write(txCtx, ob.messages)
+		return o.Write(txCtx, ob.events)
 	})
 	if err != nil {
 		return err
 	}
 
-	return o.Flush(ctx, ob.messages)
+	return o.Flush(ctx, ob.events)
 }
 
 type outbox struct {
-	messages []Message
+	events []Event
 }
 
-func (o *outbox) Queue(msg ...Message) {
-	o.messages = append(o.messages, msg...)
+func (o *outbox) Queue(evt ...Event) {
+	o.events = append(o.events, evt...)
 }
 
-func withValue(ctx context.Context, o *outbox) context.Context {
-	return context.WithValue(ctx, outboxCtxKey, o)
-}
-
-func Value(ctx context.Context) (queuer, bool) {
+// Enqueue enqueues the events to the outbox.
+func Enqueue(ctx context.Context, evt ...Event) bool {
 	o, ok := ctx.Value(outboxCtxKey).(*outbox)
-	return o, ok
+	if ok {
+		o.Queue(evt...)
+	}
+
+	return ok
 }
 
-// Message is an outbox message.
-// We use interface to allow hiding the actual message implementation.
+type Message struct {
+	ID            string
+	AggregateID   string
+	AggregateType string
+	Typ           string
+	Payload       json.RawMessage
+}
+
+func (m *Message) AsEvent() Event {
+	return &event{
+		id:            m.ID,
+		aggregateID:   m.AggregateID,
+		aggregateType: m.AggregateType,
+		typ:           m.Typ,
+		payload:       m.Payload,
+	}
+}
+
+type event struct {
+	id            string
+	aggregateID   string
+	aggregateType string
+	typ           string
+	payload       json.RawMessage
+}
+
+func (e *event) ID() string {
+	return e.id
+}
+
+func (e *event) AggregateID() string {
+	return e.aggregateID
+}
+
+func (e *event) AggregateType() string {
+	return e.aggregateType
+}
+
+func (e *event) Type() string {
+	return e.typ
+}
+
+func (e *event) Payload() json.RawMessage {
+	return e.payload
+}
+
+// Event is an outbox event.
+// We use interface to allow hiding the actual event implementation.
 // The format is based on here:
 // https://debezium.io/blog/2019/02/19/reliable-microservices-data-exchange-with-the-outbox-pattern/
-type Message interface {
+type Event interface {
 	ID() string
 	AggregateID() string
 	AggregateType() string

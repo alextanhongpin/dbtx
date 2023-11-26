@@ -17,29 +17,27 @@ func TestOutbox(t *testing.T) {
 	wf := &mockWriterFlusher{}
 	o := outbox.New(atm, wf)
 
-	msg := &message{
-		id:            "fake-id",
-		aggregateID:   "aggregate-id",
-		aggregateType: "aggregate-type",
-		typ:           "event-type",
-		payload:       json.RawMessage(`{}`),
+	msg := &outbox.Message{
+		ID:            "fake-id",
+		AggregateID:   "aggregate-id",
+		AggregateType: "aggregate-type",
+		Typ:           "event-type",
+		Payload:       json.RawMessage(`{}`),
 	}
 
-	assert := assert.New(t)
+	is := assert.New(t)
 	err := o.RunInTx(ctx, func(txCtx context.Context) error {
-		ob, ok := outbox.Value(txCtx)
-		if !ok {
+		if ok := outbox.Enqueue(txCtx, msg.AsEvent()); !ok {
 			return errors.New("outbox not found")
 		}
-		ob.Queue(msg)
 
 		return nil
 	})
-	assert.Nil(err)
+	is.Nil(err)
 
-	msgs := []outbox.Message{msg}
-	assert.ElementsMatch(wf.write, msgs)
-	assert.ElementsMatch(wf.flush, msgs)
+	events := []outbox.Event{msg.AsEvent()}
+	is.ElementsMatch(wf.write, events)
+	is.ElementsMatch(wf.flush, events)
 }
 
 type mockAtomic struct{}
@@ -49,44 +47,16 @@ func (m *mockAtomic) RunInTx(ctx context.Context, fn func(ctx context.Context) e
 }
 
 type mockWriterFlusher struct {
-	write []outbox.Message
-	flush []outbox.Message
+	write []outbox.Event
+	flush []outbox.Event
 }
 
-func (m *mockWriterFlusher) Write(ctx context.Context, msgs []outbox.Message) error {
-	m.write = msgs
+func (m *mockWriterFlusher) Write(ctx context.Context, events []outbox.Event) error {
+	m.write = events
 	return nil
 }
 
-func (m *mockWriterFlusher) Flush(ctx context.Context, msgs []outbox.Message) error {
-	m.flush = msgs
+func (m *mockWriterFlusher) Flush(ctx context.Context, events []outbox.Event) error {
+	m.flush = events
 	return nil
-}
-
-type message struct {
-	id            string
-	aggregateID   string
-	aggregateType string
-	typ           string
-	payload       json.RawMessage
-}
-
-func (m *message) ID() string {
-	return m.id
-}
-
-func (m *message) AggregateID() string {
-	return m.aggregateID
-}
-
-func (m *message) AggregateType() string {
-	return m.aggregateType
-}
-
-func (m *message) Type() string {
-	return m.typ
-}
-
-func (m *message) Payload() json.RawMessage {
-	return m.payload
 }
