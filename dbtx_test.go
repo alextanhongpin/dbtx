@@ -41,32 +41,28 @@ func TestSQL(t *testing.T) {
 
 func TestLoggerContext(t *testing.T) {
 	logger := &InMemoryLogger{}
-	tracer := &InMemoryTracer{}
 
 	db := pgtest.DB(t)
 	atm := dbtx.New(db,
 		dbtx.WithLogger(logger),
-		dbtx.WithTracer(tracer),
 	)
 	ctx := context.Background()
 
 	var n int
-	if err := atm.DB(ctx).QueryRow("select 1 + $1", 1).Scan(&n); err != nil {
+	if err := atm.DB().QueryRow("select 1 + $1", 1).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	assert.Equal(t, 2, n)
 
 	var m int
-	atm.RunInTx(ctx, func(ctx context.Context) error {
+	err := atm.RunInTx(ctx, func(ctx context.Context) error {
 		return atm.Tx(ctx).QueryRow("select 2 + $1", 2).Scan(&m)
 	})
+	assert.Nil(t, err)
 	assert.Equal(t, 4, m)
 
 	t.Log("LOG")
 	t.Log(logger.Logs)
-
-	t.Log("TRACE")
-	t.Log(tracer.Events)
 }
 
 func TestAtomicContext(t *testing.T) {
@@ -92,17 +88,13 @@ func TestAtomicContext(t *testing.T) {
 	})
 
 	t.Run("Tx when not in tx context", func(t *testing.T) {
-		assert := assert.New(t)
-		_, ok := dbtx.Tx(ctx)
-		assert.False(ok)
+		assert.False(t, dbtx.IsTx(ctx))
 	})
 
 	t.Run("Tx when in tx context", func(t *testing.T) {
 		assert := assert.New(t)
 		err := atm.RunInTx(ctx, func(txCtx context.Context) error {
-			tx, ok := dbtx.Tx(txCtx)
-			assert.NotNil(tx)
-			assert.True(ok)
+			assert.True(dbtx.IsTx(txCtx))
 
 			return ErrIntentional
 		})
@@ -139,7 +131,7 @@ func TestPanic(t *testing.T) {
 	ctx := context.Background()
 
 	assert.Panics(func() {
-		atm.RunInTx(ctx, func(txCtx context.Context) error {
+		_ = atm.RunInTx(ctx, func(txCtx context.Context) error {
 			if err := assertCreated(t, newNumberRepo(atm), txCtx, 42); err != nil {
 				return err
 			}
@@ -147,39 +139,6 @@ func TestPanic(t *testing.T) {
 			panic("server error")
 		})
 	})
-
-	assertNoRows(t, newNumberRepo(atm), 42)
-}
-
-// TestAtomicNested tests if the nested operation is using the same
-// transaction.
-func TestAtomicNested(t *testing.T) {
-	assert := assert.New(t)
-	db := pgtest.DB(t)
-	atm := dbtx.New(db)
-	ctx0 := context.Background()
-	assert.Equal(0, dbtx.Depth(ctx0))
-
-	err := atm.RunInTx(ctx0, func(ctx1 context.Context) error {
-		assert.Equal(0, dbtx.Depth(ctx1))
-
-		return atm.RunInTx(ctx1, func(ctx2 context.Context) error {
-			assert.Equal(1, dbtx.Depth(ctx2))
-
-			return atm.RunInTx(ctx2, func(ctx3 context.Context) error {
-				assert.Equal(2, dbtx.Depth(ctx3))
-
-				if err := assertCreated(t, newNumberRepo(atm), ctx3, 42); err != nil {
-					return err
-				}
-
-				return ErrIntentional
-			})
-		})
-	})
-	if err != nil && !errors.Is(err, ErrIntentional) {
-		t.Error(err)
-	}
 
 	assertNoRows(t, newNumberRepo(atm), 42)
 }
@@ -310,30 +269,43 @@ func TestAtomicLocker(t *testing.T) {
 	// Arrange.
 	ctx := context.Background()
 	key := lock.NewStrKey("The meaning of life...")
-	defer func(start time.Time) {
-		t.Log(time.Since(start))
-	}(time.Now())
 
 	locker := lock.New(db)
 
-	// We intentionally forget to unlock Lock1, which will lock forever.
-	// But it didn't because we are smart and added a timeout.
-	ctx, cancel := context.WithTimeout(ctx, 1*time.Second)
-	defer cancel()
+	var wg sync.WaitGroup
+	wg.Add(2)
 
-	// Lock1 locks the key successfully. Forgetting to call unlock locks the key
-	// forever unless a timeout is set.
-	_, err := locker.TryLock(ctx, key)
-	assert.False(errors.Is(err, lock.ErrAlreadyLocked))
+	go func() {
+		defer wg.Done()
 
-	// Lock2 fails when locking the same key.
-	unlock2, err := locker.TryLock(ctx, key)
-	defer unlock2()
-	assert.True(errors.Is(err, lock.ErrAlreadyLocked))
-	t.Log(err)
+		var errTimeout = errors.New("timeout")
+		ctx, cancel := context.WithTimeoutCause(ctx, 1*time.Second, errTimeout)
+		defer cancel()
 
-	// Although we sleep for 2s, the Lock1 is unlocked after 1s.
-	time.Sleep(2 * time.Second)
+		// Lock1 locks the key successfully. Forgetting to call unlock locks the key
+		// forever unless a timeout is set.
+		err := locker.TryLock(ctx, key, func(ctx context.Context) error {
+			assert.True(dbtx.IsTx(ctx))
+			<-ctx.Done()
+			return context.Cause(ctx)
+		})
+		assert.ErrorIs(err, errTimeout)
+	}()
+
+	go func() {
+		defer wg.Done()
+
+		time.Sleep(10 * time.Millisecond)
+
+		// Lock2 fails when locking the same key.
+		err := locker.TryLock(ctx, key, func(ctx context.Context) error {
+			assert.True(dbtx.IsTx(ctx))
+			return nil
+		})
+		assert.ErrorIs(err, lock.ErrAlreadyLocked)
+	}()
+
+	wg.Wait()
 }
 
 func migrate(db *sql.DB) error {
@@ -421,12 +393,4 @@ func (l *InMemoryLogger) Log(ctx context.Context, method, query string, args ...
 		Query:  query,
 		Args:   args,
 	})
-}
-
-type InMemoryTracer struct {
-	Events []dbtx.Event
-}
-
-func (l *InMemoryTracer) Trace(ctx context.Context, event dbtx.Event) {
-	l.Events = append(l.Events, event)
 }

@@ -7,9 +7,7 @@ import (
 )
 
 var (
-	ErrNonTransaction    = errors.New("dbtx: underlying type is not a transaction")
-	ErrIsTransaction     = errors.New("dbtx: underlying type is transaction")
-	ErrNestedTransaction = errors.New("dbtx: transactions cannot be nested")
+	ErrNotTransaction = errors.New("dbtx: underlying type is not a transaction")
 )
 
 // DBTX represents the common db operations for both *sql.DB and *sql.Tx.
@@ -27,9 +25,8 @@ type DBTX interface {
 
 // atomic represents the database atomic operations in a transactions.
 type atomic interface {
-	IsTx() bool
 	DBTx(ctx context.Context) DBTX
-	DB(ctx context.Context) DBTX
+	DB() DBTX
 	Tx(ctx context.Context) DBTX
 	RunInTx(ctx context.Context, fn func(txCtx context.Context) error) (err error)
 }
@@ -39,16 +36,15 @@ var _ atomic = (*Atomic)(nil)
 
 // Atomic represents a unit of work.
 type Atomic struct {
-	tx   *sql.Tx
-	db   *sql.DB
-	opts []Option
+	db  *sql.DB
+	fns []func(DBTX) DBTX
 }
 
 // New returns a pointer to Atomic.
-func New(db *sql.DB, opts ...Option) *Atomic {
+func New(db *sql.DB, fns ...func(DBTX) DBTX) *Atomic {
 	return &Atomic{
-		db:   db,
-		opts: opts,
+		db:  db,
+		fns: fns,
 	}
 }
 
@@ -56,24 +52,20 @@ func New(db *sql.DB, opts ...Option) *Atomic {
 // *sql.Tx.
 // Returns the atomic underlying type if the context is empty.
 func (a *Atomic) DBTx(ctx context.Context) DBTX {
-	atm, ok := Value(ctx)
+	tx, ok := value(ctx)
 	if ok {
-		return atm.underlying(ctx)
+		return tx.underlying()
 	}
 
-	return a.underlying(ctx)
+	return a.DB()
 }
 
 // DB returns the underlying *sql.DB as DBTX interface, to avoid the caller to
 // init a new transaction.
 // This also allows wrapping the *sql.DB with other implementations, such as
 // recorder.
-func (a *Atomic) DB(ctx context.Context) DBTX {
-	if a.IsTx() {
-		panic(ErrIsTransaction)
-	}
-
-	return a.underlying(ctx)
+func (a *Atomic) DB() DBTX {
+	return apply(a.db, a.fns...)
 }
 
 // Tx returns the *sql.Tx from context. The return type is still a DBTX
@@ -81,12 +73,12 @@ func (a *Atomic) DB(ctx context.Context) DBTX {
 // When dealing with nested transaction, only the parent of the transaction can
 // commit the transaction.
 func (a *Atomic) Tx(ctx context.Context) DBTX {
-	atm, ok := Value(ctx)
-	if ok && atm.IsTx() {
-		return atm.underlying(ctx)
+	tx, ok := value(ctx)
+	if !ok {
+		panic(ErrNotTransaction)
 	}
 
-	panic(ErrNonTransaction)
+	return tx.underlying()
 }
 
 // RunInTx wraps the operation in a transaction. If a context containing tx is
@@ -94,71 +86,36 @@ func (a *Atomic) Tx(ctx context.Context) DBTX {
 // The transaction can only be committed by the parent.
 func (a *Atomic) RunInTx(ctx context.Context, fn func(context.Context) error) (err error) {
 	if IsTx(ctx) {
-		ctx = IncDepth(ctx)
 		return fn(ctx)
 	}
 
-	if a.IsTx() {
-		panic(ErrNestedTransaction)
-	}
-
-	return RunInTx(ctx, a.db, TxOptions(ctx), func(tx *sql.Tx) error {
-		return fn(WithValue(ctx, NewTx(tx, a.opts...)))
-	})
-}
-
-func RunInTx(ctx context.Context, db *sql.DB, opt *sql.TxOptions, fn func(tx *sql.Tx) error) (err error) {
-	tx, err := db.BeginTx(ctx, opt)
+	tx, err := a.db.BeginTx(ctx, TxOptions(ctx))
 	if err != nil {
 		return err
 	}
+	defer tx.Rollback()
 
-	defer func() {
-		if p := recover(); p != nil {
-			// A panic occur, rollback and repanic.
-			err = tx.Rollback()
-			panic(p)
-		} else if err != nil {
-			// Something went wrong, rollback, but keep the original error.
-			_ = tx.Rollback()
-		} else {
-			// Success, commit.
-			err = tx.Commit()
-		}
-	}()
-
-	return fn(tx)
-}
-
-// underlying returns the underlying db client.
-func (a *Atomic) underlying(ctx context.Context) DBTX {
-	if a.IsTx() {
-		return a.apply(a.tx)
+	ctx = withValue(ctx, &Tx{conn: tx, fns: a.fns})
+	if err := fn(ctx); err != nil {
+		return err
 	}
 
-	return a.apply(a.db)
+	return tx.Commit()
 }
 
-func (a *Atomic) apply(dbtx DBTX) DBTX {
-	for _, opt := range a.opts {
-		switch t := (opt).(type) {
-		case Middleware:
-			dbtx = t(dbtx)
-		}
+type Tx struct {
+	conn *sql.Tx
+	fns  []func(DBTX) DBTX
+}
+
+func (t *Tx) underlying() DBTX {
+	return apply(t.conn, t.fns...)
+}
+
+func apply(dbtx DBTX, fns ...func(DBTX) DBTX) DBTX {
+	for _, fn := range fns {
+		dbtx = fn(dbtx)
 	}
 
 	return dbtx
-}
-
-// IsTx returns true if the underlying type is a transaction.
-func (a *Atomic) IsTx() bool {
-	return a.tx != nil
-}
-
-// NewTx returns a Atomic with transaction.
-func NewTx(tx *sql.Tx, opts ...Option) *Atomic {
-	return &Atomic{
-		tx:   tx,
-		opts: opts,
-	}
 }

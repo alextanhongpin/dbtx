@@ -11,7 +11,7 @@ import (
 
 var (
 	ErrAlreadyLocked = errors.New("lock: key already locked")
-	ErrLockOutsideTx = errors.New("lock: lock must be carried out in transaction")
+	ErrLockOutsideTx = errors.New("lock: cannot lock outside transaction")
 )
 
 type Locker struct {
@@ -22,42 +22,31 @@ func New(db *sql.DB) *Locker {
 	return &Locker{db: db}
 }
 
-func (l *Locker) Lock(ctx context.Context, key *Key) (func(), error) {
-	return l.lock(ctx, key, Lock)
+func (l *Locker) Lock(ctx context.Context, key *Key, fn func(context.Context) error) error {
+	return dbtx.New(l.db).RunInTx(ctx, func(txCtx context.Context) error {
+		if err := Lock(txCtx, key); err != nil {
+			return err
+		}
+
+		return fn(txCtx)
+	})
 }
 
-func (l *Locker) TryLock(ctx context.Context, key *Key) (func(), error) {
-	return l.lock(ctx, key, TryLock)
-}
+func (l *Locker) TryLock(ctx context.Context, key *Key, fn func(context.Context) error) error {
+	return dbtx.New(l.db).RunInTx(ctx, func(txCtx context.Context) error {
+		if err := TryLock(txCtx, key); err != nil {
+			return err
+		}
 
-func (l *Locker) lock(ctx context.Context, key *Key, lockFn func(ctx context.Context, key *Key) error) (func(), error) {
-	ctx, cancel := context.WithCancel(ctx)
-	ch := make(chan error)
-
-	go func() {
-		atm := dbtx.New(l.db)
-		atm.RunInTx(ctx, func(txCtx context.Context) error {
-			err := lockFn(txCtx, key)
-			ch <- err
-			// If there is an error, just end early.
-			if err != nil {
-				return err
-			}
-
-			// Otherwise, wait until the context is cancelled.
-			<-ctx.Done()
-			return ctx.Err()
-		})
-	}()
-
-	return cancel, <-ch
+		return fn(txCtx)
+	})
 }
 
 // Lock locks the given key. If multiple operations lock the same key, it
 // will wait for the previous operation to complete.
 // Lock must be run within a transaction context, panics otherwise.
 func Lock(ctx context.Context, key *Key) error {
-	tx, ok := dbtx.Tx(ctx)
+	tx, ok := dbtx.Value(ctx)
 	if !ok {
 		return fmt.Errorf("%w: %s", ErrLockOutsideTx, key)
 	}
@@ -75,7 +64,7 @@ func Lock(ctx context.Context, key *Key) error {
 // the first will succeed. The rest will fail with the error ErrAlreadyLocked.
 // TryLock must be run within a transaction context, panics otherwise.
 func TryLock(ctx context.Context, key *Key) error {
-	tx, ok := dbtx.Tx(ctx)
+	tx, ok := dbtx.Value(ctx)
 	if !ok {
 		return fmt.Errorf("%w: %s", ErrLockOutsideTx, key)
 	}

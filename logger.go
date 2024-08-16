@@ -17,7 +17,7 @@ type Logger struct {
 	l    logger
 }
 
-func WithLogger(l logger) Middleware {
+func WithLogger(l logger) func(DBTX) DBTX {
 	return func(dbtx DBTX) DBTX {
 		return NewLogger(dbtx, l)
 	}

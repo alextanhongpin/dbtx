@@ -3,60 +3,27 @@ package dbtx
 import (
 	"context"
 	"database/sql"
-	"errors"
 )
 
-var ErrContextNotFound = errors.New("dbtx: Atomic not found in context")
-
-type contextKey string
+type ctxKey string
 
 var (
-	// atomicContextkey represents the key for the context containing the pointer of Atomic.
-	atomicContextkey         = contextKey("atm_ctx")
-	readOnlyContextKey       = contextKey("ro_ctx")
-	isolationLevelContextKey = contextKey("iso_ctx")
-	depthContextKey          = contextKey("depth_ctx")
+	txCtxKey  = ctxKey("tx")
+	roCtxKey  = ctxKey("ro")
+	isoCtxKey = ctxKey("iso")
 )
 
-func Value(ctx context.Context) (*Atomic, bool) {
-	atm, ok := ctx.Value(atomicContextkey).(*Atomic)
-	return atm, ok
-}
-
-func MustValue(ctx context.Context) *Atomic {
-	atm, ok := Value(ctx)
-	if !ok {
-		panic(ErrContextNotFound)
-	}
-
-	return atm
-}
-
-func WithValue(ctx context.Context, atm *Atomic) context.Context {
-	return context.WithValue(ctx, atomicContextkey, atm)
-}
-
-func IncDepth(ctx context.Context) context.Context {
-	n := Depth(ctx)
-	return context.WithValue(ctx, depthContextKey, n+1)
-}
-
-func Depth(ctx context.Context) int {
-	depth, _ := ctx.Value(depthContextKey).(int)
-	return depth
-}
-
 func ReadOnly(ctx context.Context, readOnly bool) context.Context {
-	return context.WithValue(ctx, readOnlyContextKey, readOnly)
+	return context.WithValue(ctx, roCtxKey, readOnly)
 }
 
 func IsolationLevel(ctx context.Context, isoLevel sql.IsolationLevel) context.Context {
-	return context.WithValue(ctx, isolationLevelContextKey, isoLevel)
+	return context.WithValue(ctx, isoCtxKey, isoLevel)
 }
 
 func TxOptions(ctx context.Context) *sql.TxOptions {
-	readOnly, _ := ctx.Value(readOnlyContextKey).(bool)
-	isolation, _ := ctx.Value(isolationLevelContextKey).(sql.IsolationLevel)
+	readOnly, _ := ctx.Value(roCtxKey).(bool)
+	isolation, _ := ctx.Value(isoCtxKey).(sql.IsolationLevel)
 	return &sql.TxOptions{
 		ReadOnly:  readOnly,
 		Isolation: isolation,
@@ -64,30 +31,24 @@ func TxOptions(ctx context.Context) *sql.TxOptions {
 }
 
 func IsTx(ctx context.Context) bool {
-	a, ok := Value(ctx)
-	return ok && a.IsTx()
+	_, ok := value(ctx)
+	return ok
 }
 
-// Tx returns the DBTX from the context, only if the underlying type is a
-// *sql.Tx.
-// We still return the DBTX interface here, to avoid client from manually
-// calling the tx.Commit.
-func Tx(ctx context.Context) (DBTX, bool) {
-	atmCtx, ok := Value(ctx)
-	if ok && atmCtx.IsTx() {
-		return atmCtx.underlying(ctx), true
+func Value(ctx context.Context) (DBTX, bool) {
+	tx, ok := value(ctx)
+	if !ok {
+		return nil, false
 	}
 
-	return nil, false
+	return tx.underlying(), true
 }
 
-// DBTx returns the DBTX from the context, which can be either *sql.DB or
-// *sql.Tx.
-func DBTx(ctx context.Context) (DBTX, bool) {
-	atmCtx, ok := Value(ctx)
-	if ok {
-		return atmCtx.underlying(ctx), true
-	}
+func value(ctx context.Context) (*Tx, bool) {
+	tx, ok := ctx.Value(txCtxKey).(*Tx)
+	return tx, ok
+}
 
-	return nil, false
+func withValue(ctx context.Context, t *Tx) context.Context {
+	return context.WithValue(ctx, txCtxKey, t)
 }
