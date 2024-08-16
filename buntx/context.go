@@ -2,30 +2,27 @@ package buntx
 
 import (
 	"context"
-	"errors"
 )
 
-var ErrContextNotFound = errors.New("buntx: Atomic not found in context")
+type ctxKey string
 
-type contextKey string
+// txCtxKey represents the key for the context containing the pointer of Atomic.
+var txCtxKey = ctxKey("tx")
 
-// atmContextKey represents the key for the context containing the pointer of Atomic.
-var atmContextKey = contextKey("bun_atm_ctx")
-
-func Value(ctx context.Context) (*Atomic, bool) {
-	atm, ok := ctx.Value(atmContextKey).(*Atomic)
-	return atm, ok
-}
-
-func MustValue(ctx context.Context) *Atomic {
-	atm, ok := Value(ctx)
+func Value(ctx context.Context) (DBTX, bool) {
+	tx, ok := value(ctx)
 	if !ok {
-		panic(ErrContextNotFound)
+		return nil, false
 	}
 
-	return atm
+	return tx.underlying(), true
 }
 
-func WithValue(ctx context.Context, atm *Atomic) context.Context {
-	return context.WithValue(ctx, atmContextKey, atm)
+func value(ctx context.Context) (*Tx, bool) {
+	tx, ok := ctx.Value(txCtxKey).(*Tx)
+	return tx, ok
+}
+
+func withValue(ctx context.Context, tx *Tx) context.Context {
+	return context.WithValue(ctx, txCtxKey, tx)
 }

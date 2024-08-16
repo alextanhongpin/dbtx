@@ -12,10 +12,10 @@ import (
 	_ "github.com/lib/pq"
 )
 
-const postgresVersion = "15.1-alpine"
+const postgresVersion = "postgres:15.1-alpine"
 
 func TestMain(m *testing.M) {
-	stop := pgtest.InitDB(pgtest.Tag(postgresVersion), pgtest.Hook(migrate))
+	stop := pgtest.InitDB(pgtest.Image(postgresVersion), pgtest.Hook(migrate))
 	code := m.Run()
 	stop() // os.Exit does not care about defer.
 	os.Exit(code)

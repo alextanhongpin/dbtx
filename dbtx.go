@@ -6,9 +6,7 @@ import (
 	"errors"
 )
 
-var (
-	ErrNotTransaction = errors.New("dbtx: underlying type is not a transaction")
-)
+var ErrNotTransaction = errors.New("dbtx: underlying type is not a transaction")
 
 // DBTX represents the common db operations for both *sql.DB and *sql.Tx.
 type DBTX interface {
@@ -48,18 +46,6 @@ func New(db *sql.DB, fns ...func(DBTX) DBTX) *Atomic {
 	}
 }
 
-// DBTx returns the DBTX from the context, which can be either *sql.DB or
-// *sql.Tx.
-// Returns the atomic underlying type if the context is empty.
-func (a *Atomic) DBTx(ctx context.Context) DBTX {
-	tx, ok := value(ctx)
-	if ok {
-		return tx.underlying()
-	}
-
-	return a.DB()
-}
-
 // DB returns the underlying *sql.DB as DBTX interface, to avoid the caller to
 // init a new transaction.
 // This also allows wrapping the *sql.DB with other implementations, such as
@@ -68,17 +54,28 @@ func (a *Atomic) DB() DBTX {
 	return apply(a.db, a.fns...)
 }
 
+// DBTx returns the DBTX from the context, which can be either *sql.DB or
+// *sql.Tx.
+// Returns the atomic underlying type if the context is empty.
+func (a *Atomic) DBTx(ctx context.Context) DBTX {
+	if tx, ok := Value(ctx); ok {
+		return tx
+	}
+
+	return a.DB()
+}
+
 // Tx returns the *sql.Tx from context. The return type is still a DBTX
 // interface to avoid client from calling tx.Commit.
 // When dealing with nested transaction, only the parent of the transaction can
 // commit the transaction.
 func (a *Atomic) Tx(ctx context.Context) DBTX {
-	tx, ok := value(ctx)
+	tx, ok := Value(ctx)
 	if !ok {
 		panic(ErrNotTransaction)
 	}
 
-	return tx.underlying()
+	return tx
 }
 
 // RunInTx wraps the operation in a transaction. If a context containing tx is
@@ -95,7 +92,7 @@ func (a *Atomic) RunInTx(ctx context.Context, fn func(context.Context) error) (e
 	}
 	defer tx.Rollback()
 
-	ctx = withValue(ctx, &Tx{conn: tx, fns: a.fns})
+	ctx = withValue(ctx, &Tx{tx: tx, fns: a.fns})
 	if err := fn(ctx); err != nil {
 		return err
 	}
@@ -104,12 +101,12 @@ func (a *Atomic) RunInTx(ctx context.Context, fn func(context.Context) error) (e
 }
 
 type Tx struct {
-	conn *sql.Tx
-	fns  []func(DBTX) DBTX
+	tx  *sql.Tx
+	fns []func(DBTX) DBTX
 }
 
 func (t *Tx) underlying() DBTX {
-	return apply(t.conn, t.fns...)
+	return apply(t.tx, t.fns...)
 }
 
 func apply(dbtx DBTX, fns ...func(DBTX) DBTX) DBTX {

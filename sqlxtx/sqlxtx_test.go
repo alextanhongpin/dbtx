@@ -13,13 +13,13 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-const postgresVersion = "15.1-alpine"
+const postgresVersion = "postgres:15.1-alpine"
 
 var ctx = context.Background()
 var ErrRollback = errors.New("intentional rollback")
 
 func TestMain(m *testing.M) {
-	stop := pgtest.InitDB(pgtest.Tag(postgresVersion), pgtest.Hook(migrate))
+	stop := pgtest.InitDB(pgtest.Image(postgresVersion), pgtest.Hook(migrate))
 	code := m.Run()
 	stop()
 	os.Exit(code)
@@ -36,7 +36,7 @@ func TestQuery(t *testing.T) {
 	}
 
 	var r Result
-	if err := atm.DB(ctx).QueryRowxContext(ctx, `select 1 + 1 as sum, true as even`).StructScan(&r); err != nil {
+	if err := atm.DB().QueryRowxContext(ctx, `select 1 + 1 as sum, true as even`).StructScan(&r); err != nil {
 		t.Fatal(err)
 	}
 
@@ -72,7 +72,7 @@ func TestRollback(t *testing.T) {
 	assert.ErrorIs(err, ErrRollback)
 
 	var n int
-	err = atm.DB(ctx).QueryRowxContext(ctx, `select count(*) from numbers`).Scan(&n)
+	err = atm.DB().QueryRowxContext(ctx, `select count(*) from numbers`).Scan(&n)
 	assert.Nil(err)
 	assert.Equal(0, n)
 }

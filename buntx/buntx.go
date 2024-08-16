@@ -16,9 +16,8 @@ var (
 type DBTX = bun.IDB
 
 type atomic interface {
-	IsTx() bool
 	DBTx(ctx context.Context) DBTX
-	DB(ctx context.Context) DBTX
+	DB() DBTX
 	Tx(ctx context.Context) DBTX
 	RunInTx(ctx context.Context, fn func(context.Context) error) error
 }
@@ -27,67 +26,64 @@ type atomic interface {
 var _ atomic = (*Atomic)(nil)
 
 type Atomic struct {
-	db *bun.DB
-	tx *bun.Tx
+	db  *bun.DB
+	fns []func(DBTX) DBTX
 }
 
-func New(db *bun.DB) *Atomic {
+func New(db *bun.DB, fns ...func(DBTX) DBTX) *Atomic {
 	return &Atomic{
-		db: db,
+		db:  db,
+		fns: fns,
 	}
 }
 
-func (a *Atomic) IsTx() bool {
-	return a.tx != nil && a.db == nil
+func (a *Atomic) DB() DBTX {
+	return apply(a.db, a.fns...)
 }
 
-func (a *Atomic) DBTx(ctx context.Context) bun.IDB {
-	atm, ok := Value(ctx)
-	if ok && atm.IsTx() {
-		return atm.underlying()
+func (a *Atomic) DBTx(ctx context.Context) DBTX {
+	if tx, ok := Value(ctx); ok {
+		return tx
 	}
 
-	return a.underlying()
+	return a.DB()
 }
 
-func (a *Atomic) Tx(ctx context.Context) bun.IDB {
-	atm, ok := Value(ctx)
-	if ok && atm.IsTx() {
-		return atm.underlying()
+func (a *Atomic) Tx(ctx context.Context) DBTX {
+	tx, ok := Value(ctx)
+	if !ok {
+		panic(ErrNonTransaction)
 	}
 
-	panic(ErrNonTransaction)
-}
-
-func (a *Atomic) DB(ctx context.Context) bun.IDB {
-	if a.IsTx() {
-		panic(ErrIsTransaction)
-	}
-
-	return a.underlying()
+	return tx
 }
 
 func (a *Atomic) RunInTx(ctx context.Context, fn func(ctx context.Context) error) error {
-	switch db := a.DBTx(ctx).(type) {
-	case *bun.DB:
-		return db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-			ctx = WithValue(ctx, &Atomic{tx: &tx})
+	_, ok := value(ctx)
+	if ok {
+		return fn(ctx)
+	}
 
-			return fn(ctx)
-		})
-	case *bun.Tx:
-		ctx = WithValue(ctx, a)
+	return a.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		ctx = withValue(ctx, &Tx{tx: &tx, fns: a.fns})
 
 		return fn(ctx)
-	default:
-		panic(ErrContextNotFound)
-	}
+	})
 }
 
-func (a *Atomic) underlying() bun.IDB {
-	if a.IsTx() {
-		return a.tx
+func apply(dbtx DBTX, fns ...func(DBTX) DBTX) DBTX {
+	for _, fn := range fns {
+		dbtx = fn(dbtx)
 	}
 
-	return a.db
+	return dbtx
+}
+
+type Tx struct {
+	tx  *bun.Tx
+	fns []func(DBTX) DBTX
+}
+
+func (t *Tx) underlying() DBTX {
+	return apply(t.tx, t.fns...)
 }
