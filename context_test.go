@@ -6,9 +6,11 @@ import (
 	"testing"
 
 	"github.com/alextanhongpin/dbtx"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestContext(t *testing.T) {
+
 	t.Run("isolation", func(t *testing.T) {
 		for _, lvl := range []sql.IsolationLevel{
 			sql.LevelDefault,
@@ -24,34 +26,23 @@ func TestContext(t *testing.T) {
 			ctx = dbtx.IsolationLevel(ctx, lvl)
 			opt := dbtx.TxOptions(ctx)
 
-			if want, got := lvl, opt.Isolation; want != got {
-				t.Fatalf("want %d, got %d", want, got)
-			}
+			assert.Equal(t, lvl, opt.Isolation)
 		}
 	})
 
 	t.Run("readonly", func(t *testing.T) {
 		ctx := context.Background()
+		is := assert.New(t)
+
 		opt := dbtx.TxOptions(ctx)
+		is.False(opt.ReadOnly)
 
-		if want, got := false, opt.ReadOnly; want != got {
-			t.Fatalf("want %t, got %t", want, got)
-		}
-
-		ctx = dbtx.ReadOnly(ctx, true)
-		opt = dbtx.TxOptions(ctx)
-
-		if want, got := true, opt.ReadOnly; want != got {
-			t.Fatalf("want %t, got %t", want, got)
-		}
+		opt = dbtx.TxOptions(dbtx.ReadOnly(ctx, true))
+		is.True(opt.ReadOnly)
 	})
 
-	t.Run("istx", func(t *testing.T) {
+	t.Run("tx", func(t *testing.T) {
 		ctx := context.Background()
-		isTx := dbtx.IsTx(ctx)
-
-		if want, got := false, isTx; want != got {
-			t.Fatalf("want %t, got %t", want, got)
-		}
+		assert.False(t, dbtx.IsTx(ctx))
 	})
 }

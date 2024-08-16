@@ -17,12 +17,12 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-const postgresVersion = "15.1-alpine"
+const postgresVersion = "postgres:15.1-alpine"
 
 var ErrIntentional = errors.New("intentional error")
 
 func TestMain(m *testing.M) {
-	stop := pgtest.InitDB(pgtest.Tag(postgresVersion), pgtest.Hook(migrate))
+	stop := pgtest.InitDB(pgtest.Image(postgresVersion), pgtest.Hook(migrate))
 	code := m.Run()
 	stop()
 	os.Exit(code)
@@ -30,182 +30,120 @@ func TestMain(m *testing.M) {
 
 func TestSQL(t *testing.T) {
 	var n int
-	db := pgtest.DB(t)
-	err := db.QueryRow("select 1 + 1").Scan(&n)
-	if err != nil {
-		t.Fatal(err)
-	}
+	err := pgtest.DB(t).QueryRow("select 1 + 1").Scan(&n)
 
-	assert.Equal(t, 2, n)
+	is := assert.New(t)
+	is.Nil(err)
+	is.Equal(2, n)
 }
 
 func TestLoggerContext(t *testing.T) {
 	logger := &InMemoryLogger{}
-
-	db := pgtest.DB(t)
-	atm := dbtx.New(db,
-		dbtx.WithLogger(logger),
-	)
+	atm := dbtx.New(pgtest.DB(t), dbtx.WithLogger(logger))
 	ctx := context.Background()
 
 	var n int
-	if err := atm.DB().QueryRow("select 1 + $1", 1).Scan(&n); err != nil {
-		t.Fatal(err)
-	}
-	assert.Equal(t, 2, n)
+	err := atm.DB().QueryRow("select 1 + $1", 1).Scan(&n)
+
+	is := assert.New(t)
+	is.Nil(err)
+	is.Equal(2, n)
 
 	var m int
-	err := atm.RunInTx(ctx, func(ctx context.Context) error {
+	err = atm.RunInTx(ctx, func(ctx context.Context) error {
 		return atm.Tx(ctx).QueryRow("select 2 + $1", 2).Scan(&m)
 	})
-	assert.Nil(t, err)
-	assert.Equal(t, 4, m)
+	is.Nil(err)
+	is.Equal(4, m)
 
 	t.Log("LOG")
 	t.Log(logger.Logs)
 }
 
 func TestAtomicContext(t *testing.T) {
-	db := pgtest.DB(t)
-	atm := dbtx.New(db)
+	atm := dbtx.New(pgtest.DB(t))
 	ctx := context.Background()
 
 	t.Run("isNotTx", func(t *testing.T) {
-		isTx := dbtx.IsTx(ctx)
-		assert.False(t, isTx)
-	})
-
-	t.Run("isTx", func(t *testing.T) {
-		assert := assert.New(t)
-		err := atm.RunInTx(ctx, func(txCtx context.Context) error {
-			isTx := dbtx.IsTx(txCtx)
-
-			assert.True(isTx)
-			return ErrIntentional
-		})
-
-		assert.ErrorIs(err, ErrIntentional)
-	})
-
-	t.Run("Tx when not in tx context", func(t *testing.T) {
 		assert.False(t, dbtx.IsTx(ctx))
 	})
 
-	t.Run("Tx when in tx context", func(t *testing.T) {
-		assert := assert.New(t)
+	t.Run("isTx", func(t *testing.T) {
+		is := assert.New(t)
 		err := atm.RunInTx(ctx, func(txCtx context.Context) error {
-			assert.True(dbtx.IsTx(txCtx))
+			is.True(dbtx.IsTx(txCtx))
 
 			return ErrIntentional
 		})
-
-		assert.ErrorIs(err, ErrIntentional)
+		is.ErrorIs(err, ErrIntentional)
 	})
 }
 
 // TestAtomic tests if the transaction is rollback successfullly.
 func TestAtomic(t *testing.T) {
-	assert := assert.New(t)
-
-	db := pgtest.DB(t)
-	atm := dbtx.New(db)
-	ctx := context.Background()
-
-	err := atm.RunInTx(ctx, func(txCtx context.Context) error {
-		if err := assertCreated(t, newNumberRepo(atm), txCtx, 42); err != nil {
-			return err
-		}
+	atm := dbtx.New(pgtest.DB(t))
+	err := atm.RunInTx(context.Background(), func(txCtx context.Context) error {
+		insertRow(t, newNumberRepo(atm), txCtx, 42)
 
 		return ErrIntentional
 	})
-	assert.ErrorIs(err, ErrIntentional, err)
-	assertNoRows(t, newNumberRepo(atm), 42)
+	is := assert.New(t)
+	is.ErrorIs(err, ErrIntentional, err)
+	noRows(t, newNumberRepo(atm), 42)
 }
 
 // TestPanic tests if the transaction is rollback on panic.
 func TestPanic(t *testing.T) {
-	assert := assert.New(t)
+	atm := dbtx.New(pgtest.DB(t))
+	repo := newNumberRepo(atm)
 
-	db := pgtest.DB(t)
-	atm := dbtx.New(db)
-	ctx := context.Background()
-
-	assert.Panics(func() {
-		_ = atm.RunInTx(ctx, func(txCtx context.Context) error {
-			if err := assertCreated(t, newNumberRepo(atm), txCtx, 42); err != nil {
-				return err
-			}
+	assert.Panics(t, func() {
+		_ = atm.RunInTx(context.Background(), func(txCtx context.Context) error {
+			insertRow(t, repo, txCtx, 42)
 
 			panic("server error")
 		})
 	})
 
-	assertNoRows(t, newNumberRepo(atm), 42)
-}
-
-func TestAtomicIntKeyPair(t *testing.T) {
-	db := pgtest.DB(t)
-	tx := dbtx.New(db)
-	err := tx.RunInTx(context.Background(), func(ctx context.Context) error {
-		return lock.Lock(ctx, lock.NewIntKeyPair(1, 2))
-	})
-	if err != nil {
-		t.Error(err)
-	}
+	noRows(t, repo, 42)
 }
 
 func TestAtomicIntKeyPairLocked(t *testing.T) {
-	db := pgtest.DB(t)
-	tx := dbtx.New(db)
-	err := tx.RunInTx(context.Background(), func(txCtx context.Context) error {
-		err := lock.TryLock(txCtx, lock.NewIntKeyPair(1, 1))
-		locked1 := errors.Is(err, lock.ErrAlreadyLocked)
-		if err != nil && !locked1 {
+	key := lock.NewIntKeyPair(1, 1)
+	atm := dbtx.New(pgtest.DB(t))
+	err := atm.RunInTx(context.Background(), func(txCtx context.Context) error {
+		if err := lock.TryLock(txCtx, key); err != nil {
 			return err
 		}
 
-		err = lock.TryLock(txCtx, lock.NewIntKeyPair(1, 1))
-		locked2 := errors.Is(err, lock.ErrAlreadyLocked)
-		if err != nil && !locked2 {
+		// Locking twice in the same transaction will not cause a deadlock.
+		if err := lock.TryLock(txCtx, key); err != nil {
 			return err
 		}
-
-		// Within the same transaction, calling TryLock twice will return true.
-		// If called from another transaction, the TryLock will return false.
-		assert.False(t, locked1)
-		assert.False(t, locked2)
-		t.Logf("locked1=%t, locked2=%t", locked1, locked2)
 
 		return nil
 	})
-	if err != nil {
-		t.Error(err)
-	}
+	assert.Nil(t, err)
 }
 
 func TestAtomicLockBoundary(t *testing.T) {
-	assert := assert.New(t)
-
-	db := pgtest.DB(t)
-	tx := dbtx.New(db)
+	is := assert.New(t)
+	tx := dbtx.New(pgtest.DB(t))
 	err := tx.RunInTx(context.Background(), func(ctx context.Context) error {
-		assert.Nil(lock.Lock(ctx, lock.NewIntKeyPair(math.MinInt32, math.MaxInt32)))
-		assert.Nil(lock.Lock(ctx, lock.NewIntKey(math.MinInt64)))
-		assert.Nil(lock.Lock(ctx, lock.NewIntKey(math.MaxInt64)))
+		is.Nil(lock.Lock(ctx, lock.NewIntKeyPair(math.MinInt32, math.MaxInt32)))
+		is.Nil(lock.Lock(ctx, lock.NewIntKey(math.MinInt64)))
+		is.Nil(lock.Lock(ctx, lock.NewIntKey(math.MaxInt64)))
 
 		return nil
 	})
-	if err != nil {
-		t.Error(err)
-	}
+	is.Nil(err)
 }
 
 func TestAtomicIntLockKeyLocked(t *testing.T) {
-	db := pgtest.DB(t)
-	atm := dbtx.New(db)
+	atm := dbtx.New(pgtest.DB(t))
 	key := lock.NewIntKey(10)
 
-	assert := assert.New(t)
+	is := assert.New(t)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -213,67 +151,45 @@ func TestAtomicIntLockKeyLocked(t *testing.T) {
 	go func() {
 		defer wg.Done()
 
-		ctx := context.Background()
-		err := atm.RunInTx(ctx, func(txCtx context.Context) error {
-			err := lock.TryLock(txCtx, key)
-			locked := errors.Is(err, lock.ErrAlreadyLocked)
-			if err != nil && !locked {
+		err := atm.RunInTx(context.Background(), func(txCtx context.Context) error {
+			if err := lock.TryLock(txCtx, key); err != nil {
 				return err
 			}
 
-			assert.False(locked)
-			t.Logf("goroutine0: locked=%t\n", locked)
-			time.Sleep(200 * time.Millisecond)
+			t.Log("goroutine0: locked=true")
+			time.Sleep(100 * time.Millisecond)
 
 			return nil
 		})
-		assert.Nil(err)
+		is.Nil(err)
 	}()
 
-	time.Sleep(100 * time.Millisecond)
-	ctx := context.Background()
-	err := atm.RunInTx(ctx, func(txCtx context.Context) error {
-		// Both locked1 and locked2 will always be true in the same transaction.
-		// Only when locking with the same key in another transaction will result
-		// in false.
+	time.Sleep(50 * time.Millisecond)
+	err := atm.RunInTx(context.Background(), func(txCtx context.Context) error {
 		err := lock.TryLock(txCtx, key)
-		locked1 := errors.Is(err, lock.ErrAlreadyLocked)
-		if err != nil && !locked1 {
-			return err
-		}
 
-		err = lock.TryLock(txCtx, key)
-		locked2 := errors.Is(err, lock.ErrAlreadyLocked)
-		if err != nil && !locked2 {
-			return err
-		}
-
-		assert.True(locked1)
-		assert.True(locked2)
 		// ̃NOTE: Both of this is expected to return false, but it is true now
 		// because of the test library which puts everything in a single transaction.
 		//assert.False(locked1)
 		//assert.False(locked2)
-		t.Logf("goroutine1: locked1=%t, locked2=%t\n", locked1, locked2)
-		return nil
+		t.Logf("goroutine1: locked1=%t\n", errors.Is(err, lock.ErrAlreadyLocked))
+		return err
 	})
-	assert.Nil(err)
+	is.ErrorIs(err, lock.ErrAlreadyLocked)
 	wg.Wait()
 }
 
 func TestAtomicLocker(t *testing.T) {
-	assert := assert.New(t)
-
-	db := pgtest.DB(t)
+	is := assert.New(t)
 
 	// Arrange.
 	ctx := context.Background()
 	key := lock.NewStrKey("The meaning of life...")
 
-	locker := lock.New(db)
+	locker := lock.New(pgtest.DB(t))
 
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 
 	go func() {
 		defer wg.Done()
@@ -285,11 +201,11 @@ func TestAtomicLocker(t *testing.T) {
 		// Lock1 locks the key successfully. Forgetting to call unlock locks the key
 		// forever unless a timeout is set.
 		err := locker.TryLock(ctx, key, func(ctx context.Context) error {
-			assert.True(dbtx.IsTx(ctx))
+			is.True(dbtx.IsTx(ctx))
 			<-ctx.Done()
 			return context.Cause(ctx)
 		})
-		assert.ErrorIs(err, errTimeout)
+		is.ErrorIs(err, errTimeout)
 	}()
 
 	go func() {
@@ -299,10 +215,23 @@ func TestAtomicLocker(t *testing.T) {
 
 		// Lock2 fails when locking the same key.
 		err := locker.TryLock(ctx, key, func(ctx context.Context) error {
-			assert.True(dbtx.IsTx(ctx))
+			is.True(dbtx.IsTx(ctx))
 			return nil
 		})
-		assert.ErrorIs(err, lock.ErrAlreadyLocked)
+		is.ErrorIs(err, lock.ErrAlreadyLocked)
+	}()
+
+	go func() {
+		defer wg.Done()
+
+		time.Sleep(10 * time.Millisecond)
+
+		// Lock3 will wait for the previous lock to be released.
+		err := locker.Lock(ctx, key, func(ctx context.Context) error {
+			is.True(dbtx.IsTx(ctx))
+			return nil
+		})
+		is.Nil(err)
 	}()
 
 	wg.Wait()
@@ -313,32 +242,28 @@ func migrate(db *sql.DB) error {
 	return err
 }
 
-func assertCreated(t *testing.T, repo *numberRepo, ctx context.Context, n int) error {
+// insertRow inserts a row with the given number.
+func insertRow(t *testing.T, repo *numberRepo, ctx context.Context, n int) {
 	t.Helper()
 
 	rows, err := repo.Create(ctx, n)
-	if err != nil {
-		return err
-	}
-
-	assert.Equal(t, int64(1), rows)
+	is := assert.New(t)
+	is.Nil(err)
+	is.Equal(int64(1), rows)
 
 	i, err := repo.Find(ctx, n)
-	if err != nil {
-		return err
-	}
-
-	assert.Equal(t, n, i)
-
-	return nil
+	is.Nil(err)
+	is.Equal(n, i)
 }
 
-func assertNoRows(t *testing.T, repo *numberRepo, n int) {
+// noRows check that the given number does not exist in the database.
+func noRows(t *testing.T, repo *numberRepo, n int) {
 	t.Helper()
 
 	i, err := repo.Find(context.Background(), n)
-	assert.ErrorIs(t, err, sql.ErrNoRows, err)
-	assert.Equal(t, 0, i)
+	is := assert.New(t)
+	is.ErrorIs(err, sql.ErrNoRows, err)
+	is.Equal(0, i)
 }
 
 type atomic interface {
