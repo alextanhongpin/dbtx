@@ -41,7 +41,7 @@ func Value(ctx context.Context) (DBTX, bool) {
 		return nil, false
 	}
 
-	return tx.underlying(), true
+	return tx.Tx(), true
 }
 
 func value(ctx context.Context) (*Tx, bool) {

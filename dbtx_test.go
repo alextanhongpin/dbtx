@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"math"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -19,13 +18,13 @@ import (
 
 const postgresVersion = "postgres:15.1-alpine"
 
-var ErrIntentional = errors.New("intentional error")
+var ErrRollback = errors.New("rollback")
 
 func TestMain(m *testing.M) {
 	stop := pgtest.InitDB(pgtest.Image(postgresVersion), pgtest.Hook(migrate))
-	code := m.Run()
-	stop()
-	os.Exit(code)
+	defer stop()
+
+	m.Run()
 }
 
 func TestSQL(t *testing.T) {
@@ -73,9 +72,9 @@ func TestAtomicContext(t *testing.T) {
 		err := atm.RunInTx(ctx, func(txCtx context.Context) error {
 			is.True(dbtx.IsTx(txCtx))
 
-			return ErrIntentional
+			return ErrRollback
 		})
-		is.ErrorIs(err, ErrIntentional)
+		is.ErrorIs(err, ErrRollback)
 	})
 }
 
@@ -85,10 +84,10 @@ func TestAtomic(t *testing.T) {
 	err := atm.RunInTx(context.Background(), func(txCtx context.Context) error {
 		insertRow(t, newNumberRepo(atm), txCtx, 42)
 
-		return ErrIntentional
+		return ErrRollback
 	})
 	is := assert.New(t)
-	is.ErrorIs(err, ErrIntentional, err)
+	is.ErrorIs(err, ErrRollback, err)
 	noRows(t, newNumberRepo(atm), 42)
 }
 

@@ -90,7 +90,9 @@ func (a *Atomic) RunInTx(ctx context.Context, fn func(context.Context) error) (e
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() {
+		_ = tx.Rollback()
+	}()
 
 	ctx = withValue(ctx, &Tx{tx: tx, fns: a.fns})
 	if err := fn(ctx); err != nil {
@@ -105,7 +107,7 @@ type Tx struct {
 	fns []func(DBTX) DBTX
 }
 
-func (t *Tx) underlying() DBTX {
+func (t *Tx) Tx() DBTX {
 	return apply(t.tx, t.fns...)
 }
 
