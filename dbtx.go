@@ -91,12 +91,19 @@ func (a *Atomic) RunInTx(ctx context.Context, fn func(context.Context) error) (e
 		return err
 	}
 	defer func() {
-		_ = tx.Rollback()
+		if r := recover(); r != nil {
+			err := tx.Rollback()
+			if e, ok := r.(error); ok {
+				panic(errors.Join(err, e))
+			} else {
+				panic(r)
+			}
+		}
 	}()
 
 	ctx = withValue(ctx, &Tx{tx: tx, fns: a.fns})
 	if err := fn(ctx); err != nil {
-		return err
+		return errors.Join(tx.Rollback(), err)
 	}
 
 	return tx.Commit()
