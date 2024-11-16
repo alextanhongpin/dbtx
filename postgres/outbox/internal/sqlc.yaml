@@ -1,0 +1,17 @@
+version: "2"
+sql:
+- schema: "schema.sql"
+  queries: "query.sql"
+  engine: "postgresql"
+  gen:
+    go:
+      package: "postgres"
+      out: "postgres"
+      emit_all_enum_values: true
+      emit_empty_slices: true
+      emit_enum_valid_method: true
+      emit_interface: true
+      emit_pointers_for_null_types: true
+      emit_result_struct_pointers: true
+  rules:
+    - sqlc/db-prepare
