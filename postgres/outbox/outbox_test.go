@@ -148,7 +148,7 @@ func TestPool(t *testing.T) {
 		}, &outbox.PoolOptions{
 			Concurrency: 5,
 			BatchSize:   10,
-			Sleep:       time.Second,
+			Interval:    time.Second,
 		})
 
 		wg.Wait()

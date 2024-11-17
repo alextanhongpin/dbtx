@@ -10,6 +10,7 @@ import (
 
 	"github.com/alextanhongpin/dbtx"
 	"github.com/alextanhongpin/dbtx/postgres/outbox/internal/postgres"
+	"golang.org/x/sync/errgroup"
 )
 
 var outboxContextKey contextKey = "outbox"
@@ -72,7 +73,7 @@ func (o *Outbox) Process(ctx context.Context, fn func(context.Context, Event) er
 type PoolOptions struct {
 	BatchSize   int           // The number of rows to process per batch.
 	Concurrency int           // The max concurrent message to process at a time.
-	Sleep       time.Duration // The sleep duration at the end of each batch.
+	Interval    time.Duration // The pool interval.
 }
 
 func (o *Outbox) Pool(ctx context.Context, fn func(context.Context, Event) error, opts *PoolOptions) func() {
@@ -86,16 +87,12 @@ func (o *Outbox) Pool(ctx context.Context, fn func(context.Context, Event) error
 	if batchSize <= 0 {
 		panic("outbox.PoolOptions: BatchSize must be greater than 0")
 	}
-	sleep := opts.Sleep
+	interval := opts.Interval
 
 	batch := func() {
-		ctx, cancel := context.WithCancel(ctx)
-		defer cancel()
-
-		var wg sync.WaitGroup
-		defer wg.Wait()
-
-		sem := newSemaphore(concurrency)
+		g, ctx := errgroup.WithContext(ctx)
+		g.SetLimit(concurrency)
+		defer g.Wait()
 
 		for range batchSize {
 			select {
@@ -104,17 +101,14 @@ func (o *Outbox) Pool(ctx context.Context, fn func(context.Context, Event) error
 			case <-ctx.Done():
 				return
 			default:
-				wg.Add(1)
-				sem.Acquire()
-
-				go func() {
-					defer wg.Done()
-					defer sem.Release()
-
-					if errors.Is(o.Process(ctx, fn), sql.ErrNoRows) {
-						cancel()
+				g.Go(func() error {
+					err := o.Process(ctx, fn)
+					if errors.Is(err, sql.ErrNoRows) {
+						return err
 					}
-				}()
+
+					return nil
+				})
 			}
 		}
 	}
@@ -124,19 +118,15 @@ func (o *Outbox) Pool(ctx context.Context, fn func(context.Context, Event) error
 
 	go func() {
 		defer wg.Done()
+		t := time.NewTicker(interval)
+		defer t.Stop()
 
 		for {
 			select {
 			case <-done:
 				return
-			default:
+			case <-t.C:
 				batch()
-
-				select {
-				case <-done:
-					return
-				case <-time.After(sleep):
-				}
 			}
 		}
 	}()
@@ -220,22 +210,4 @@ func (key contextKey) WithValue(ctx context.Context, ob *outbox) context.Context
 func (key contextKey) Value(ctx context.Context) (*outbox, bool) {
 	ob, ok := ctx.Value(key).(*outbox)
 	return ob, ok
-}
-
-type semaphore struct {
-	ch chan struct{}
-}
-
-func newSemaphore(n int) *semaphore {
-	return &semaphore{
-		ch: make(chan struct{}, n),
-	}
-}
-
-func (s *semaphore) Acquire() {
-	s.ch <- struct{}{}
-}
-
-func (s *semaphore) Release() {
-	<-s.ch
 }
