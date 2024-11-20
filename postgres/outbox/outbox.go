@@ -13,6 +13,8 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+var EOQ = errors.New("outbox: end of queue")
+
 var outboxContextKey contextKey = "outbox"
 
 type Outbox struct {
@@ -55,6 +57,9 @@ func (o *Outbox) Count(ctx context.Context) (int64, error) {
 func (o *Outbox) Process(ctx context.Context, fn func(context.Context, Event) error) error {
 	return o.Atomic.RunInTx(ctx, func(txCtx context.Context) error {
 		e, err := o.db(txCtx).Delete(txCtx)
+		if errors.Is(err, sql.ErrNoRows) {
+			return EOQ
+		}
 		if err != nil {
 			return err
 		}
@@ -71,9 +76,10 @@ func (o *Outbox) Process(ctx context.Context, fn func(context.Context, Event) er
 }
 
 type PoolOptions struct {
-	BatchSize   int           // The number of rows to process per batch.
-	Concurrency int           // The max concurrent message to process at a time.
-	Interval    time.Duration // The pool interval.
+	BatchSize      int           // The number of rows to process per batch.
+	Concurrency    int           // The max concurrent message to process at a time.
+	PollInterval   time.Duration // The pool interval.
+	MaxIdleTimeout time.Duration
 }
 
 func (o *Outbox) Pool(ctx context.Context, fn func(context.Context, Event) error, opts *PoolOptions) func() {
@@ -87,30 +93,37 @@ func (o *Outbox) Pool(ctx context.Context, fn func(context.Context, Event) error
 	if batchSize <= 0 {
 		panic("outbox.PoolOptions: BatchSize must be greater than 0")
 	}
-	interval := opts.Interval
+	idle := 1
+	interval := opts.PollInterval
+	maxIdleTimeout := opts.MaxIdleTimeout
 
-	batch := func() {
+	batch := func() error {
 		g, ctx := errgroup.WithContext(ctx)
 		g.SetLimit(concurrency)
-		defer g.Wait()
 
+		if errors.Is(o.Process(ctx, fn), EOQ) {
+			return EOQ
+		}
+
+	loop:
 		for range batchSize {
 			select {
 			case <-done:
-				return
+				break loop
 			case <-ctx.Done():
-				return
+				break loop
 			default:
 				g.Go(func() error {
-					err := o.Process(ctx, fn)
-					if errors.Is(err, sql.ErrNoRows) {
-						return err
+					if errors.Is(o.Process(ctx, fn), EOQ) {
+						return EOQ
 					}
 
 					return nil
 				})
 			}
 		}
+
+		return g.Wait()
 	}
 
 	var wg sync.WaitGroup
@@ -126,7 +139,12 @@ func (o *Outbox) Pool(ctx context.Context, fn func(context.Context, Event) error
 			case <-done:
 				return
 			case <-t.C:
-				batch()
+				if errors.Is(batch(), EOQ) {
+					idle *= 2
+				} else {
+					idle = 1
+				}
+				t.Reset(min(time.Duration(idle)*interval, maxIdleTimeout))
 			}
 		}
 	}()

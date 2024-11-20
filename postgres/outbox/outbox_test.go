@@ -100,7 +100,7 @@ func TestOutbox(t *testing.T) {
 
 			return nil
 		})
-		is.ErrorIs(err, sql.ErrNoRows)
+		is.ErrorIs(err, outbox.EOQ)
 	})
 }
 
@@ -146,9 +146,10 @@ func TestPool(t *testing.T) {
 			t.Log(evt)
 			return nil
 		}, &outbox.PoolOptions{
-			Concurrency: 5,
-			BatchSize:   10,
-			Interval:    time.Second,
+			Concurrency:    5,
+			BatchSize:      10,
+			PollInterval:   time.Second,
+			MaxIdleTimeout: time.Minute,
 		})
 
 		wg.Wait()
