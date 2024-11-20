@@ -75,23 +75,23 @@ func (o *Outbox) Process(ctx context.Context, fn func(context.Context, Event) er
 	})
 }
 
-type PoolOptions struct {
+type PollOptions struct {
 	BatchSize      int           // The number of rows to process per batch.
 	Concurrency    int           // The max concurrent message to process at a time.
 	PollInterval   time.Duration // The pool interval.
 	MaxIdleTimeout time.Duration
 }
 
-func (o *Outbox) Pool(ctx context.Context, fn func(context.Context, Event) error, opts *PoolOptions) func() {
+func (o *Outbox) Poll(ctx context.Context, fn func(context.Context, Event) error, opts *PollOptions) func() {
 	done := make(chan struct{})
 	concurrency := opts.Concurrency
 	if concurrency <= 0 {
-		panic("outbox.PoolOptions: Concurrency must be greater than 0")
+		panic("outbox.PollOptions: Concurrency must be greater than 0")
 	}
 
 	batchSize := opts.BatchSize
 	if batchSize <= 0 {
-		panic("outbox.PoolOptions: BatchSize must be greater than 0")
+		panic("outbox.PollOptions: BatchSize must be greater than 0")
 	}
 	idle := 1
 	interval := opts.PollInterval

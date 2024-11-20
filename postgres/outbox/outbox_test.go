@@ -104,7 +104,7 @@ func TestOutbox(t *testing.T) {
 	})
 }
 
-func TestPool(t *testing.T) {
+func TestPoll(t *testing.T) {
 	is := assert.New(t)
 
 	ob := outbox.New(pgtest.New(t, pgtest.Image(postgresVersion), pgtest.Hook(migrate)).DB())
@@ -139,13 +139,13 @@ func TestPool(t *testing.T) {
 
 		var wg sync.WaitGroup
 		wg.Add(2)
-		stop := ob.Pool(ctx, func(txCtx context.Context, evt outbox.Event) error {
+		stop := ob.Poll(ctx, func(txCtx context.Context, evt outbox.Event) error {
 			defer wg.Done()
 
 			is.True(dbtx.IsTx(txCtx))
 			t.Log(evt)
 			return nil
-		}, &outbox.PoolOptions{
+		}, &outbox.PollOptions{
 			Concurrency:    5,
 			BatchSize:      10,
 			PollInterval:   time.Second,
