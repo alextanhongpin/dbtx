@@ -10,10 +10,9 @@ import (
 
 	"github.com/alextanhongpin/dbtx"
 	"github.com/alextanhongpin/dbtx/postgres/outbox/internal/postgres"
-	"golang.org/x/sync/errgroup"
 )
 
-var EOQ = errors.New("outbox: end of queue")
+var Empty = errors.New("outbox: empty")
 
 var outboxContextKey contextKey = "outbox"
 
@@ -34,8 +33,7 @@ func New(db *sql.DB, fns ...func(dbtx.DBTX) dbtx.DBTX) *Outbox {
 func (o *Outbox) RunInTx(ctx context.Context, fn func(context.Context) error) error {
 	return o.Atomic.RunInTx(ctx, func(txCtx context.Context) error {
 		ob := new(outbox)
-		txCtx = outboxContextKey.WithValue(txCtx, ob)
-		if err := fn(txCtx); err != nil {
+		if err := fn(outboxContextKey.WithValue(txCtx, ob)); err != nil {
 			return err
 		}
 
@@ -48,7 +46,7 @@ func (o *Outbox) RunInTx(ctx context.Context, fn func(context.Context) error) er
 	})
 }
 
-// Count return the number of outbox messages
+// Count return the number of outbox messages.
 func (o *Outbox) Count(ctx context.Context) (int64, error) {
 	return o.db(ctx).Count(ctx)
 }
@@ -58,7 +56,7 @@ func (o *Outbox) Process(ctx context.Context, fn func(context.Context, Event) er
 	return o.Atomic.RunInTx(ctx, func(txCtx context.Context) error {
 		e, err := o.db(txCtx).Delete(txCtx)
 		if errors.Is(err, sql.ErrNoRows) {
-			return EOQ
+			return Empty
 		}
 		if err != nil {
 			return err
@@ -72,86 +70,6 @@ func (o *Outbox) Process(ctx context.Context, fn func(context.Context, Event) er
 			Type:          e.Type,
 			CreatedAt:     e.CreatedAt,
 		})
-	})
-}
-
-type PollOptions struct {
-	BatchSize      int           // The number of rows to process per batch.
-	Concurrency    int           // The max concurrent message to process at a time.
-	PollInterval   time.Duration // The pool interval.
-	MaxIdleTimeout time.Duration
-}
-
-func (o *Outbox) Poll(ctx context.Context, fn func(context.Context, Event) error, opts *PollOptions) func() {
-	done := make(chan struct{})
-	concurrency := opts.Concurrency
-	if concurrency <= 0 {
-		panic("outbox.PollOptions: Concurrency must be greater than 0")
-	}
-
-	batchSize := opts.BatchSize
-	if batchSize <= 0 {
-		panic("outbox.PollOptions: BatchSize must be greater than 0")
-	}
-	idle := 1
-	interval := opts.PollInterval
-	maxIdleTimeout := opts.MaxIdleTimeout
-
-	batch := func() error {
-		g, ctx := errgroup.WithContext(ctx)
-		g.SetLimit(concurrency)
-
-		if errors.Is(o.Process(ctx, fn), EOQ) {
-			return EOQ
-		}
-
-	loop:
-		for range batchSize {
-			select {
-			case <-done:
-				break loop
-			case <-ctx.Done():
-				break loop
-			default:
-				g.Go(func() error {
-					if errors.Is(o.Process(ctx, fn), EOQ) {
-						return EOQ
-					}
-
-					return nil
-				})
-			}
-		}
-
-		return g.Wait()
-	}
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	go func() {
-		defer wg.Done()
-		t := time.NewTicker(interval)
-		defer t.Stop()
-
-		for {
-			select {
-			case <-done:
-				return
-			case <-t.C:
-				if errors.Is(batch(), EOQ) {
-					idle *= 2
-				} else {
-					idle = 1
-				}
-				t.Reset(min(time.Duration(idle)*interval, maxIdleTimeout))
-			}
-		}
-	}()
-
-	return sync.OnceFunc(func() {
-		close(done)
-		wg.Wait()
 	})
 }
 

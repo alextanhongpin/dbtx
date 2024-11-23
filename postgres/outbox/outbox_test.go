@@ -5,9 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"sync"
 	"testing"
-	"time"
 
 	_ "embed"
 
@@ -100,63 +98,6 @@ func TestOutbox(t *testing.T) {
 
 			return nil
 		})
-		is.ErrorIs(err, outbox.EOQ)
-	})
-}
-
-func TestPoll(t *testing.T) {
-	is := assert.New(t)
-
-	ob := outbox.New(pgtest.New(t, pgtest.Image(postgresVersion), pgtest.Hook(migrate)).DB())
-	ctx := context.Background()
-	err := ob.RunInTx(ctx, func(txCtx context.Context) error {
-		ok := outbox.Enqueue(txCtx,
-			outbox.Message{
-				AggregateID:   "a-id-1",
-				AggregateType: "a-type-1",
-				Type:          "type-1",
-				Payload:       json.RawMessage(`{"foo": "bar"}`),
-			},
-			outbox.Message{
-				AggregateID:   "a-id-2",
-				AggregateType: "a-type-2",
-				Type:          "type-2",
-				Payload:       json.RawMessage(`{"one": 1}`),
-			},
-		)
-		is.True(ok)
-
-		return nil
-	})
-	is.Nil(err, err)
-
-	count, err := ob.Count(ctx)
-	is.Nil(err)
-	is.Equal(int64(2), count)
-
-	t.Run("pool", func(t *testing.T) {
-		is := assert.New(t)
-
-		var wg sync.WaitGroup
-		wg.Add(2)
-		stop := ob.Poll(ctx, func(txCtx context.Context, evt outbox.Event) error {
-			defer wg.Done()
-
-			is.True(dbtx.IsTx(txCtx))
-			t.Log(evt)
-			return nil
-		}, &outbox.PollOptions{
-			Concurrency:    5,
-			BatchSize:      10,
-			PollInterval:   time.Second,
-			MaxIdleTimeout: time.Minute,
-		})
-
-		wg.Wait()
-		stop()
-
-		count, err := ob.Count(ctx)
-		is.Nil(err)
-		is.Equal(int64(0), count)
+		is.ErrorIs(err, outbox.Empty)
 	})
 }

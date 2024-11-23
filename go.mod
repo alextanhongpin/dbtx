@@ -1,12 +1,13 @@
 module github.com/alextanhongpin/dbtx
 
-go 1.22.5
+go 1.23.0
+
+toolchain go1.23.3
 
 require (
 	github.com/alextanhongpin/core/storage/pg v0.0.0-20241114173105-ece54a0c4c39
 	github.com/lib/pq v1.10.9
 	github.com/stretchr/testify v1.9.0
-	golang.org/x/sync v0.8.0
 )
 
 require (
