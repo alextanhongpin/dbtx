@@ -3,7 +3,6 @@ package lock
 import (
 	"fmt"
 	"hash/fnv"
-	"math"
 )
 
 // https://www.postgresql.org/docs/current/datatype-numeric.html
@@ -54,18 +53,20 @@ func (k *Key) String() string {
 }
 
 func NewStrKey(z string) *Key {
+	c := Int64Hash(z)
 	return &Key{
-		z:    IntHash64(z),
-		repr: fmt.Sprintf("Key(%q)", z),
+		z:    c,
+		repr: fmt.Sprintf("Key(%q|%d)", z, c),
 	}
 }
 
 func NewStrKeyPair(x, y string) *Key {
+	a, b := Int32Hash(x), Int32Hash(y)
 	return &Key{
-		x:    IntHash32(x),
-		y:    IntHash32(y),
+		x:    a,
+		y:    b,
 		pair: true,
-		repr: fmt.Sprintf("Key(%q, %q)", x, y),
+		repr: fmt.Sprintf("Key(%q|%d, %q|%d)", x, a, y, b),
 	}
 }
 
@@ -89,26 +90,10 @@ func Hash64(key string) uint64 {
 	return hash.Sum64()
 }
 
-func IntHash32(key string) int32 {
-	return Uint32ToInt32(Hash32(key))
+func Int32Hash(key string) int32 {
+	return int32(Hash32(key)) // Overflow.
 }
 
-func IntHash64(key string) int64 {
-	return Uint64ToInt64(Hash64(key))
-}
-
-func Uint64ToInt64(u64 uint64) int64 {
-	if u64 > uint64(math.MaxInt64) {
-		return int64(u64 - uint64(math.MaxInt64) - 1)
-	}
-
-	return int64(u64) - math.MaxInt64 - 1
-}
-
-func Uint32ToInt32(u32 uint32) int32 {
-	if u32 > uint32(math.MaxInt32) {
-		return int32(u32 - uint32(math.MaxInt32) - 1)
-	}
-
-	return int32(u32) - math.MaxInt32 - 1
+func Int64Hash(key string) int64 {
+	return int64(Hash64(key)) // Overflow
 }
