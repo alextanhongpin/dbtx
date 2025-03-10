@@ -21,7 +21,7 @@ const postgresVersion = "postgres:15.1-alpine"
 var ErrRollback = errors.New("rollback")
 
 func TestMain(m *testing.M) {
-	stop := pgtest.InitDB(pgtest.Image(postgresVersion), pgtest.Hook(migrate))
+	stop := pgtest.Init(pgtest.Image(postgresVersion), pgtest.Hook(migrate))
 	defer stop()
 
 	m.Run()
@@ -82,29 +82,33 @@ func TestAtomicContext(t *testing.T) {
 func TestAtomic(t *testing.T) {
 	atm := dbtx.New(pgtest.DB(t))
 	err := atm.RunInTx(context.Background(), func(txCtx context.Context) error {
-		insertRow(t, newNumberRepo(atm), txCtx, 42)
+		create(t, atm, txCtx, 41)
+		create(t, atm, txCtx, 42)
+		count(t, atm, txCtx, 2)
 
 		return ErrRollback
 	})
+
 	is := assert.New(t)
 	is.ErrorIs(err, ErrRollback, err)
-	noRows(t, newNumberRepo(atm), 42)
+	count(t, atm, context.Background(), 0)
 }
 
 // TestPanic tests if the transaction is rollback on panic.
 func TestPanic(t *testing.T) {
 	atm := dbtx.New(pgtest.DB(t))
-	repo := newNumberRepo(atm)
 
 	assert.Panics(t, func() {
 		_ = atm.RunInTx(context.Background(), func(txCtx context.Context) error {
-			insertRow(t, repo, txCtx, 42)
+			create(t, atm, txCtx, 41)
+			create(t, atm, txCtx, 42)
+			count(t, atm, txCtx, 2)
 
 			panic("server error")
 		})
 	})
 
-	noRows(t, repo, 42)
+	count(t, atm, context.Background(), 0)
 }
 
 func TestAtomicIntKeyPairLocked(t *testing.T) {
@@ -237,32 +241,31 @@ func TestAtomicLocker(t *testing.T) {
 }
 
 func migrate(db *sql.DB) error {
-	_, err := db.Exec(`create table numbers(n int);`)
+	_, err := db.Exec(`create table numbers(n int)`)
+
 	return err
 }
 
-// insertRow inserts a row with the given number.
-func insertRow(t *testing.T, repo *numberRepo, ctx context.Context, n int) {
+// create inserts a row with the given number.
+func create(t *testing.T, atm atomic, ctx context.Context, n int) {
 	t.Helper()
 
+	repo := newNumberRepo(atm)
 	rows, err := repo.Create(ctx, n)
 	is := assert.New(t)
 	is.Nil(err)
 	is.Equal(int64(1), rows)
-
-	i, err := repo.Find(ctx, n)
-	is.Nil(err)
-	is.Equal(n, i)
 }
 
-// noRows check that the given number does not exist in the database.
-func noRows(t *testing.T, repo *numberRepo, n int) {
+// count check that the given number does not exist in the database.
+func count(t *testing.T, atm atomic, ctx context.Context, want int) {
 	t.Helper()
 
-	i, err := repo.Find(context.Background(), n)
+	repo := newNumberRepo(atm)
+	got, err := repo.Count(ctx)
 	is := assert.New(t)
-	is.ErrorIs(err, sql.ErrNoRows, err)
-	is.Equal(0, i)
+	is.Nil(err, err)
+	is.Equal(want, got)
 }
 
 type atomic interface {
@@ -279,12 +282,12 @@ func newNumberRepo(atm atomic) *numberRepo {
 	}
 }
 
-func (r *numberRepo) Find(ctx context.Context, n int) (int, error) {
-	var i int
+func (r *numberRepo) Count(ctx context.Context) (int, error) {
+	var n int
 	err := r.DBTx(ctx).
-		QueryRow(`select n from numbers where n = $1`, n).
-		Scan(&i)
-	return i, err
+		QueryRow(`select count(*) from numbers`).
+		Scan(&n)
+	return n, err
 }
 
 func (r *numberRepo) Create(ctx context.Context, n int) (int64, error) {

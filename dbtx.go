@@ -23,9 +23,10 @@ type DBTX interface {
 
 // atomic represents the database atomic operations in a transactions.
 type atomic interface {
-	DBTx(ctx context.Context) DBTX
 	DB() DBTX
+	DBTx(ctx context.Context) DBTX
 	Tx(ctx context.Context) DBTX
+
 	RunInTx(ctx context.Context, fn func(txCtx context.Context) error) (err error)
 }
 
@@ -90,11 +91,12 @@ func (a *Atomic) RunInTx(ctx context.Context, fn func(context.Context) error) (e
 	if err != nil {
 		return err
 	}
+
 	defer func() {
 		if r := recover(); r != nil {
-			err := tx.Rollback()
+			txErr := tx.Rollback()
 			if e, ok := r.(error); ok {
-				panic(errors.Join(err, e))
+				panic(errors.Join(err, e, txErr))
 			} else {
 				panic(r)
 			}

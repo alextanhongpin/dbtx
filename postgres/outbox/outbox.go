@@ -12,7 +12,10 @@ import (
 	"github.com/alextanhongpin/dbtx/postgres/outbox/internal/postgres"
 )
 
-var Empty = errors.New("outbox: empty")
+var (
+	Empty              = errors.New("outbox: empty")
+	ErrContextNotFound = errors.New("outbox: context not found")
+)
 
 var outboxContextKey contextKey = "outbox"
 
@@ -135,6 +138,12 @@ func Enqueue(ctx context.Context, msgs ...Message) bool {
 	}
 
 	return ok
+}
+
+func MustEnqueue(ctx context.Context, msgs ...Message) {
+	if !Enqueue(ctx, msgs...) {
+		panic(ErrContextNotFound)
+	}
 }
 
 type contextKey string
