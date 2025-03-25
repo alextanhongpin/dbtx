@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	dockertest "github.com/ory/dockertest/v3"
 	"github.com/ory/dockertest/v3/docker"
 )
@@ -46,7 +47,7 @@ func New(t *testing.T, opts ...Option) *C {
 // The reason is there is a need for testing stuff that should not be in the
 // same transactions, e.g. when generating current_timestamp, or locking in
 // different connection.
-func DB(ctx context.Context, t *testing.T) *pgx.Conn {
+func DB(ctx context.Context, t *testing.T) *pgxpool.Pool {
 	return c.DB(ctx, t)
 }
 
@@ -237,14 +238,14 @@ func (c *client) DSN() string {
 	return c.dsn
 }
 
-func (c *client) DB(ctx context.Context, t *testing.T) *pgx.Conn {
-	db, err := pgx.Connect(ctx, c.dsn)
+func (c *client) DB(ctx context.Context, t *testing.T) *pgxpool.Pool {
+	db, err := pgxpool.New(ctx, c.dsn)
 	if err != nil {
 		panic(err)
 	}
 
 	t.Cleanup(func() {
-		_ = db.Close(ctx)
+		db.Close()
 	})
 
 	return db
@@ -274,7 +275,7 @@ func newC(t *testing.T, opts ...Option) *C {
 	}
 }
 
-func (c *C) DB(ctx context.Context) *pgx.Conn {
+func (c *C) DB(ctx context.Context) *pgxpool.Pool {
 	return c.c.DB(ctx, c.t)
 }
 

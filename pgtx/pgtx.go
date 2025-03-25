@@ -10,7 +10,7 @@ import (
 
 var ErrNotTransaction = errors.New("pgtx: underlying type is not a transaction")
 
-// DBTX represents the common db operations for *pgx.Conn, *pgxpool.Conn and pgx.Tx.
+// DBTX represents the common db operations for *pgx.Conn, *pgxpool.Pool and pgx.Tx.
 type DBTX interface {
 	CopyFrom(ctx context.Context, tableName pgx.Identifier, columnNames []string, rowSrc pgx.CopyFromSource) (int64, error)
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
@@ -27,7 +27,7 @@ type atomic interface {
 	RunInTx(ctx context.Context, fn func(txCtx context.Context) error) (err error)
 }
 
-// connOrPool is a common interface for both *pgx.Conn and *pgxpool.Conn.
+// connOrPool is a common interface for both *pgx.Conn and *pgxpool.Pool.
 type connOrPool interface {
 	BeginTx(ctx context.Context, txOptions pgx.TxOptions) (pgx.Tx, error)
 	DBTX
@@ -50,16 +50,16 @@ func New(db connOrPool, fns ...func(DBTX) DBTX) *Atomic {
 	}
 }
 
-// DB returns the underlying *pgx.Conn or *pgxpool.Conn as DBTX interface, to
+// DB returns the underlying *pgx.Conn or *pgxpool.Pool as DBTX interface, to
 // avoid the caller to init a new transaction.
-// This also allows wrapping the *pgx.Conn/*pgxpool.Conn with other
+// This also allows wrapping the *pgx.Conn/*pgxpool.Pool with other
 // implementations, such as recorder.
 func (a *Atomic) DB() DBTX {
 	return apply(a.db, a.fns...)
 }
 
 // DBTx returns the DBTX from the context, which can be either *pgx.Conn,
-// *pgxpool.Conn or pgx.Tx.
+// *pgxpool.Pool or pgx.Tx.
 // Returns the atomic underlying type if the context is empty.
 func (a *Atomic) DBTx(ctx context.Context) DBTX {
 	if tx, ok := Value(ctx); ok {

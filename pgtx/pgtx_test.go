@@ -92,22 +92,36 @@ func TestRollback(t *testing.T) {
 
 	// Start a new transaction with the transaction context.
 	err := uow.RunInTx(ctx, func(txCtx context.Context) error {
-		is.True(pgtx.IsTx(txCtx))
 		is.False(pgtx.IsTx(ctx))
+		is.True(pgtx.IsTx(txCtx))
 
-		id, err := repo.Create(txCtx, "john")
-		if err != nil {
-			return err
-		}
-		is.True(id > 0)
+		{
+			id, err := repo.Create(txCtx, "john")
+			if err != nil {
+				return err
+			}
+			is.True(id > 0)
 
-		// User is created in the transaction.
-		userID, err := repo.Find(txCtx, "john")
-		if err != nil {
-			return err
+			// User is created in the transaction.
+			userID, err := repo.Find(txCtx, "john")
+			if err != nil {
+				return err
+			}
+			is.NotZero(userID)
+			is.Equal(id, userID)
 		}
-		is.NotZero(userID)
-		is.Equal(id, userID)
+
+		{
+			id, err := repo.Create(ctx, "alice")
+			if err != nil {
+				return err
+			}
+			is.True(id > 0)
+		}
+
+		n, err := repo.Count(txCtx)
+		is.Equal(2, n)
+		is.Nil(err)
 
 		return ErrRollback
 	})
@@ -117,6 +131,14 @@ func TestRollback(t *testing.T) {
 	// Rollback. The user should not be found.
 	_, err = repo.Find(ctx, "john")
 	is.ErrorIs(err, pgx.ErrNoRows)
+
+	n, err := repo.Count(ctx)
+	is.Equal(1, n)
+	is.Nil(err)
+
+	id, err := repo.Find(ctx, "alice")
+	is.NotZero(id)
+	is.Nil(err)
 }
 
 type userRepository struct {
@@ -133,6 +155,12 @@ func (u *userRepository) Find(ctx context.Context, name string) (int, error) {
 	var id int
 	err := u.db(ctx).QueryRow(ctx, "SELECT id FROM users WHERE name = $1", name).Scan(&id)
 	return id, err
+}
+
+func (u *userRepository) Count(ctx context.Context) (int, error) {
+	var n int
+	err := u.db(ctx).QueryRow(ctx, "SELECT COUNT(*) FROM users").Scan(&n)
+	return n, err
 }
 
 func (u *userRepository) db(ctx context.Context) pgtx.DBTX {
