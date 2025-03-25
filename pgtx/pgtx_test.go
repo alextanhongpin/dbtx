@@ -27,6 +27,10 @@ func migrate(conn *pgx.Conn) error {
 }
 
 func TestMain(m *testing.M) {
+	// Initialize a global database connection.
+	// The connection is closed after the test.
+	// You can get the connection by calling pgxtest.DB(ctx, t).
+	// You can also create a new connection by calling pgxtest.New(t).DB().
 	close := pgxtest.Init(pgxtest.Hook(migrate))
 	defer close()
 
@@ -44,24 +48,49 @@ func TestConnection(t *testing.T) {
 }
 
 func TestStandalone(t *testing.T) {
-	c := pgxtest.New(t, pgxtest.Hook(migrate))
-	db := c.DB(ctx)
+	// Create a new database for this test.
+	// The data is separate from the global database.
+	db := pgxtest.New(t, pgxtest.Hook(migrate)).DB(ctx)
 
 	var n int
 	err := db.QueryRow(ctx, "SELECT 1 + 1").Scan(&n)
 	is := assert.New(t)
 	is.Nil(err)
 	is.Equal(2, n)
+
+	t.Run("multiple dbs", func(t *testing.T) {
+		is := assert.New(t)
+
+		repos := make([]*userRepository, 3)
+		for i := range 3 {
+			db := pgxtest.New(t, pgxtest.Hook(migrate)).DB(ctx)
+			uow := pgtx.New(db)
+			repo := &userRepository{uow: uow}
+			_, err := repo.Create(ctx, "john")
+			is.Nil(err)
+			repos[i] = repo
+		}
+
+		for i := range 3 {
+			userID, err := repos[i].Find(ctx, "john")
+			is.Nil(err)
+			is.Equal(1, userID)
+		}
+	})
 }
 
 func TestRollback(t *testing.T) {
 	db := pgxtest.DB(ctx, t)
-	// Create a new Unit of Work.
 
+	// Create a new Unit of Work.
 	uow := pgtx.New(db)
+
+	// Pass the unit of work to the repository.
 	repo := &userRepository{uow: uow}
 
 	is := assert.New(t)
+
+	// Start a new transaction with the transaction context.
 	err := uow.RunInTx(ctx, func(txCtx context.Context) error {
 		is.True(pgtx.IsTx(txCtx))
 		is.False(pgtx.IsTx(ctx))

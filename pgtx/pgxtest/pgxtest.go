@@ -38,8 +38,8 @@ func Init(opts ...Option) func() {
 	return fn
 }
 
-func New(t *testing.T, opts ...Option) *testClient {
-	return newTestClient(t, opts...)
+func New(t *testing.T, opts ...Option) *C {
+	return newC(t, opts...)
 }
 
 // DB returns a non-transaction *sql.DB.
@@ -250,12 +250,12 @@ func (c *client) DB(ctx context.Context, t *testing.T) *pgx.Conn {
 	return db
 }
 
-type testClient struct {
+type C struct {
 	t *testing.T
 	c *client
 }
 
-func newTestClient(t *testing.T, opts ...Option) *testClient {
+func newC(t *testing.T, opts ...Option) *C {
 	t.Helper()
 	c, err := newClient(opts...)
 	if err != nil {
@@ -268,18 +268,18 @@ func newTestClient(t *testing.T, opts ...Option) *testClient {
 
 	t.Cleanup(c.close)
 
-	return &testClient{
+	return &C{
 		t: t,
 		c: c,
 	}
 }
 
-func (tc *testClient) DB(ctx context.Context) *pgx.Conn {
-	return tc.c.DB(ctx, tc.t)
+func (c *C) DB(ctx context.Context) *pgx.Conn {
+	return c.c.DB(ctx, c.t)
 }
 
-func (tc *testClient) DSN() string {
-	return tc.c.dsn
+func (c *C) DSN() string {
+	return c.c.dsn
 }
 
 func newError(msg string, args ...any) error {
