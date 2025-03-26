@@ -1,12 +1,11 @@
 module github.com/alextanhongpin/dbtx
 
-go 1.23.3
+go 1.23.7
 
 require (
 	github.com/alextanhongpin/core/storage/pg v0.0.0-20241114173105-ece54a0c4c39
 	github.com/alextanhongpin/dbtx/testing/dbtest v0.0.0-00010101000000-000000000000
 	github.com/lib/pq v1.10.9
-	github.com/ory/dockertest/v3 v3.11.0
 	github.com/stretchr/testify v1.10.0
 )
 
@@ -16,6 +15,7 @@ require (
 	github.com/DATA-DOG/go-txdb v0.2.1 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/Nvveen/Gotty v0.0.0-20120604004816-cd527374f1e5 // indirect
+	github.com/alextanhongpin/dbtx/testing/testcontainer v0.0.0-20250326115959-5f22b447b50a // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/containerd/continuity v0.4.5 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
@@ -37,6 +37,7 @@ require (
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/opencontainers/runc v1.2.6 // indirect
+	github.com/ory/dockertest/v3 v3.11.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/puzpuzpuz/xsync/v3 v3.4.0 // indirect
