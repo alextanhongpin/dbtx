@@ -7,8 +7,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/alextanhongpin/core/storage/pg/pgtest"
 	"github.com/alextanhongpin/dbtx/sqlxtx"
+	"github.com/alextanhongpin/dbtx/testing/dbtest"
 	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/assert"
 )
@@ -19,14 +19,17 @@ var ctx = context.Background()
 var ErrRollback = errors.New("intentional rollback")
 
 func TestMain(m *testing.M) {
-	stop := pgtest.InitDB(pgtest.Image(postgresVersion), pgtest.Hook(migrate))
+	stop := dbtest.Init(dbtest.InitOptions{
+		Image: postgresVersion,
+		Hook:  migrate,
+	})
 	code := m.Run()
 	stop()
 	os.Exit(code)
 }
 
 func TestQuery(t *testing.T) {
-	db := pgtest.DB(t)
+	db := dbtest.DB(t)
 	dbx := sqlx.NewDb(db, "postgres")
 	atm := sqlxtx.New(dbx)
 
@@ -47,7 +50,7 @@ func TestQuery(t *testing.T) {
 }
 
 func TestRollback(t *testing.T) {
-	db := pgtest.DB(t)
+	db := dbtest.DB(t)
 	dbx := sqlx.NewDb(db, "postgres")
 	atm := sqlxtx.New(dbx)
 
@@ -77,7 +80,13 @@ func TestRollback(t *testing.T) {
 	assert.Equal(0, n)
 }
 
-func migrate(db *sql.DB) error {
-	_, err := db.Exec(`create table numbers(n int);`)
+func migrate(dsn string) error {
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	_, err = db.Exec(`create table numbers(n int);`)
 	return err
 }

@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/alextanhongpin/dbtx/pgxtx"
-	"github.com/alextanhongpin/dbtx/pgxtx/pgxtest"
+	"github.com/alextanhongpin/dbtx/testing/pgxtest"
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 )

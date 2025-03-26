@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/alextanhongpin/dbtx"
-	"github.com/alextanhongpin/dbtx/dbtest"
 	"github.com/alextanhongpin/dbtx/postgres/lock"
+	"github.com/alextanhongpin/dbtx/testing/dbtest"
 	_ "github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 )

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alextanhongpin/dbtx/pgxtx/pgxtest/internal"
+	"github.com/alextanhongpin/dbtx/testing/pgxtest/internal"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
