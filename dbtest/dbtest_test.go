@@ -96,6 +96,7 @@ func TestStandalone(t *testing.T) {
 }
 
 func TestTransaction(t *testing.T) {
+	// This will be rollbacked after the test completes.
 	repo := &userRepository{uow: dbtx.New(dbtest.Tx(t))}
 	_, err := repo.Create(ctx, "john")
 	is := assert.New(t)

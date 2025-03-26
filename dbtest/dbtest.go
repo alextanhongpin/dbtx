@@ -63,6 +63,7 @@ type Client struct {
 func New(t *testing.T, opts Options) *Client {
 	t.Helper()
 
+	// TODO: Add semaphore here to prevent excessive creation of database.
 	client, err := newClient(opts)
 	if err != nil {
 		t.Error(err)
