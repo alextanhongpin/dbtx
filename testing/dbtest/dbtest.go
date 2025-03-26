@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-txdb"
-	"github.com/alextanhongpin/dbtx/dbtest/internal"
+	"github.com/alextanhongpin/dbtx/testing/dbtest/internal"
 	"github.com/google/uuid"
 )
 
@@ -85,6 +85,7 @@ func newClient(opts Options) (*Client, error) {
 		image    = cmp.Or(opts.Image, "postgres:latest")
 	)
 
+	// Supports postgres based on driver type?
 	dsn, close, err := internal.Run(image, duration)
 	if err != nil {
 		return nil, err

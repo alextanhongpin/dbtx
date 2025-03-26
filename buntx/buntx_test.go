@@ -4,25 +4,98 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"os"
 	"testing"
 
-	"github.com/alextanhongpin/core/storage/pg/pgtest"
 	"github.com/alextanhongpin/dbtx/buntx"
+	"github.com/alextanhongpin/dbtx/testing/buntest"
 	_ "github.com/lib/pq"
+	"github.com/stretchr/testify/assert"
 )
 
 const postgresVersion = "postgres:15.1-alpine"
 
+var ctx = context.Background()
+var ErrRollback = errors.New("rollback")
+
 func TestMain(m *testing.M) {
-	stop := pgtest.InitDB(pgtest.Image(postgresVersion), pgtest.Hook(migrate))
-	code := m.Run()
-	stop() // os.Exit does not care about defer.
-	os.Exit(code)
+	stop := buntest.Init(buntest.InitOptions{
+		Image: postgresVersion,
+		Hook:  migrate,
+	})
+	defer stop()
+
+	m.Run()
+}
+
+func TestTransaction(t *testing.T) {
+	t.Run("one", func(t *testing.T) {
+		tx := buntest.Tx(t)
+
+		var count int64
+		err := tx.NewRaw(`select count(*) from users`).Scan(ctx, &count)
+		is := assert.New(t)
+		is.Nil(err)
+		is.Zero(count)
+
+		var id int64
+		err = tx.NewRaw(`insert into users(name) values (?) returning id`, "john").Scan(ctx, &id)
+		is.Nil(err)
+		is.NotZero(id)
+	})
+
+	t.Run("two", func(t *testing.T) {
+		tx := buntest.Tx(t)
+
+		var count int64
+		err := tx.NewRaw(`select count(*) from users`).Scan(ctx, &count)
+		is := assert.New(t)
+		is.Nil(err)
+		is.Zero(count)
+
+		var id int64
+		err = tx.NewRaw(`insert into users(name) values (?) returning id`, "john").Scan(ctx, &id)
+		is.Nil(err)
+		is.NotZero(id)
+	})
+}
+
+func TestDB(t *testing.T) {
+	t.Run("one", func(t *testing.T) {
+		db := buntest.DB(t)
+
+		var count int64
+		err := db.NewRaw(`select count(*) from users`).Scan(ctx, &count)
+		is := assert.New(t)
+		is.Nil(err)
+		is.Zero(count)
+
+		var id int64
+		err = db.NewRaw(`insert into users(name) values (?) returning id`, "john").Scan(ctx, &id)
+		is.Nil(err)
+		is.NotZero(id)
+	})
+
+	t.Run("two", func(t *testing.T) {
+		db := buntest.DB(t)
+
+		var count int64
+		err := db.NewRaw(`select count(*) from users`).Scan(ctx, &count)
+		is := assert.New(t)
+		is.Nil(err)
+		is.NotZero(count)
+
+		var id int64
+		err = db.NewRaw(`insert into users(name) values (?) returning id`, "alice").Scan(ctx, &id)
+		is.Nil(err)
+		is.NotZero(id)
+	})
 }
 
 func TestBun(t *testing.T) {
-	bunDB := pgtest.BunDB(t)
+	bunDB := buntest.New(t, buntest.Options{
+		Image: postgresVersion,
+		Hook:  migrate,
+	}).DB(t)
 	// Setup unit of work.
 	u := buntx.New(bunDB)
 	ctx := context.Background()
@@ -45,24 +118,25 @@ func TestBun(t *testing.T) {
 			return errors.New("invalid user count")
 		}
 
-		return errors.New("rollback")
+		return ErrRollback
 	})
-	if err.Error() != "rollback" {
-		t.Fatal("failed to rollback")
-	}
+	is := assert.New(t)
+	is.ErrorIs(err, ErrRollback)
 
 	var count int64
 	err = bunDB.NewRaw(`select count(*) from users`).Scan(ctx, &count)
-	if err != nil {
-		t.Error(err)
-	}
-	if count != int64(0) {
-		t.Fatalf("count: want %d, got %d", 1, count)
-	}
+	is.Nil(err)
+	is.Equal(int64(0), count)
 }
 
-func migrate(db *sql.DB) error {
-	_, err := db.Exec(`create table users (
+func migrate(dsn string) error {
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	_, err = db.Exec(`create table users (
 	id bigint generated always as identity,
 	name text not null,
 	primary key (id),
