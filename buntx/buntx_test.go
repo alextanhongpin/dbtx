@@ -12,14 +12,14 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-const postgresVersion = "postgres:15.1-alpine"
+const postgresImage = "postgres:17.4"
 
 var ctx = context.Background()
 var ErrRollback = errors.New("rollback")
 
 func TestMain(m *testing.M) {
 	stop := buntest.Init(buntest.InitOptions{
-		Image: postgresVersion,
+		Image: postgresImage,
 		Hook:  migrate,
 	})
 	defer stop()
@@ -93,7 +93,7 @@ func TestDB(t *testing.T) {
 
 func TestBun(t *testing.T) {
 	bunDB := buntest.New(t, buntest.Options{
-		Image: postgresVersion,
+		Image: postgresImage,
 		Hook:  migrate,
 	}).DB(t)
 	// Setup unit of work.

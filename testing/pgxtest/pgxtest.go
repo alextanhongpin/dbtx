@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alextanhongpin/dbtx/testing/pgxtest/internal"
+	"github.com/alextanhongpin/dbtx/testing/testcontainer"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -82,7 +82,7 @@ func newClient(opts Options) (*Client, error) {
 		image    = cmp.Or(opts.Image, "postgres:latest")
 	)
 
-	dsn, close, err := internal.Run(image, duration)
+	dsn, close, err := testcontainer.Postgres(image, duration)
 	if err != nil {
 		return nil, err
 	}

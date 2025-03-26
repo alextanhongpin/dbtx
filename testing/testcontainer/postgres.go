@@ -1,4 +1,4 @@
-package internal
+package testcontainer
 
 import (
 	"errors"
@@ -10,7 +10,7 @@ import (
 	"github.com/ory/dockertest/v3/docker"
 )
 
-func Run(image string, expiry time.Duration) (dsn string, close func() error, err error) {
+func Postgres(image string, expiry time.Duration) (dsn string, close func() error, err error) {
 	pool, err := dockertest.NewPool("")
 	if err != nil {
 		return "", nil, fmt.Errorf("dockertest: could not construct pool: %w", err)

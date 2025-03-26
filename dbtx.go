@@ -103,7 +103,10 @@ func (a *Atomic) RunInTx(ctx context.Context, fn func(context.Context) error) (e
 		}
 	}()
 
-	ctx = withValue(ctx, &Tx{tx: tx, fns: a.fns})
+	ctx = txCtxKey.WithValue(ctx, &Tx{
+		tx:  tx,
+		fns: a.fns,
+	})
 	if err := fn(ctx); err != nil {
 		return errors.Join(tx.Rollback(), err)
 	}

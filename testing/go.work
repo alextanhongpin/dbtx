@@ -1,0 +1,8 @@
+go 1.23.7
+
+use (
+	./buntest
+	./dbtest
+	./pgxtest
+	./testcontainer
+)

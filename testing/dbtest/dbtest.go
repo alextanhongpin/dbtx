@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-txdb"
-	"github.com/alextanhongpin/dbtx/testing/dbtest/internal"
+	"github.com/alextanhongpin/dbtx/testing/testcontainer"
 	"github.com/google/uuid"
 )
 
@@ -86,7 +86,7 @@ func newClient(opts Options) (*Client, error) {
 	)
 
 	// Supports postgres based on driver type?
-	dsn, close, err := internal.Run(image, duration)
+	dsn, close, err := testcontainer.Postgres(image, duration)
 	if err != nil {
 		return nil, err
 	}

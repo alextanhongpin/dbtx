@@ -8,8 +8,8 @@ import (
 )
 
 var (
-	ErrNonTransaction = errors.New("dbtx: underlying type is not a transaction")
-	ErrIsTransaction  = errors.New("dbtx: underlying type is transaction")
+	ErrNonTransaction = errors.New("buntx: underlying type is not a transaction")
+	ErrIsTransaction  = errors.New("buntx: underlying type is transaction")
 )
 
 // DBTX is an alias to bun.IDB.
