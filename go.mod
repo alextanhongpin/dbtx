@@ -1,19 +1,18 @@
 module github.com/alextanhongpin/dbtx
 
-go 1.23.0
-
-toolchain go1.23.3
+go 1.23.3
 
 require (
 	github.com/alextanhongpin/core/storage/pg v0.0.0-20241114173105-ece54a0c4c39
+	github.com/alextanhongpin/dbtx/testing/dbtest v0.0.0-00010101000000-000000000000
 	github.com/lib/pq v1.10.9
-	github.com/stretchr/testify v1.9.0
+	github.com/stretchr/testify v1.10.0
 )
 
 require (
 	dario.cat/mergo v1.0.1 // indirect
 	github.com/Azure/go-ansiterm v0.0.0-20230124172434-306776ec8161 // indirect
-	github.com/DATA-DOG/go-txdb v0.2.0 // indirect
+	github.com/DATA-DOG/go-txdb v0.2.1 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/Nvveen/Gotty v0.0.0-20120604004816-cd527374f1e5 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
@@ -58,3 +57,5 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	mellium.im/sasl v0.3.2 // indirect
 )
+
+replace github.com/alextanhongpin/dbtx/testing/dbtest => ./testing/dbtest
