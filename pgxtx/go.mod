@@ -1,4 +1,4 @@
-module github.com/alextanhongpin/dbtx/pgtx
+module github.com/alextanhongpin/dbtx/pgxtx
 
 go 1.23.3
 

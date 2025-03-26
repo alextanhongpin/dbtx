@@ -9,19 +9,23 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alextanhongpin/core/storage/pg/pgtest"
 	"github.com/alextanhongpin/dbtx"
+	"github.com/alextanhongpin/dbtx/dbtest"
 	"github.com/alextanhongpin/dbtx/postgres/lock"
 	_ "github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 )
 
-const postgresVersion = "postgres:15.1-alpine"
+const postgresVersion = "postgres:17.4"
 
 var ErrRollback = errors.New("rollback")
 
 func TestMain(m *testing.M) {
-	stop := pgtest.Init(pgtest.Image(postgresVersion), pgtest.Hook(migrate))
+	stop := dbtest.Init(dbtest.InitOptions{
+		Driver: "postgres",
+		Image:  postgresVersion,
+		Hook:   migrate,
+	})
 	defer stop()
 
 	m.Run()
@@ -29,7 +33,7 @@ func TestMain(m *testing.M) {
 
 func TestSQL(t *testing.T) {
 	var n int
-	err := pgtest.DB(t).QueryRow("select 1 + 1").Scan(&n)
+	err := dbtest.DB(t).QueryRow("select 1 + 1").Scan(&n)
 
 	is := assert.New(t)
 	is.Nil(err)
@@ -38,7 +42,7 @@ func TestSQL(t *testing.T) {
 
 func TestLoggerContext(t *testing.T) {
 	logger := &InMemoryLogger{}
-	atm := dbtx.New(pgtest.DB(t), dbtx.WithLogger(logger))
+	atm := dbtx.New(dbtest.DB(t), dbtx.WithLogger(logger))
 	ctx := context.Background()
 
 	var n int
@@ -60,7 +64,7 @@ func TestLoggerContext(t *testing.T) {
 }
 
 func TestAtomicContext(t *testing.T) {
-	atm := dbtx.New(pgtest.DB(t))
+	atm := dbtx.New(dbtest.DB(t))
 	ctx := context.Background()
 
 	t.Run("isNotTx", func(t *testing.T) {
@@ -80,7 +84,7 @@ func TestAtomicContext(t *testing.T) {
 
 // TestAtomic tests if the transaction is rollback successfullly.
 func TestAtomic(t *testing.T) {
-	atm := dbtx.New(pgtest.DB(t))
+	atm := dbtx.New(dbtest.DB(t))
 	err := atm.RunInTx(context.Background(), func(txCtx context.Context) error {
 		create(t, atm, txCtx, 41)
 		create(t, atm, txCtx, 42)
@@ -96,7 +100,7 @@ func TestAtomic(t *testing.T) {
 
 // TestPanic tests if the transaction is rollback on panic.
 func TestPanic(t *testing.T) {
-	atm := dbtx.New(pgtest.DB(t))
+	atm := dbtx.New(dbtest.DB(t))
 
 	assert.Panics(t, func() {
 		_ = atm.RunInTx(context.Background(), func(txCtx context.Context) error {
@@ -113,7 +117,7 @@ func TestPanic(t *testing.T) {
 
 func TestAtomicIntKeyPairLocked(t *testing.T) {
 	key := lock.NewIntKeyPair(1, 1)
-	atm := dbtx.New(pgtest.DB(t))
+	atm := dbtx.New(dbtest.DB(t))
 	err := atm.RunInTx(context.Background(), func(txCtx context.Context) error {
 		if err := lock.TryLock(txCtx, key); err != nil {
 			return err
@@ -131,7 +135,7 @@ func TestAtomicIntKeyPairLocked(t *testing.T) {
 
 func TestAtomicLockBoundary(t *testing.T) {
 	is := assert.New(t)
-	tx := dbtx.New(pgtest.DB(t))
+	tx := dbtx.New(dbtest.DB(t))
 	err := tx.RunInTx(context.Background(), func(ctx context.Context) error {
 		is.Nil(lock.Lock(ctx, lock.NewIntKeyPair(math.MinInt32, math.MaxInt32)))
 		is.Nil(lock.Lock(ctx, lock.NewIntKey(math.MinInt64)))
@@ -143,7 +147,7 @@ func TestAtomicLockBoundary(t *testing.T) {
 }
 
 func TestAtomicIntLockKeyLocked(t *testing.T) {
-	atm := dbtx.New(pgtest.DB(t))
+	atm := dbtx.New(dbtest.DB(t))
 	key := lock.NewIntKey(10)
 
 	is := assert.New(t)
@@ -189,7 +193,7 @@ func TestAtomicLocker(t *testing.T) {
 	ctx := context.Background()
 	key := lock.NewStrKey("The meaning of life...")
 
-	locker := lock.New(pgtest.DB(t))
+	locker := lock.New(dbtest.DB(t))
 
 	var wg sync.WaitGroup
 	wg.Add(3)
@@ -240,8 +244,13 @@ func TestAtomicLocker(t *testing.T) {
 	wg.Wait()
 }
 
-func migrate(db *sql.DB) error {
-	_, err := db.Exec(`create table numbers(n int)`)
+func migrate(dsn string) error {
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	_, err = db.Exec(`create table numbers(n int)`)
 
 	return err
 }

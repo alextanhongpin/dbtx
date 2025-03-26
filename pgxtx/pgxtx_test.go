@@ -1,21 +1,28 @@
-package pgtx_test
+package pgxtx_test
 
 import (
 	"context"
 	"errors"
 	"testing"
 
-	"github.com/alextanhongpin/dbtx/pgtx"
-	"github.com/alextanhongpin/dbtx/pgtx/pgxtest"
+	"github.com/alextanhongpin/dbtx/pgxtx"
+	"github.com/alextanhongpin/dbtx/pgxtx/pgxtest"
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 )
 
+var postgresImage = "postgres:17.4"
 var ctx = context.Background()
-var ErrRollback = errors.New("pgtxt_test: rollback")
+var ErrRollback = errors.New("pgxtx_test: rollback")
 
-func migrate(conn *pgx.Conn) error {
-	_, err := conn.Exec(ctx, `CREATE TABLE IF NOT EXISTS users (
+func migrate(dsn string) error {
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		return err
+	}
+	defer conn.Close(ctx)
+
+	_, err = conn.Exec(ctx, `CREATE TABLE IF NOT EXISTS users (
 		id int generated always as identity primary key,
 		name text not null,
 		unique(id)
@@ -31,14 +38,22 @@ func TestMain(m *testing.M) {
 	// The connection is closed after the test.
 	// You can get the connection by calling pgxtest.DB(ctx, t).
 	// You can also create a new connection by calling pgxtest.New(t).DB().
-	close := pgxtest.Init(pgxtest.Hook(migrate))
+	close := pgxtest.Init(pgxtest.InitOptions{
+		Image: postgresImage,
+		Hook:  migrate,
+	})
 	defer close()
 
 	m.Run()
 }
 
+func TestDSN(t *testing.T) {
+	dsn := pgxtest.DSN()
+	assert.NotEmpty(t, dsn)
+}
+
 func TestConnection(t *testing.T) {
-	db := pgxtest.DB(ctx, t)
+	db := pgxtest.DB(t)
 
 	var n int
 	err := db.QueryRow(ctx, "SELECT 1 + 1").Scan(&n)
@@ -50,7 +65,7 @@ func TestConnection(t *testing.T) {
 func TestStandalone(t *testing.T) {
 	// Create a new database for this test.
 	// The data is separate from the global database.
-	db := pgxtest.New(t, pgxtest.Hook(migrate)).DB(ctx)
+	db := pgxtest.New(t, pgxtest.Options{Image: postgresImage, Hook: migrate}).DB(t)
 
 	var n int
 	err := db.QueryRow(ctx, "SELECT 1 + 1").Scan(&n)
@@ -63,8 +78,8 @@ func TestStandalone(t *testing.T) {
 
 		repos := make([]*userRepository, 3)
 		for i := range 3 {
-			db := pgxtest.New(t, pgxtest.Hook(migrate)).DB(ctx)
-			uow := pgtx.New(db)
+			db := pgxtest.New(t, pgxtest.Options{Image: postgresImage, Hook: migrate}).DB(t)
+			uow := pgxtx.New(db)
 			repo := &userRepository{uow: uow}
 			_, err := repo.Create(ctx, "john")
 			is.Nil(err)
@@ -80,10 +95,10 @@ func TestStandalone(t *testing.T) {
 }
 
 func TestRollback(t *testing.T) {
-	db := pgxtest.DB(ctx, t)
+	db := pgxtest.DB(t)
 
 	// Create a new Unit of Work.
-	uow := pgtx.New(db)
+	uow := pgxtx.New(db)
 
 	// Pass the unit of work to the repository.
 	repo := &userRepository{uow: uow}
@@ -92,8 +107,8 @@ func TestRollback(t *testing.T) {
 
 	// Start a new transaction with the transaction context.
 	err := uow.RunInTx(ctx, func(txCtx context.Context) error {
-		is.False(pgtx.IsTx(ctx))
-		is.True(pgtx.IsTx(txCtx))
+		is.False(pgxtx.IsTx(ctx))
+		is.True(pgxtx.IsTx(txCtx))
 
 		{
 			id, err := repo.Create(txCtx, "john")
@@ -142,7 +157,7 @@ func TestRollback(t *testing.T) {
 }
 
 type userRepository struct {
-	uow *pgtx.Atomic
+	uow *pgxtx.Atomic
 }
 
 func (u *userRepository) Create(ctx context.Context, name string) (int, error) {
@@ -163,6 +178,6 @@ func (u *userRepository) Count(ctx context.Context) (int, error) {
 	return n, err
 }
 
-func (u *userRepository) db(ctx context.Context) pgtx.DBTX {
+func (u *userRepository) db(ctx context.Context) pgxtx.DBTX {
 	return u.uow.DBTx(ctx)
 }

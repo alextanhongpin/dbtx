@@ -1,4 +1,4 @@
-package pgtx
+package pgxtx
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-var ErrNotTransaction = errors.New("pgtx: underlying type is not a transaction")
+var ErrNotTransaction = errors.New("pgxtx: underlying type is not a transaction")
 
 // DBTX represents the common db operations for *pgx.Conn, *pgxpool.Pool and pgx.Tx.
 type DBTX interface {
