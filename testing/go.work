@@ -4,5 +4,6 @@ use (
 	./buntest
 	./dbtest
 	./pgxtest
+	./redistest
 	./testcontainer
 )
