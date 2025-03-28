@@ -10,15 +10,20 @@ import (
 	"github.com/ory/dockertest/v3/docker"
 )
 
-func Postgres(image string, expiry time.Duration) (dsn string, close func() error, err error) {
+type RunResult struct {
+	DSN  string
+	Stop func() error
+}
+
+func Run(image string, expiry time.Duration) (*RunResult, error) {
 	pool, err := dockertest.NewPool("")
 	if err != nil {
-		return "", nil, fmt.Errorf("dockertest: could not construct pool: %w", err)
+		return nil, fmt.Errorf("dockertest: could not construct pool: %w", err)
 	}
 
 	err = pool.Client.Ping()
 	if err != nil {
-		return "", nil, fmt.Errorf("dockertest: could not connect to docker: %w", err)
+		return nil, fmt.Errorf("dockertest: could not connect to docker: %w", err)
 	}
 
 	repo, tag, ok := strings.Cut(image, ":")
@@ -42,7 +47,7 @@ func Postgres(image string, expiry time.Duration) (dsn string, close func() erro
 		config.RestartPolicy = docker.RestartPolicy{Name: "no"}
 	})
 	if err != nil {
-		return "", nil, fmt.Errorf("dockertest: could not start resources: %w", err)
+		return nil, fmt.Errorf("dockertest: could not start resources: %w", err)
 	}
 
 	// https://www.postgresql.org/docs/current/non-durability.html
@@ -57,14 +62,14 @@ func Postgres(image string, expiry time.Duration) (dsn string, close func() erro
 		"-c", "full_page_writes=off",
 	}, dockertest.ExecOptions{})
 	if err != nil {
-		return "", nil, err
+		return nil, err
 	}
 	if code != 1 {
-		return "", nil, fmt.Errorf("dockertest: exec code is not 1")
+		return nil, fmt.Errorf("dockertest: exec code is not 1")
 	}
 
 	hostAndPort := resource.GetHostPort("5432/tcp")
-	dsn = fmt.Sprintf("postgres://test:123456@%s/test?sslmode=disable", hostAndPort)
+	dsn := fmt.Sprintf("postgres://test:123456@%s/test?sslmode=disable", hostAndPort)
 
 	_ = resource.Expire(uint(expiry.Seconds())) // Tell docker to kill the container after the specified expiry period.
 
@@ -88,12 +93,13 @@ func Postgres(image string, expiry time.Duration) (dsn string, close func() erro
 			return errors.New("dockertest: unknown exit code")
 		}
 	}); err != nil {
-		return "", nil, fmt.Errorf("dockertest: could not connect to docker: %s", err)
+		return nil, fmt.Errorf("dockertest: could not connect to docker: %s", err)
 	}
 
-	close = func() error {
-		return pool.Purge(resource)
-	}
-
-	return dsn, close, nil
+	return &RunResult{
+		DSN: dsn,
+		Stop: func() error {
+			return pool.Purge(resource)
+		},
+	}, nil
 }
