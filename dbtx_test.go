@@ -16,16 +16,16 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-const postgresVersion = "postgres:17.4"
-
-var ErrRollback = errors.New("rollback")
+var (
+	ErrRollback = errors.New("rollback")
+	dbtestOpts  = dbtest.Options{
+		Image: "postgres:17.4",
+		Hook:  migrate,
+	}
+)
 
 func TestMain(m *testing.M) {
-	stop := dbtest.Init(dbtest.InitOptions{
-		Driver: "postgres",
-		Image:  postgresVersion,
-		Hook:   migrate,
-	})
+	stop := dbtest.Init(dbtestOpts)
 	defer stop()
 
 	m.Run()
