@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/jmoiron/sqlx"
+	_ "github.com/lib/pq"
 )
 
 var ErrNotTransaction = errors.New("sqltx: underlying type is not a transaction")
