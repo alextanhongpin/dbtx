@@ -174,6 +174,69 @@ func TestTxIsolation(t *testing.T) {
 - **Test Isolation**: Each test runs in its own isolated transaction, preventing interference between tests.
 - **Simplified Cleanup**: No need to write explicit rollback logic in your tests.
 
+### 5. Using `Hook` for Migrations
+
+The `Hook` option allows you to execute custom logic, such as running database migrations, immediately after the database is initialized. This ensures that the database schema is set up before running tests.
+
+#### Example:
+
+```go
+package main
+
+import (
+	"database/sql"
+	"testing"
+	"time"
+
+	"github.com/alextanhongpin/dbtx/testing/dbtest"
+)
+
+func TestMain(m *testing.M) {
+	// Initialize the global database with a migration hook.
+	close := dbtest.Init(dbtest.Options{
+		Driver:   "postgres",
+		Image:    "postgres:latest",
+		Duration: 10 * time.Minute,
+		Hook: func(dsn string) error {
+			// Perform migrations here.
+			db, err := sql.Open("postgres", dsn)
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			_, err = db.Exec(`
+				CREATE TABLE IF NOT EXISTS users (
+					id SERIAL PRIMARY KEY,
+					name TEXT NOT NULL
+				);
+			`)
+			return err
+		},
+	})
+	defer close()
+
+	// Run tests.
+	m.Run()
+}
+
+func TestWithMigration(t *testing.T) {
+	db := dbtest.DB(t) // Get a pooled connection.
+
+	// Verify that the migration was applied.
+	_, err := db.Exec("INSERT INTO users (name) VALUES ($1)", "Alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+```
+
+### Benefits of Using `Hook`
+
+- **One-Time Setup**: Ensures that migrations or other setup logic are executed only once during database initialization.
+- **Customizable**: Allows you to define any logic required to prepare the database for testing.
+- **Simplifies Tests**: Reduces the need to repeat setup logic in individual tests.
+
 ## Options
 
 The `dbtest.Options` struct allows you to configure the database initialization:
