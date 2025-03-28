@@ -4,27 +4,29 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/alextanhongpin/dbtx/testing/pgxtest"
 	"github.com/stretchr/testify/assert"
 )
 
-var dbOpts = pgxtest.Options{
-	Image:    "postgres:17.4",
-	Duration: 10 * time.Minute,
-	Hook: func(dsn string) error {
-		return nil
-	},
-}
-
-var ctx = context.Background()
-var ErrRollback = errors.New("rollback")
+var (
+	ErrRollback = errors.New("pgxtest_test: rollback")
+	ctx         = context.Background()
+	dbOpts      = pgxtest.Options{
+		Image: "postgres:17.4",
+		Hook: func(dsn string) error {
+			// TODO: Migrate the database.
+			return nil
+		},
+	}
+)
 
 func TestMain(m *testing.M) {
 	// Initialize the pgxtest package.
-	close := pgxtest.Init(dbOpts)
-	defer close()
+	stop := pgxtest.Init(dbOpts)
+	defer func() {
+		_ = stop()
+	}()
 
 	// Run the tests.
 	m.Run()

@@ -14,10 +14,41 @@ import (
 var once sync.Once
 var client *Client
 
+func Init(opts ...Options) (close func() error) {
+	once.Do(func() {
+		var err error
+		client, err = newClient(opts...)
+		if err != nil {
+			panic(err)
+		}
+
+		close = client.stop
+	})
+
+	return
+}
+
+// DB is meant to keep the interface consistent.
+func DB(t *testing.T) *pgxpool.Pool {
+	return client.DB(t)
+}
+
+func Pool(t *testing.T) *pgxpool.Pool {
+	return client.DB(t)
+}
+
+func Conn(t *testing.T) *pgx.Conn {
+	return client.Conn(t)
+}
+
+func DSN() string {
+	return client.DSN()
+}
+
 type Options struct {
-	Image    string
 	Duration time.Duration
 	Hook     func(dsn string) error
+	Image    string
 }
 
 func NewOptions() *Options {
@@ -46,42 +77,9 @@ func (o *Options) Merge(opts ...Options) *Options {
 	return o
 }
 
-type InitOptions = Options
-
-func Init(opts ...InitOptions) (close func() error) {
-	once.Do(func() {
-		var err error
-		client, err = newClient(opts...)
-		if err != nil {
-			panic(err)
-		}
-
-		close = client.close
-	})
-
-	return
-}
-
-// DB is meant to keep the interface consistent.
-func DB(t *testing.T) *pgxpool.Pool {
-	return client.DB(t)
-}
-
-func Pool(t *testing.T) *pgxpool.Pool {
-	return client.DB(t)
-}
-
-func Conn(t *testing.T) *pgx.Conn {
-	return client.Conn(t)
-}
-
-func DSN() string {
-	return client.DSN()
-}
-
 type Client struct {
-	close func() error
-	dsn   string
+	dsn  string
+	stop func() error
 }
 
 func New(t *testing.T, opts ...Options) *Client {
@@ -89,10 +87,11 @@ func New(t *testing.T, opts ...Options) *Client {
 
 	client, err := newClient(opts...)
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
+
 	t.Cleanup(func() {
-		if err := client.close(); err != nil {
+		if err := client.stop(); err != nil {
 			t.Error(err)
 		}
 	})
@@ -103,18 +102,18 @@ func New(t *testing.T, opts ...Options) *Client {
 func newClient(opts ...Options) (*Client, error) {
 	opt := NewOptions().Merge(opts...)
 
-	dsn, close, err := testcontainer.Postgres(opt.Image, opt.Duration)
+	res, err := testcontainer.Run(opt.Image, opt.Duration)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := opt.Hook(dsn); err != nil {
+	if err := opt.Hook(res.DSN); err != nil {
 		return nil, err
 	}
 
 	return &Client{
-		close: close,
-		dsn:   dsn,
+		stop: res.Stop,
+		dsn:  res.DSN,
 	}, nil
 }
 
@@ -130,8 +129,9 @@ func (c *Client) Pool(t *testing.T) *pgxpool.Pool {
 	// TODO: Replace with t.Context() in go1.24
 	pool, err := pgxpool.New(context.Background(), c.dsn)
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
+
 	t.Cleanup(func() {
 		pool.Close()
 	})
@@ -146,8 +146,9 @@ func (c *Client) Conn(t *testing.T) *pgx.Conn {
 	ctx := context.Background()
 	conn, err := pgx.Connect(ctx, c.dsn)
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
+
 	t.Cleanup(func() {
 		conn.Close(ctx)
 	})

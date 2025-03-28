@@ -15,6 +15,48 @@ import (
 var once sync.Once
 var client *Client
 
+func Init(opts ...Options) func() error {
+	stop := func() error {
+		return nil
+	}
+
+	once.Do(func() {
+		var err error
+		client, err = newClient(opts...)
+		if err != nil {
+			panic(err)
+		}
+
+		stop = client.stop
+	})
+
+	return stop
+}
+
+func DB(t *testing.T) *sql.DB {
+	if client == nil {
+		panic(fmt.Errorf("dbtest: Init must be called at TestMain"))
+	}
+
+	return client.DB(t)
+}
+
+func Tx(t *testing.T) *sql.DB {
+	if client == nil {
+		panic(fmt.Errorf("dbtest: Init must be called at TestMain"))
+	}
+
+	return client.Tx(t)
+}
+
+func DSN() string {
+	if client == nil || client.DSN() == "" {
+		panic(fmt.Errorf("dbtest: Init must be called at TestMain"))
+	}
+
+	return client.DSN()
+}
+
 type Options struct {
 	Driver   string
 	Duration time.Duration
@@ -55,37 +97,8 @@ func (o *Options) Merge(opts ...Options) *Options {
 	return o
 }
 
-type InitOptions = Options
-
-func Init(opts ...InitOptions) (close func() error) {
-	once.Do(func() {
-		var err error
-		client, err = newClient(opts...)
-		if err != nil {
-			panic(err)
-		}
-
-		close = client.close
-	})
-
-	return
-}
-
-// DB is meant to keep the interface consistent.
-func DB(t *testing.T) *sql.DB {
-	return client.DB(t)
-}
-
-func Tx(t *testing.T) *sql.DB {
-	return client.Tx(t)
-}
-
-func DSN() string {
-	return client.DSN()
-}
-
 type Client struct {
-	close  func() error
+	stop   func() error
 	driver string
 	dsn    string
 	once   sync.Once
@@ -95,13 +108,13 @@ type Client struct {
 func New(t *testing.T, opts ...Options) *Client {
 	t.Helper()
 
-	// TODO: Add semaphore here to prevent excessive creation of database.
 	client, err := newClient(opts...)
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
+
 	t.Cleanup(func() {
-		if err := client.close(); err != nil {
+		if err := client.stop(); err != nil {
 			t.Error(err)
 		}
 	})
@@ -113,19 +126,19 @@ func newClient(opts ...Options) (*Client, error) {
 	opt := NewOptions().Merge(opts...)
 
 	// Supports postgres based on driver type?
-	dsn, close, err := testcontainer.Postgres(opt.Image, opt.Duration)
+	res, err := testcontainer.Run(opt.Image, opt.Duration)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := opt.Hook(dsn); err != nil {
+	if err := opt.Hook(res.DSN); err != nil {
 		return nil, err
 	}
 
 	return &Client{
-		close:  close,
-		dsn:    dsn,
 		driver: opt.Driver,
+		dsn:    res.DSN,
+		stop:   res.Stop,
 	}, nil
 }
 
@@ -136,11 +149,12 @@ func (c *Client) DB(t *testing.T) *sql.DB {
 
 	db, err := sql.Open(c.driver, c.dsn)
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
+
 	t.Cleanup(func() {
-		if db != nil {
-			_ = db.Close()
+		if err := db.Close(); err != nil {
+			t.Error(err)
 		}
 	})
 
@@ -152,18 +166,19 @@ func (c *Client) Tx(t *testing.T) *sql.DB {
 
 	// Lazily initialize the txdb.
 	c.once.Do(func() {
-		c.txdb = fmt.Sprintf("txdb%s", uuid.New())
+		c.txdb = fmt.Sprintf("txdb:%s", uuid.New())
 		txdb.Register(c.txdb, c.driver, c.dsn)
 	})
 
 	// Returns a new identifier for every open connection.
 	db, err := sql.Open(c.txdb, uuid.New().String())
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
+
 	t.Cleanup(func() {
-		if db != nil {
-			_ = db.Close()
+		if err := db.Close(); err != nil {
+			t.Error(err)
 		}
 	})
 

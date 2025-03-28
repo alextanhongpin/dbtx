@@ -1,30 +1,26 @@
-package dbtest_test
+package buntest_test
 
 import (
 	"context"
-	"database/sql"
 	"testing"
 
-	"github.com/alextanhongpin/dbtx/testing/dbtest"
-	_ "github.com/lib/pq"
+	"github.com/alextanhongpin/dbtx/testing/buntest"
 	"github.com/stretchr/testify/assert"
 )
 
 var (
-	ctx        = context.Background()
-	dbtestOpts = dbtest.Options{
+	ctx         = context.Background()
+	buntestOpts = buntest.Options{
 		Image: "postgres:17.4",
 		Hook:  migrate,
 	}
 )
 
 func migrate(dsn string) error {
-	conn, err := sql.Open("postgres", dsn)
-	if err != nil {
-		return err
-	}
+	bun := buntest.NewBun(dsn)
+	defer bun.Close()
 
-	_, err = conn.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS users (
+	_, err := bun.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS users (
 		id int generated always as identity primary key,
 		name text not null,
 		unique(id)
@@ -40,7 +36,7 @@ func TestMain(m *testing.M) {
 	// The connection is closed after the test.
 	// You can get the connection by calling pgxtest.DB(ctx, t).
 	// You can also create a new connection by calling pgxtest.New(t).DB().
-	close := dbtest.Init(dbtestOpts)
+	close := buntest.Init(buntestOpts)
 	defer func() {
 		_ = close()
 	}()
@@ -49,12 +45,12 @@ func TestMain(m *testing.M) {
 }
 
 func TestDSN(t *testing.T) {
-	dsn := dbtest.DSN()
+	dsn := buntest.DSN()
 	assert.NotEmpty(t, dsn)
 }
 
 func TestConnection(t *testing.T) {
-	db := dbtest.DB(t)
+	db := buntest.DB(t)
 
 	var n int
 	err := db.QueryRowContext(ctx, "SELECT 1 + 1").Scan(&n)
@@ -66,7 +62,7 @@ func TestConnection(t *testing.T) {
 func TestStandalone(t *testing.T) {
 	// Create a new database for this test.
 	// The data is separate from the global database.
-	db := dbtest.New(t, dbtestOpts).DB(t)
+	db := buntest.New(t, buntestOpts).DB(t)
 
 	var n int
 	err := db.QueryRowContext(ctx, "SELECT 1 + 1").Scan(&n)

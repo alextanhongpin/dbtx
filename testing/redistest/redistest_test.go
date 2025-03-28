@@ -14,7 +14,9 @@ var ctx = context.Background()
 
 func TestMain(m *testing.M) {
 	stop := redistest.Init()
-	defer stop()
+	defer func() {
+		_ = stop()
+	}()
 
 	m.Run()
 }
