@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 )
 
 var ErrNotTransaction = errors.New("dbtx: underlying type is not a transaction")
@@ -129,4 +130,12 @@ func apply(dbtx DBTX, fns ...func(DBTX) DBTX) DBTX {
 	}
 
 	return dbtx
+}
+
+func SetDefaults(db *sql.DB) {
+	// https://www.alexedwards.net/blog/configuring-sqldb
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(25)
+	db.SetConnMaxLifetime(1 * time.Hour)
+	db.SetConnMaxIdleTime(5 * time.Minute)
 }
