@@ -12,16 +12,17 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-const postgresImage = "postgres:17.4"
-
-var ctx = context.Background()
-var ErrRollback = errors.New("rollback")
+var (
+	ctx         = context.Background()
+	ErrRollback = errors.New("rollback")
+	buntestOpts = buntest.Options{
+		Image: "postgres:17.4",
+		Hook:  migrate,
+	}
+)
 
 func TestMain(m *testing.M) {
-	stop := buntest.Init(buntest.InitOptions{
-		Image: postgresImage,
-		Hook:  migrate,
-	})
+	stop := buntest.Init(buntestOpts)
 	defer stop()
 
 	m.Run()
@@ -92,10 +93,7 @@ func TestDB(t *testing.T) {
 }
 
 func TestBun(t *testing.T) {
-	bunDB := buntest.New(t, buntest.Options{
-		Image: postgresImage,
-		Hook:  migrate,
-	}).DB(t)
+	bunDB := buntest.New(t, buntestOpts).DB(t)
 	// Setup unit of work.
 	u := buntx.New(bunDB)
 	ctx := context.Background()

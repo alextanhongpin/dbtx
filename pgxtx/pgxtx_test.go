@@ -11,9 +11,14 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-var postgresImage = "postgres:17.4"
-var ctx = context.Background()
-var ErrRollback = errors.New("pgxtx_test: rollback")
+var (
+	ctx         = context.Background()
+	ErrRollback = errors.New("pgxtx_test: rollback")
+	pgxtestOpts = pgxtest.Options{
+		Image: "postgres:17.4",
+		Hook:  migrate,
+	}
+)
 
 func migrate(dsn string) error {
 	conn, err := pgx.Connect(ctx, dsn)
@@ -38,11 +43,10 @@ func TestMain(m *testing.M) {
 	// The connection is closed after the test.
 	// You can get the connection by calling pgxtest.DB(ctx, t).
 	// You can also create a new connection by calling pgxtest.New(t).DB().
-	close := pgxtest.Init(pgxtest.InitOptions{
-		Image: postgresImage,
-		Hook:  migrate,
-	})
-	defer close()
+	stop := pgxtest.Init(pgxtestOpts)
+	defer func() {
+		_ = stop()
+	}()
 
 	m.Run()
 }
@@ -65,7 +69,7 @@ func TestConnection(t *testing.T) {
 func TestStandalone(t *testing.T) {
 	// Create a new database for this test.
 	// The data is separate from the global database.
-	db := pgxtest.New(t, pgxtest.Options{Image: postgresImage, Hook: migrate}).DB(t)
+	db := pgxtest.New(t, pgxtestOpts).DB(t)
 
 	var n int
 	err := db.QueryRow(ctx, "SELECT 1 + 1").Scan(&n)
@@ -78,7 +82,7 @@ func TestStandalone(t *testing.T) {
 
 		repos := make([]*userRepository, 3)
 		for i := range 3 {
-			db := pgxtest.New(t, pgxtest.Options{Image: postgresImage, Hook: migrate}).DB(t)
+			db := pgxtest.New(t, pgxtestOpts).DB(t)
 			uow := pgxtx.New(db)
 			repo := &userRepository{uow: uow}
 			_, err := repo.Create(ctx, "john")

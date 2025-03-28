@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"os"
 	"testing"
 
 	"github.com/alextanhongpin/dbtx/sqlxtx"
@@ -13,19 +12,22 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-const postgresVersion = "postgres:15.1-alpine"
-
-var ctx = context.Background()
-var ErrRollback = errors.New("intentional rollback")
+var (
+	ErrRollback = errors.New("intentional rollback")
+	ctx         = context.Background()
+	dbtestOpts  = dbtest.Options{
+		Image: "postgres:17.4",
+		Hook:  migrate,
+	}
+)
 
 func TestMain(m *testing.M) {
-	stop := dbtest.Init(dbtest.InitOptions{
-		Image: postgresVersion,
-		Hook:  migrate,
-	})
-	code := m.Run()
-	stop()
-	os.Exit(code)
+	stop := dbtest.Init(dbtestOpts)
+	defer func() {
+		_ = stop()
+	}()
+
+	m.Run()
 }
 
 func TestQuery(t *testing.T) {
