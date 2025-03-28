@@ -12,6 +12,8 @@ github.com/alextanhongpin/dbtx/testing/testcontainer v0.0.0-20250326115959-5f22b
 github.com/alextanhongpin/dbtx/testing/testcontainer v0.0.0-20250326115959-5f22b447b50a/go.mod h1:BsNVYneADsmQ/C9jlyZkc4nq6yV0PazAtGrnAR1+LP8=
 github.com/alextanhongpin/dbtx/testing/testcontainer v0.0.0-20250328100037-1e8277dbb838 h1:gr0hJu4hdwTf020SJZ59x2fkt+CEFYSuU6x3Lf14k34=
 github.com/alextanhongpin/dbtx/testing/testcontainer v0.0.0-20250328100037-1e8277dbb838/go.mod h1:BsNVYneADsmQ/C9jlyZkc4nq6yV0PazAtGrnAR1+LP8=
+github.com/alextanhongpin/dbtx/testing/testcontainer v0.0.0-20250328124554-ebac23746f07 h1:UOXk0M+uGib7WWppvNIWB7fugzlMNJALe7rX0MI7DJQ=
+github.com/alextanhongpin/dbtx/testing/testcontainer v0.0.0-20250328124554-ebac23746f07/go.mod h1:BsNVYneADsmQ/C9jlyZkc4nq6yV0PazAtGrnAR1+LP8=
 github.com/cenkalti/backoff/v4 v4.3.0 h1:MyRJ/UdXutAwSAT+s3wNd7MfTIcy71VQueUuFK343L8=
 github.com/cenkalti/backoff/v4 v4.3.0/go.mod h1:Y3VNntkOUPxTVeUxJ/G5vcM//AlwfmyYozVcomhLiZE=
 github.com/containerd/continuity v0.4.5 h1:ZRoN1sXq9u7V6QoHMcVWGhOwDFqZ4B9i5H6un1Wh0x4=
