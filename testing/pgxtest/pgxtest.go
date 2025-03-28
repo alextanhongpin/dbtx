@@ -1,7 +1,6 @@
 package pgxtest
 
 import (
-	"cmp"
 	"context"
 	"sync"
 	"testing"
@@ -21,12 +20,38 @@ type Options struct {
 	Hook     func(dsn string) error
 }
 
+func NewOptions() *Options {
+	return &Options{
+		Image:    "postgres:latest",
+		Duration: 10 * time.Minute,
+		Hook:     func(dsn string) error { return nil },
+	}
+}
+
+func (o *Options) Merge(opts ...Options) *Options {
+	for _, opt := range opts {
+		if opt.Image != "" {
+			o.Image = opt.Image
+		}
+
+		if opt.Duration != 0 {
+			o.Duration = opt.Duration
+		}
+
+		if opt.Hook != nil {
+			o.Hook = opt.Hook
+		}
+	}
+
+	return o
+}
+
 type InitOptions = Options
 
-func Init(opts InitOptions) (close func() error) {
+func Init(opts ...InitOptions) (close func() error) {
 	once.Do(func() {
 		var err error
-		client, err = newClient(opts)
+		client, err = newClient(opts...)
 		if err != nil {
 			panic(err)
 		}
@@ -59,10 +84,10 @@ type Client struct {
 	dsn   string
 }
 
-func New(t *testing.T, opts Options) *Client {
+func New(t *testing.T, opts ...Options) *Client {
 	t.Helper()
 
-	client, err := newClient(opts)
+	client, err := newClient(opts...)
 	if err != nil {
 		t.Error(err)
 	}
@@ -75,22 +100,16 @@ func New(t *testing.T, opts Options) *Client {
 	return client
 }
 
-func newClient(opts Options) (*Client, error) {
-	var (
-		duration = cmp.Or(opts.Duration, 10*time.Minute)
-		hook     = opts.Hook
-		image    = cmp.Or(opts.Image, "postgres:latest")
-	)
+func newClient(opts ...Options) (*Client, error) {
+	opt := NewOptions().Merge(opts...)
 
-	dsn, close, err := testcontainer.Postgres(image, duration)
+	dsn, close, err := testcontainer.Postgres(opt.Image, opt.Duration)
 	if err != nil {
 		return nil, err
 	}
 
-	if hook != nil {
-		if err := hook(dsn); err != nil {
-			return nil, err
-		}
+	if err := opt.Hook(dsn); err != nil {
+		return nil, err
 	}
 
 	return &Client{

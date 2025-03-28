@@ -38,9 +38,8 @@ func TestMain(m *testing.M) {
 	// You can get the connection by calling pgxtest.DB(ctx, t).
 	// You can also create a new connection by calling pgxtest.New(t).DB().
 	close := dbtest.Init(dbtest.InitOptions{
-		Driver: "postgres",
-		Image:  postgresImage,
-		Hook:   migrate,
+		Image: postgresImage,
+		Hook:  migrate,
 	})
 	defer close()
 
@@ -65,7 +64,7 @@ func TestConnection(t *testing.T) {
 func TestStandalone(t *testing.T) {
 	// Create a new database for this test.
 	// The data is separate from the global database.
-	db := dbtest.New(t, dbtest.Options{Driver: "postgres", Image: postgresImage, Hook: migrate}).DB(t)
+	db := dbtest.New(t, dbtest.Options{Image: postgresImage, Hook: migrate}).DB(t)
 
 	var n int
 	err := db.QueryRowContext(ctx, "SELECT 1 + 1").Scan(&n)

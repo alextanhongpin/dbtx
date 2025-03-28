@@ -17,16 +17,25 @@ type Options struct {
 	Expiry time.Duration
 }
 
-func (o *Options) Merge(other Options) Options {
-	if other.Image != "" {
-		o.Image = other.Image
+func NewOptions() *Options {
+	return &Options{
+		Image:  "redis:latest",
+		Expiry: 10 * time.Minute,
+	}
+}
+
+func (o *Options) Merge(opts ...Options) *Options {
+	for _, opt := range opts {
+		if opt.Image != "" {
+			o.Image = opt.Image
+		}
+
+		if opt.Expiry != 0 {
+			o.Expiry = opt.Expiry
+		}
 	}
 
-	if other.Expiry != 0 {
-		o.Expiry = other.Expiry
-	}
-
-	return *o
+	return o
 }
 
 type InitOptions = Options
@@ -64,30 +73,6 @@ func Client(t *testing.T) *redis.Client {
 	return c.Client(t)
 }
 
-type Option func(c *config) error
-
-type config struct {
-	Repository string
-	Tag        string
-}
-
-func newConfig() *config {
-	return &config{
-		Repository: "redis",
-		Tag:        "latest",
-	}
-}
-
-func (c *config) apply(opts ...Option) error {
-	for _, o := range opts {
-		if err := o(c); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
 type Container struct {
 	addr  string
 	close func() error
@@ -95,6 +80,7 @@ type Container struct {
 
 func New(t *testing.T, opts ...Options) *Container {
 	t.Helper()
+
 	c, err := newContainer(opts...)
 	if err != nil {
 		t.Fatal(err)
@@ -110,15 +96,7 @@ func New(t *testing.T, opts ...Options) *Container {
 }
 
 func newContainer(opts ...Options) (*Container, error) {
-	opt := &Options{
-		Image:  "redis:latest",
-		Expiry: 10 * time.Minute,
-	}
-	// Only take the first option.
-	if len(opts) > 0 {
-		opt.Merge(opts[0])
-	}
-
+	opt := NewOptions().Merge(opts...)
 	addr, stop, err := Run(opt.Image, opt.Expiry)
 	if err != nil {
 		return nil, err

@@ -1,7 +1,6 @@
 package buntest
 
 import (
-	"cmp"
 	"database/sql"
 	"fmt"
 	"sync"
@@ -27,12 +26,45 @@ type Options struct {
 	Image    string
 }
 
+func NewOptions() *Options {
+	return &Options{
+		Driver:   "postgres",
+		Duration: 10 * time.Minute,
+		Image:    "postgres:latest",
+		Hook: func(dsn string) error {
+			return nil
+		},
+	}
+}
+
+func (o *Options) Merge(opts ...Options) *Options {
+	for _, opt := range opts {
+		if opt.Driver != "" {
+			o.Driver = opt.Driver
+		}
+
+		if opt.Duration != 0 {
+			o.Duration = opt.Duration
+		}
+
+		if opt.Hook != nil {
+			o.Hook = opt.Hook
+		}
+
+		if opt.Image != "" {
+			o.Image = opt.Image
+		}
+	}
+
+	return o
+}
+
 type InitOptions = Options
 
-func Init(opts InitOptions) (close func() error) {
+func Init(opts ...InitOptions) (close func() error) {
 	once.Do(func() {
 		var err error
-		client, err = newClient(opts)
+		client, err = newClient(opts...)
 		if err != nil {
 			panic(err)
 		}
@@ -63,11 +95,11 @@ type Client struct {
 	txdb   string
 }
 
-func New(t *testing.T, opts Options) *Client {
+func New(t *testing.T, opts ...Options) *Client {
 	t.Helper()
 
 	// TODO: Add semaphore here to prevent excessive creation of database.
-	client, err := newClient(opts)
+	client, err := newClient(opts...)
 	if err != nil {
 		t.Error(err)
 	}
@@ -80,30 +112,23 @@ func New(t *testing.T, opts Options) *Client {
 	return client
 }
 
-func newClient(opts Options) (*Client, error) {
-	var (
-		driver   = cmp.Or(opts.Driver, "postgres")
-		duration = cmp.Or(opts.Duration, 10*time.Minute)
-		hook     = opts.Hook
-		image    = cmp.Or(opts.Image, "postgres:latest")
-	)
+func newClient(opts ...Options) (*Client, error) {
+	opt := NewOptions().Merge(opts...)
 
 	// Supports postgres based on driver type?
-	dsn, close, err := testcontainer.Postgres(image, duration)
+	dsn, close, err := testcontainer.Postgres(opt.Image, opt.Duration)
 	if err != nil {
 		return nil, err
 	}
 
-	if hook != nil {
-		if err := hook(dsn); err != nil {
-			return nil, err
-		}
+	if err := opt.Hook(dsn); err != nil {
+		return nil, err
 	}
 
 	return &Client{
 		close:  close,
 		dsn:    dsn,
-		driver: driver,
+		driver: opt.Driver,
 	}, nil
 }
 
