@@ -1,6 +1,6 @@
 module github.com/alextanhongpin/dbtx/testing/testcontainer
 
-go 1.23.7
+go 1.24.2
 
 require github.com/ory/dockertest/v3 v3.11.0
 

@@ -32,7 +32,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestSQL(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	var n int
 	err := dbtest.DB(t).QueryRowContext(ctx, "select 1 + 1").Scan(&n)
 
@@ -44,7 +44,7 @@ func TestSQL(t *testing.T) {
 func TestLoggerContext(t *testing.T) {
 	logger := &InMemoryLogger{}
 	atm := dbtx.New(dbtest.DB(t), dbtx.WithLogger(logger))
-	ctx := context.Background()
+	ctx := t.Context()
 
 	var n int
 	err := atm.DB().QueryRowContext(ctx, "select 1 + $1", 1).Scan(&n)
@@ -66,7 +66,7 @@ func TestLoggerContext(t *testing.T) {
 
 func TestAtomicContext(t *testing.T) {
 	atm := dbtx.New(dbtest.DB(t))
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Run("isNotTx", func(t *testing.T) {
 		assert.False(t, dbtx.IsTx(ctx))
@@ -86,7 +86,7 @@ func TestAtomicContext(t *testing.T) {
 // TestAtomic tests if the transaction is rollback successfullly.
 func TestAtomic(t *testing.T) {
 	atm := dbtx.New(dbtest.DB(t))
-	err := atm.RunInTx(context.Background(), func(txCtx context.Context) error {
+	err := atm.RunInTx(t.Context(), func(txCtx context.Context) error {
 		create(t, atm, txCtx, 41)
 		create(t, atm, txCtx, 42)
 		count(t, atm, txCtx, 2)
@@ -96,7 +96,7 @@ func TestAtomic(t *testing.T) {
 
 	is := assert.New(t)
 	is.ErrorIs(err, ErrRollback, err)
-	count(t, atm, context.Background(), 0)
+	count(t, atm, t.Context(), 0)
 }
 
 // TestPanic tests if the transaction is rollback on panic.
@@ -104,7 +104,7 @@ func TestPanic(t *testing.T) {
 	atm := dbtx.New(dbtest.DB(t))
 
 	assert.Panics(t, func() {
-		_ = atm.RunInTx(context.Background(), func(txCtx context.Context) error {
+		_ = atm.RunInTx(t.Context(), func(txCtx context.Context) error {
 			create(t, atm, txCtx, 41)
 			create(t, atm, txCtx, 42)
 			count(t, atm, txCtx, 2)
@@ -113,13 +113,13 @@ func TestPanic(t *testing.T) {
 		})
 	})
 
-	count(t, atm, context.Background(), 0)
+	count(t, atm, t.Context(), 0)
 }
 
 func TestAtomicIntKeyPairLocked(t *testing.T) {
 	key := lock.NewIntKeyPair(1, 1)
 	atm := dbtx.New(dbtest.DB(t))
-	err := atm.RunInTx(context.Background(), func(txCtx context.Context) error {
+	err := atm.RunInTx(t.Context(), func(txCtx context.Context) error {
 		if err := lock.TryLock(txCtx, key); err != nil {
 			return err
 		}
@@ -137,7 +137,7 @@ func TestAtomicIntKeyPairLocked(t *testing.T) {
 func TestAtomicLockBoundary(t *testing.T) {
 	is := assert.New(t)
 	tx := dbtx.New(dbtest.DB(t))
-	err := tx.RunInTx(context.Background(), func(ctx context.Context) error {
+	err := tx.RunInTx(t.Context(), func(ctx context.Context) error {
 		is.NoError(lock.Lock(ctx, lock.NewIntKeyPair(math.MinInt32, math.MaxInt32)))
 		is.NoError(lock.Lock(ctx, lock.NewIntKey(math.MinInt64)))
 		is.NoError(lock.Lock(ctx, lock.NewIntKey(math.MaxInt64)))
@@ -159,7 +159,7 @@ func TestAtomicIntLockKeyLocked(t *testing.T) {
 	go func() {
 		defer wg.Done()
 
-		err := atm.RunInTx(context.Background(), func(txCtx context.Context) error {
+		err := atm.RunInTx(t.Context(), func(txCtx context.Context) error {
 			if err := lock.TryLock(txCtx, key); err != nil {
 				return err
 			}
@@ -173,7 +173,7 @@ func TestAtomicIntLockKeyLocked(t *testing.T) {
 	}()
 
 	time.Sleep(50 * time.Millisecond)
-	err := atm.RunInTx(context.Background(), func(txCtx context.Context) error {
+	err := atm.RunInTx(t.Context(), func(txCtx context.Context) error {
 		err := lock.TryLock(txCtx, key)
 
 		// ̃NOTE: Both of this is expected to return false, but it is true now
@@ -191,7 +191,7 @@ func TestAtomicLocker(t *testing.T) {
 	is := assert.New(t)
 
 	// Arrange.
-	ctx := context.Background()
+	ctx := t.Context()
 	key := lock.NewStrKey("The meaning of life...")
 
 	db := dbtx.New(dbtest.DB(t))
