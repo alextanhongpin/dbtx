@@ -2,83 +2,15 @@ package outbox
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
-	"sync"
 	"time"
 
 	"github.com/alextanhongpin/dbtx"
 	"github.com/alextanhongpin/dbtx/postgres/outbox/internal/postgres"
 )
 
-var (
-	Empty              = errors.New("outbox: empty")
-	ErrContextNotFound = errors.New("outbox: context not found")
-)
-
-var outboxContextKey contextKey = "outbox"
-
-type Outbox struct {
-	*dbtx.DB
-}
-
-//go:generate sqlc -f internal/sqlc.yaml generate
-func New(db *sql.DB, fns ...func(dbtx.DBTX) dbtx.DBTX) *Outbox {
-	return &Outbox{
-		DB: dbtx.New(db, fns...),
-	}
-}
-
-// RunInTx injects the outbox in the context to allow messages to be enqueued
-// and written to the outbox table.
-// Use a separate background job to process the outbox messages.
-func (o *Outbox) RunInTx(ctx context.Context, fn func(context.Context) error) error {
-	return o.DB.RunInTx(ctx, func(txCtx context.Context) error {
-		ob := new(outbox)
-		if err := fn(outboxContextKey.WithValue(txCtx, ob)); err != nil {
-			return err
-		}
-
-		// Write events.
-		if !ob.IsZero() {
-			return o.db(txCtx).Create(txCtx, ob.Params())
-		}
-
-		return nil
-	})
-}
-
-// Count return the number of outbox messages.
-func (o *Outbox) Count(ctx context.Context) (int64, error) {
-	return o.db(ctx).Count(ctx)
-}
-
-// Process processes the outbox message sequentially one at a time.
-func (o *Outbox) Process(ctx context.Context, fn func(context.Context, Event) error) error {
-	return o.DB.RunInTx(ctx, func(txCtx context.Context) error {
-		e, err := o.db(txCtx).Delete(txCtx)
-		if errors.Is(err, sql.ErrNoRows) {
-			return Empty
-		}
-		if err != nil {
-			return err
-		}
-
-		return fn(txCtx, Event{
-			ID:            e.ID,
-			AggregateID:   e.AggregateID,
-			AggregateType: e.AggregateType,
-			Payload:       e.Payload,
-			Type:          e.Type,
-			CreatedAt:     e.CreatedAt,
-		})
-	})
-}
-
-func (o *Outbox) db(ctx context.Context) postgres.Querier {
-	return postgres.New(o.DB.DBTx(ctx))
-}
+var ErrNotInTx = errors.New("outbox: not in transaction")
 
 // Message is the outbox message to enqueue.
 type Message struct {
@@ -98,61 +30,48 @@ type Event struct {
 	CreatedAt     time.Time
 }
 
-type outbox struct {
-	mu   sync.RWMutex
-	msgs []Message
+type OutBox struct {
+	dbtx.UnitOfWork
 }
 
-func (o *outbox) Enqueue(msgs ...Message) {
-	o.mu.Lock()
-	o.msgs = append(o.msgs, msgs...)
-	o.mu.Unlock()
+func New(uow dbtx.UnitOfWork) *OutBox {
+	return &OutBox{
+		UnitOfWork: uow,
+	}
 }
 
-func (o *outbox) IsZero() bool {
-	o.mu.RLock()
-	isZero := len(o.msgs) == 0
-	o.mu.RUnlock()
-
-	return isZero
+func (o *OutBox) db(ctx context.Context) postgres.Querier {
+	return postgres.New(o.DBTx(ctx))
 }
 
-func (o *outbox) Params() (params postgres.CreateParams) {
-	o.mu.RLock()
-	for _, msg := range o.msgs {
+func (o *OutBox) Create(ctx context.Context, messages ...Message) error {
+	var params postgres.CreateParams
+	for _, msg := range messages {
 		params.AggregateIds = append(params.AggregateIds, msg.AggregateID)
 		params.AggregateTypes = append(params.AggregateTypes, msg.AggregateType)
 		params.Payloads = append(params.Payloads, string(msg.Payload))
 		params.Types = append(params.Types, msg.Type)
 	}
-	o.mu.RUnlock()
 
-	return
+	return o.db(ctx).Create(ctx, params)
 }
 
-// Enqueue enqueues the events to the outbox.
-func Enqueue(ctx context.Context, msgs ...Message) bool {
-	o, ok := outboxContextKey.Value(ctx)
-	if ok {
-		o.Enqueue(msgs...)
+func (o *OutBox) Count(ctx context.Context, messages ...Message) (int64, error) {
+	return o.db(ctx).Count(ctx)
+}
+
+func (o *OutBox) LoadAndDelete(ctx context.Context) (*Event, error) {
+	evt, err := o.db(ctx).Delete(ctx)
+	if err != nil {
+		return nil, err
 	}
 
-	return ok
-}
-
-func MustEnqueue(ctx context.Context, msgs ...Message) {
-	if !Enqueue(ctx, msgs...) {
-		panic(ErrContextNotFound)
-	}
-}
-
-type contextKey string
-
-func (key contextKey) WithValue(ctx context.Context, ob *outbox) context.Context {
-	return context.WithValue(ctx, key, ob)
-}
-
-func (key contextKey) Value(ctx context.Context) (*outbox, bool) {
-	ob, ok := ctx.Value(key).(*outbox)
-	return ob, ok
+	return &Event{
+		ID:            evt.ID,
+		AggregateID:   evt.AggregateID,
+		AggregateType: evt.AggregateType,
+		Payload:       evt.Payload,
+		Type:          evt.Type,
+		CreatedAt:     evt.CreatedAt,
+	}, nil
 }

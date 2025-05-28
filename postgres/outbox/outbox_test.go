@@ -17,7 +17,7 @@ import (
 
 var ErrRollback = errors.New("rollback")
 
-const postgresVersion = "postgres:15.1-alpine"
+const postgresVersion = "postgres:17.4"
 
 //go:embed internal/schema.sql
 var schema string
@@ -35,11 +35,11 @@ func TestMain(m *testing.M) {
 }
 
 func TestOutbox(t *testing.T) {
-	is := assert.New(t)
-	ob := outbox.New(pgtest.DB(t))
-	ctx := context.Background()
+	ctx := t.Context()
+	ob := outbox.New(dbtx.New(pgtest.DB(t)))
+
 	err := ob.RunInTx(ctx, func(txCtx context.Context) error {
-		ok := outbox.Enqueue(txCtx,
+		return ob.Create(txCtx,
 			outbox.Message{
 				AggregateID:   "a-id-1",
 				AggregateType: "a-type-1",
@@ -53,51 +53,48 @@ func TestOutbox(t *testing.T) {
 				Payload:       json.RawMessage(`{"one": 1}`),
 			},
 		)
-		is.True(ok)
-
-		return nil
 	})
-	is.Nil(err, err)
+	is := assert.New(t)
+	is.NoError(err, err)
 
 	count, err := ob.Count(ctx)
-	is.Nil(err)
+	is.NoError(err)
 	is.Equal(int64(2), count)
 
 	t.Run("process failed", func(t *testing.T) {
 		is := assert.New(t)
-		err := ob.Process(ctx, func(txCtx context.Context, evt outbox.Event) error {
-			is.True(dbtx.IsTx(txCtx))
+		err := ob.RunInTx(ctx, func(txCtx context.Context) error {
+			evt, err := ob.LoadAndDelete(txCtx)
+			is.NoError(err)
+			is.NotNil(evt)
 
 			return ErrRollback
 		})
 		is.ErrorIs(err, ErrRollback)
 
 		count, err := ob.Count(ctx)
-		is.Nil(err)
+		is.NoError(err)
 		is.Equal(int64(2), count)
 	})
 
 	t.Run("process success", func(t *testing.T) {
 		is := assert.New(t)
 
-		for _, i := range []int64{1, 0} {
-			err := ob.Process(ctx, func(txCtx context.Context, evt outbox.Event) error {
-				is.True(dbtx.IsTx(txCtx))
+		var errs = []error{nil, nil, sql.ErrNoRows}
+		var counts = []int64{1, 0, 0}
 
-				return nil
+		for i := range 2 {
+			err := ob.RunInTx(ctx, func(txCtx context.Context) error {
+				is.True(dbtx.IsTx(txCtx))
+				evt, err := ob.LoadAndDelete(txCtx)
+				t.Log("iter", i, "event", evt)
+				return err
 			})
-			is.Nil(err)
+			is.ErrorIs(err, errs[i])
 
 			count, err := ob.Count(ctx)
-			is.Nil(err)
-			is.Equal(i, count)
+			is.NoError(err)
+			is.Equal(counts[i], count)
 		}
-
-		err := ob.Process(ctx, func(txCtx context.Context, evt outbox.Event) error {
-			is.True(dbtx.IsTx(txCtx))
-
-			return nil
-		})
-		is.ErrorIs(err, outbox.Empty)
 	})
 }

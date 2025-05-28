@@ -17,8 +17,8 @@ type DBTX interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-// atomic represents the database atomic operations in a transactions.
-type atomic interface {
+// UnitOfWork represents the database UnitOfWork operations in a transactions.
+type UnitOfWork interface {
 	DB() DBTX
 	DBTx(ctx context.Context) DBTX
 	Tx(ctx context.Context) DBTX
@@ -27,7 +27,7 @@ type atomic interface {
 }
 
 // Ensures the struct DB implements the interface.
-var _ atomic = (*DB)(nil)
+var _ UnitOfWork = (*DB)(nil)
 
 // DB represents a unit of work.
 type DB struct {
@@ -53,7 +53,7 @@ func (d *DB) DB() DBTX {
 
 // DBTx returns the DBTX from the context, which can be either *sql.DB or
 // *sql.Tx.
-// Returns the atomic underlying type if the context is empty.
+// Returns the UnitOfWork underlying type if the context is empty.
 func (d *DB) DBTx(ctx context.Context) DBTX {
 	if tx, ok := Value(ctx); ok {
 		return tx

@@ -37,7 +37,7 @@ func TestSQL(t *testing.T) {
 	err := dbtest.DB(t).QueryRowContext(ctx, "select 1 + 1").Scan(&n)
 
 	is := assert.New(t)
-	is.Nil(err)
+	is.NoError(err)
 	is.Equal(2, n)
 }
 
@@ -50,14 +50,14 @@ func TestLoggerContext(t *testing.T) {
 	err := atm.DB().QueryRowContext(ctx, "select 1 + $1", 1).Scan(&n)
 
 	is := assert.New(t)
-	is.Nil(err)
+	is.NoError(err)
 	is.Equal(2, n)
 
 	var m int
 	err = atm.RunInTx(ctx, func(ctx context.Context) error {
 		return atm.Tx(ctx).QueryRowContext(ctx, "select 2 + $1", 2).Scan(&m)
 	})
-	is.Nil(err)
+	is.NoError(err)
 	is.Equal(4, m)
 
 	t.Log("LOG")
@@ -138,13 +138,13 @@ func TestAtomicLockBoundary(t *testing.T) {
 	is := assert.New(t)
 	tx := dbtx.New(dbtest.DB(t))
 	err := tx.RunInTx(context.Background(), func(ctx context.Context) error {
-		is.Nil(lock.Lock(ctx, lock.NewIntKeyPair(math.MinInt32, math.MaxInt32)))
-		is.Nil(lock.Lock(ctx, lock.NewIntKey(math.MinInt64)))
-		is.Nil(lock.Lock(ctx, lock.NewIntKey(math.MaxInt64)))
+		is.NoError(lock.Lock(ctx, lock.NewIntKeyPair(math.MinInt32, math.MaxInt32)))
+		is.NoError(lock.Lock(ctx, lock.NewIntKey(math.MinInt64)))
+		is.NoError(lock.Lock(ctx, lock.NewIntKey(math.MaxInt64)))
 
 		return nil
 	})
-	is.Nil(err)
+	is.NoError(err)
 }
 
 func TestAtomicIntLockKeyLocked(t *testing.T) {
@@ -169,7 +169,7 @@ func TestAtomicIntLockKeyLocked(t *testing.T) {
 
 			return nil
 		})
-		is.Nil(err)
+		is.NoError(err)
 	}()
 
 	time.Sleep(50 * time.Millisecond)
@@ -194,7 +194,7 @@ func TestAtomicLocker(t *testing.T) {
 	ctx := context.Background()
 	key := lock.NewStrKey("The meaning of life...")
 
-	locker := lock.New(dbtest.DB(t))
+	db := dbtx.New(dbtest.DB(t))
 
 	var wg sync.WaitGroup
 	wg.Add(3)
@@ -208,8 +208,12 @@ func TestAtomicLocker(t *testing.T) {
 
 		// Lock1 locks the key successfully. Forgetting to call unlock locks the key
 		// forever unless a timeout is set.
-		err := locker.TryLock(ctx, key, func(ctx context.Context) error {
+		err := db.RunInTx(ctx, func(ctx context.Context) error {
 			is.True(dbtx.IsTx(ctx))
+
+			err := lock.TryLock(ctx, key)
+			is.NoError(err)
+
 			<-ctx.Done()
 			return context.Cause(ctx)
 		})
@@ -222,9 +226,9 @@ func TestAtomicLocker(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 
 		// Lock2 fails when locking the same key.
-		err := locker.TryLock(ctx, key, func(ctx context.Context) error {
+		err := db.RunInTx(ctx, func(ctx context.Context) error {
 			is.True(dbtx.IsTx(ctx))
-			return nil
+			return lock.TryLock(ctx, key)
 		})
 		is.ErrorIs(err, lock.ErrAlreadyLocked)
 	}()
@@ -235,11 +239,11 @@ func TestAtomicLocker(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 
 		// Lock3 will wait for the previous lock to be released.
-		err := locker.Lock(ctx, key, func(ctx context.Context) error {
+		err := db.RunInTx(ctx, func(ctx context.Context) error {
 			is.True(dbtx.IsTx(ctx))
-			return nil
+			return lock.Lock(ctx, key)
 		})
-		is.Nil(err)
+		is.NoError(err)
 	}()
 
 	wg.Wait()
@@ -263,7 +267,7 @@ func create(t *testing.T, atm atomic, ctx context.Context, n int) {
 	repo := newNumberRepo(atm)
 	rows, err := repo.Create(ctx, n)
 	is := assert.New(t)
-	is.Nil(err)
+	is.NoError(err)
 	is.Equal(int64(1), rows)
 }
 
@@ -274,7 +278,7 @@ func count(t *testing.T, atm atomic, ctx context.Context, want int) {
 	repo := newNumberRepo(atm)
 	got, err := repo.Count(ctx)
 	is := assert.New(t)
-	is.Nil(err, err)
+	is.NoError(err, err)
 	is.Equal(want, got)
 }
 

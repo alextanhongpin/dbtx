@@ -2,7 +2,6 @@ package lock
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 
@@ -13,34 +12,6 @@ var (
 	ErrAlreadyLocked = errors.New("lock: key already locked")
 	ErrLockOutsideTx = errors.New("lock: cannot lock outside transaction")
 )
-
-type Locker struct {
-	db *sql.DB
-}
-
-func New(db *sql.DB) *Locker {
-	return &Locker{db: db}
-}
-
-func (l *Locker) Lock(ctx context.Context, key *Key, fn func(context.Context) error) error {
-	return dbtx.New(l.db).RunInTx(ctx, func(txCtx context.Context) error {
-		if err := Lock(txCtx, key); err != nil {
-			return err
-		}
-
-		return fn(txCtx)
-	})
-}
-
-func (l *Locker) TryLock(ctx context.Context, key *Key, fn func(context.Context) error) error {
-	return dbtx.New(l.db).RunInTx(ctx, func(txCtx context.Context) error {
-		if err := TryLock(txCtx, key); err != nil {
-			return err
-		}
-
-		return fn(txCtx)
-	})
-}
 
 // Lock locks the given key. If multiple operations lock the same key, it
 // will wait for the previous operation to complete.

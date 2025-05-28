@@ -1,6 +1,6 @@
 module github.com/alextanhongpin/dbtx
 
-go 1.23.7
+go 1.24.2
 
 require (
 	github.com/alextanhongpin/core/storage/pg v0.0.0-20241114173105-ece54a0c4c39
