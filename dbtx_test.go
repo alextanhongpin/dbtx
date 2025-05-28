@@ -32,8 +32,9 @@ func TestMain(m *testing.M) {
 }
 
 func TestSQL(t *testing.T) {
+	ctx := context.Background()
 	var n int
-	err := dbtest.DB(t).QueryRow("select 1 + 1").Scan(&n)
+	err := dbtest.DB(t).QueryRowContext(ctx, "select 1 + 1").Scan(&n)
 
 	is := assert.New(t)
 	is.Nil(err)
@@ -46,7 +47,7 @@ func TestLoggerContext(t *testing.T) {
 	ctx := context.Background()
 
 	var n int
-	err := atm.DB().QueryRow("select 1 + $1", 1).Scan(&n)
+	err := atm.DB().QueryRowContext(ctx, "select 1 + $1", 1).Scan(&n)
 
 	is := assert.New(t)
 	is.Nil(err)
@@ -54,7 +55,7 @@ func TestLoggerContext(t *testing.T) {
 
 	var m int
 	err = atm.RunInTx(ctx, func(ctx context.Context) error {
-		return atm.Tx(ctx).QueryRow("select 2 + $1", 2).Scan(&m)
+		return atm.Tx(ctx).QueryRowContext(ctx, "select 2 + $1", 2).Scan(&m)
 	})
 	is.Nil(err)
 	is.Equal(4, m)
@@ -294,13 +295,13 @@ func newNumberRepo(atm atomic) *numberRepo {
 func (r *numberRepo) Count(ctx context.Context) (int, error) {
 	var n int
 	err := r.DBTx(ctx).
-		QueryRow(`select count(*) from numbers`).
+		QueryRowContext(ctx, `select count(*) from numbers`).
 		Scan(&n)
 	return n, err
 }
 
 func (r *numberRepo) Create(ctx context.Context, n int) (int64, error) {
-	res, err := r.DBTx(ctx).Exec(`insert into numbers(n) values ($1)`, n)
+	res, err := r.DBTx(ctx).ExecContext(ctx, `insert into numbers(n) values ($1)`, n)
 	if err != nil {
 		return 0, err
 	}

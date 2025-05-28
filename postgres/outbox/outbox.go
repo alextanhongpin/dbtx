@@ -20,13 +20,13 @@ var (
 var outboxContextKey contextKey = "outbox"
 
 type Outbox struct {
-	*dbtx.Atomic
+	*dbtx.DB
 }
 
 //go:generate sqlc -f internal/sqlc.yaml generate
 func New(db *sql.DB, fns ...func(dbtx.DBTX) dbtx.DBTX) *Outbox {
 	return &Outbox{
-		Atomic: dbtx.New(db, fns...),
+		DB: dbtx.New(db, fns...),
 	}
 }
 
@@ -34,7 +34,7 @@ func New(db *sql.DB, fns ...func(dbtx.DBTX) dbtx.DBTX) *Outbox {
 // and written to the outbox table.
 // Use a separate background job to process the outbox messages.
 func (o *Outbox) RunInTx(ctx context.Context, fn func(context.Context) error) error {
-	return o.Atomic.RunInTx(ctx, func(txCtx context.Context) error {
+	return o.DB.RunInTx(ctx, func(txCtx context.Context) error {
 		ob := new(outbox)
 		if err := fn(outboxContextKey.WithValue(txCtx, ob)); err != nil {
 			return err
@@ -56,7 +56,7 @@ func (o *Outbox) Count(ctx context.Context) (int64, error) {
 
 // Process processes the outbox message sequentially one at a time.
 func (o *Outbox) Process(ctx context.Context, fn func(context.Context, Event) error) error {
-	return o.Atomic.RunInTx(ctx, func(txCtx context.Context) error {
+	return o.DB.RunInTx(ctx, func(txCtx context.Context) error {
 		e, err := o.db(txCtx).Delete(txCtx)
 		if errors.Is(err, sql.ErrNoRows) {
 			return Empty
@@ -77,7 +77,7 @@ func (o *Outbox) Process(ctx context.Context, fn func(context.Context, Event) er
 }
 
 func (o *Outbox) db(ctx context.Context) postgres.Querier {
-	return postgres.New(o.Atomic.DBTx(ctx))
+	return postgres.New(o.DB.DBTx(ctx))
 }
 
 // Message is the outbox message to enqueue.
