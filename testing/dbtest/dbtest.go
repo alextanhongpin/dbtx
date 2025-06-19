@@ -194,10 +194,21 @@ func (c *Client) DSN() string {
 func Dump(t *testing.T, db *sql.DB, query string, args []any, options ...yamldump.Option) {
 	t.Helper()
 
-	r, err := sqldump.Dump(t.Context(), db, query, args...)
+	r, err := sqldump.Query(t.Context(), db, query, args...)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	yamldump.Dump(t, r, options...)
+}
+
+func WithDumper(t *testing.T, db *sql.DB, query string, args []any, dumper *yamldump.Dumper, options ...yamldump.Option) {
+	t.Helper()
+
+	r, err := sqldump.Query(t.Context(), db, query, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dumper.Dump(t, r, options...)
 }

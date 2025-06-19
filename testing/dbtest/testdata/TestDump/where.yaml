@@ -1,2 +1,4 @@
-- id: 2
+- data:
+    age: 30
+  id: 2
   name: Bob

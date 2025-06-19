@@ -24,6 +24,8 @@ github.com/alextanhongpin/testdump/pkg/snapshot v0.0.0-20240814172502-38533f751c
 github.com/alextanhongpin/testdump/pkg/snapshot v0.0.0-20240814172502-38533f751ca6/go.mod h1:KE5TrgWzFr7ZsmCqtN2p8GHSuJygE0bdep/QcZ1/di0=
 github.com/alextanhongpin/testdump/sqldump v0.0.0-20250608043033-1b71f7f044e4 h1:doV9ksHBwRKpu850opOAACWnW7LyAjNcKMeOfvw39cM=
 github.com/alextanhongpin/testdump/sqldump v0.0.0-20250608043033-1b71f7f044e4/go.mod h1:BSoGdehhfID4CCRzqO3ZTQX7Lgv9Mv9qjj1MpazzQ0g=
+github.com/alextanhongpin/testdump/sqldump v0.0.0-20250619073142-a75100666b74 h1:wvDTSp1WbXK4dloG/XoUW3K7Pe9+/TTJL9dfVzhtmys=
+github.com/alextanhongpin/testdump/sqldump v0.0.0-20250619073142-a75100666b74/go.mod h1:0n2TCu9UxDlzwIFQ791D+KaJC6JCDPzGB4c46SkBxyE=
 github.com/alextanhongpin/testdump/yamldump v0.0.0-20250608043033-1b71f7f044e4 h1:qiAZvpsAhdmmG0WNoSYwKj+xaFFJ8r3xrWYjCiWWNVQ=
 github.com/alextanhongpin/testdump/yamldump v0.0.0-20250608043033-1b71f7f044e4/go.mod h1:/FGmWPClDLN7or2Y8xREbVe+Q4El/yXDv01jrRYIabE=
 github.com/cenkalti/backoff/v4 v4.3.0 h1:MyRJ/UdXutAwSAT+s3wNd7MfTIcy71VQueUuFK343L8=

@@ -28,6 +28,7 @@ func migrate(dsn string) error {
 	_, err = conn.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS users (
 		id int generated always as identity primary key,
 		name text not null,
+		data jsonb,
 		unique(id)
 	)`)
 	if err != nil {
@@ -80,9 +81,10 @@ func TestDump(t *testing.T) {
 	is := assert.New(t)
 
 	db := dbtest.Tx(t)
-	_, err := db.ExecContext(ctx, `INSERT INTO users (name) VALUES ('Alice'), ('Bob')`)
+	_, err := db.ExecContext(ctx, `INSERT INTO users (name, data) VALUES ('Alice', null), ('Bob', '{"age": 30}')`)
 	is.NoError(err)
 
 	dbtest.Dump(t, db, "select * from users", nil)
 	dbtest.Dump(t, db, "select * from users where name=$1", []any{"Bob"}, yamldump.File("where"))
+	dbtest.WithDumper(t, db, "select * from users", nil, yamldump.New(), yamldump.File("with-dumper"))
 }

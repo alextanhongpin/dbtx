@@ -5,7 +5,7 @@ go 1.24.2
 require (
 	github.com/DATA-DOG/go-txdb v0.2.1
 	github.com/alextanhongpin/dbtx/testing/testcontainer v0.0.0-20250528160805-0d93991d13ea
-	github.com/alextanhongpin/testdump/sqldump v0.0.0-20250608043033-1b71f7f044e4
+	github.com/alextanhongpin/testdump/sqldump v0.0.0-20250619073142-a75100666b74
 	github.com/alextanhongpin/testdump/yamldump v0.0.0-20250608043033-1b71f7f044e4
 	github.com/google/uuid v1.6.0
 	github.com/lib/pq v1.10.9
