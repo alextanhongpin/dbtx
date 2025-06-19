@@ -1,195 +1,477 @@
 # dbtx
 
-`dbtx` is a Go package that provides a unified interface for working with database operations (`*sql.DB` and `*sql.Tx`) and simplifies transaction management. It allows you to execute queries, manage transactions, and wrap database operations with custom logic.
+[![Go Reference](https://pkg.go.dev/badge/github.com/alextanhongpin/dbtx.svg)](https://pkg.go.dev/github.com/alextanhongpin/dbtx)
+[![Go Report Card](https://goreportcard.com/badge/github.com/alextanhongpin/dbtx)](https://goreportcard.com/report/github.com/alextanhongpin/dbtx)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## Installation
+A comprehensive Go library that provides unified database transaction management across multiple database drivers and ORM libraries. `dbtx` simplifies transaction handling, provides testing utilities, and implements common database patterns like outbox and distributed locking.
 
-To install the package, run:
+## 🚀 Quick Start
 
 ```bash
 go get github.com/alextanhongpin/dbtx
 ```
 
-## Features
+```go
+package main
 
-- Unified interface (`DBTX`) for `*sql.DB` and `*sql.Tx`.
-- Transaction management with `RunInTx`.
-- Customizable database operation wrappers.
+import (
+    "context"
+    "database/sql"
+    "log"
+    
+    "github.com/alextanhongpin/dbtx"
+    _ "github.com/lib/pq"
+)
 
-## Usage
+func main() {
+    db, err := sql.Open("postgres", "postgres://user:pass@localhost/db?sslmode=disable")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer db.Close()
+    
+    atomic := dbtx.New(db)
+    
+    // Execute in transaction
+    err = atomic.RunInTx(context.Background(), func(ctx context.Context) error {
+        tx := atomic.DBTx(ctx)
+        _, err := tx.ExecContext(ctx, "INSERT INTO users (name) VALUES ($1)", "John Doe")
+        return err
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+}
+```
 
-### 1. Initialize `Atomic`
+## ✨ Features
 
-The `Atomic` struct is the main entry point for managing database operations. You can initialize it with a `*sql.DB` instance and optional wrapper functions.
+- **🔄 Unified Transaction Interface**: Common interface for `*sql.DB` and `*sql.Tx`
+- **🎯 Multiple Database Support**: Works with `database/sql`, `pgx`, `bun`, and `sqlx`
+- **🔒 Transaction Safety**: Automatic rollback on errors and panic recovery
+- **🧪 Comprehensive Testing**: Built-in testing utilities with Docker containers
+- **📦 Outbox Pattern**: Transactional outbox implementation for reliable messaging
+- **🔐 Distributed Locking**: PostgreSQL-based advisory locks
+- **🎭 Middleware Support**: Customizable database operation wrappers
+- **🏗️ Nested Transactions**: Safe handling of nested transaction contexts
+
+## 📚 Table of Contents
+
+- [Core Library](#core-library)
+  - [Basic Usage](#basic-usage)
+  - [Transaction Management](#transaction-management)
+  - [Custom Wrappers](#custom-wrappers)
+- [Database Adapters](#database-adapters)
+  - [pgx Support](#pgx-support)
+  - [Bun ORM Support](#bun-orm-support)
+  - [SQLx Support](#sqlx-support)
+- [Advanced Features](#advanced-features)
+  - [Outbox Pattern](#outbox-pattern)
+  - [Distributed Locking](#distributed-locking)
+- [Testing Utilities](#testing-utilities)
+- [API Reference](#api-reference)
+- [Contributing](#contributing)
+
+## Core Library
+
+### Basic Usage
+
+The core `dbtx` package provides a unified interface for database operations:
 
 ```go
 import (
-	"database/sql"
-	"github.com/alextanhongpin/dbtx"
-
-	_ "github.com/lib/pq"
+    "database/sql"
+    "github.com/alextanhongpin/dbtx"
+    _ "github.com/lib/pq"
 )
 
-db, _ := sql.Open("postgres", "user:password@/dbname")
+// Initialize with database connection
+db, err := sql.Open("postgres", "postgres://user:pass@localhost/db?sslmode=disable")
+if err != nil {
+    log.Fatal(err)
+}
+
 atomic := dbtx.New(db)
-```
 
-### 2. Execute Queries
-
-You can use the `DB()` method to execute queries directly on the database.
-
-```go
-db := atomic.DB()
-result, err := db.Exec("INSERT INTO users (name) VALUES (?)", "John Doe")
+// Execute queries directly
+result, err := atomic.DB().ExecContext(ctx, "INSERT INTO users (name) VALUES ($1)", "Alice")
 if err != nil {
-	log.Fatal(err)
+    log.Fatal(err)
 }
 ```
 
-### 3. Transaction Management
+### Transaction Management
 
-Use `RunInTx` to wrap operations in a transaction. If an error occurs, the transaction will be rolled back automatically.
+`dbtx` provides automatic transaction management with rollback on errors:
 
 ```go
 err := atomic.RunInTx(context.Background(), func(ctx context.Context) error {
-	db := atomic.DBTx(ctx)
-	_, err := db.Exec("INSERT INTO users (name) VALUES (?)", "Jane Doe")
-	if err != nil {
-		return err
-	}
-
-	_, err = db.Exec("INSERT INTO orders (user_id, amount) VALUES (?, ?)", 1, 100)
-	return err
+    tx := atomic.DBTx(ctx)
+    
+    // Both operations will be rolled back if either fails
+    _, err := tx.ExecContext(ctx, "INSERT INTO users (name) VALUES ($1)", "Jane Doe")
+    if err != nil {
+        return err
+    }
+    
+    _, err = tx.ExecContext(ctx, "INSERT INTO orders (user_id, amount) VALUES ($1, $2)", 1, 100)
+    return err
 })
 if err != nil {
-	log.Fatal(err)
+    log.Fatal(err)
 }
 ```
 
-### 4. Custom Wrappers
+### Custom Wrappers
 
-You can provide custom wrapper functions to modify the behavior of database operations.
+Add middleware to database operations for logging, metrics, or other cross-cutting concerns:
 
 ```go
+// Custom logger wrapper
 logger := func(dbtx dbtx.DBTX) dbtx.DBTX {
-	return &LoggingDBTX{dbtx: dbtx}
+    return &LoggingDBTX{dbtx: dbtx}
 }
 
-atomic := dbtx.New(db, logger)
+// Metrics wrapper
+metrics := func(dbtx dbtx.DBTX) dbtx.DBTX {
+    return &MetricsDBTX{dbtx: dbtx}
+}
+
+atomic := dbtx.New(db, logger, metrics)
 ```
 
-### 5. Nested Transactions
+## Database Adapters
 
-The `Tx()` method ensures that only the parent transaction can commit, preventing nested transactions from committing prematurely.
+### pgx Support
+
+For applications using the high-performance `pgx` driver:
 
 ```go
-err := atomic.RunInTx(context.Background(), func(ctx context.Context) error {
-	tx := atomic.Tx(ctx)
-	// Perform operations with tx
-	return nil
+import "github.com/alextanhongpin/dbtx/pgxtx"
+
+conn, err := pgx.Connect(context.Background(), "postgres://user:pass@localhost/db")
+if err != nil {
+    log.Fatal(err)
+}
+
+atomic := pgxtx.New(conn)
+
+err = atomic.RunInTx(context.Background(), func(ctx context.Context) error {
+    tx := atomic.DBTx(ctx)
+    _, err := tx.Exec(ctx, "INSERT INTO users (name) VALUES ($1)", "John")
+    return err
 })
 ```
 
-### 6. Using `atomic.Tx(ctx)`
+### Bun ORM Support
 
-The `Tx(ctx)` method retrieves the current transaction (`*sql.Tx`) from the context. This is useful when you want to ensure that operations are performed within an existing transaction. If the context does not contain a transaction, it will panic with `ErrNotTransaction`.
+Integration with the modern Bun ORM:
 
 ```go
-err := atomic.RunInTx(context.Background(), func(ctx context.Context) error {
-	tx := atomic.Tx(ctx) // Retrieve the current transaction
-	_, err := tx.Exec("UPDATE users SET name = ? WHERE id = ?", "John Doe", 1)
-	if err != nil {
-		return err
-	}
+import "github.com/alextanhongpin/dbtx/buntx"
 
-	// Perform additional operations within the same transaction
-	_, err = tx.Exec("INSERT INTO logs (message) VALUES (?)", "User updated")
-	return err
+db := bun.NewDB(sqldb, pgdialect.New())
+atomic := buntx.New(db)
+
+err = atomic.RunInTx(context.Background(), func(ctx context.Context) error {
+    tx := atomic.DBTx(ctx)
+    _, err := tx.NewInsert().Model(&User{Name: "Alice"}).Exec(ctx)
+    return err
 })
-if err != nil {
-	log.Fatal(err)
-}
 ```
 
-### Differences Between `atomic.DB`, `atomic.DBTx`, and `atomic.Tx`
+### SQLx Support
 
-- **`atomic.DB()`**: Returns the underlying `*sql.DB` wrapped with any custom functions. Use this for operations that do not require a transaction.
-
-- **`atomic.DBTx(ctx)`**: Returns the database interface (`DBTX`) from the context. If the context contains a transaction (`*sql.Tx`), it will return the transaction. Otherwise, it falls back to the underlying `*sql.DB`.
-
-- **`atomic.Tx(ctx)`**: Returns the current transaction (`*sql.Tx`) from the context. This ensures that the operation is performed within a transaction. If the context does not contain a transaction, it panics with `ErrNotTransaction`.
-
-#### Example:
+For projects using the popular `sqlx` extension:
 
 ```go
-ctx := context.Background()
+import "github.com/alextanhongpin/dbtx/sqlxtx"
 
-// Using atomic.DB()
-db := atomic.DB()
-_, err := db.Exec("INSERT INTO users (name) VALUES (?)", "Alice")
+db, err := sqlx.Connect("postgres", "postgres://user:pass@localhost/db")
 if err != nil {
-	log.Fatal(err)
+    log.Fatal(err)
 }
 
-// Using atomic.DBTx(ctx)
+atomic := sqlxtx.New(db)
+
+err = atomic.RunInTx(context.Background(), func(ctx context.Context) error {
+    tx := atomic.DBTx(ctx)
+    _, err := tx.ExecContext(ctx, "INSERT INTO users (name) VALUES ($1)", "Bob")
+    return err
+})
+```
+
+## Advanced Features
+
+### Outbox Pattern
+
+Implement reliable messaging with the transactional outbox pattern:
+
+```go
+import "github.com/alextanhongpin/dbtx/postgres/outbox"
+
+// Setup outbox table (run this SQL once)
+const schema = `
+CREATE TABLE outbox (
+    id bigint GENERATED ALWAYS AS IDENTITY,
+    aggregate_id text NOT NULL,
+    aggregate_type text NOT NULL,
+    type text NOT NULL,
+    payload jsonb NOT NULL DEFAULT '{}',
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (id)
+);`
+
+// Create outbox instance
+atomic := dbtx.New(db)
+ob := outbox.New(atomic)
+
+// Enqueue message in transaction
+err := ob.RunInTx(ctx, func(txCtx context.Context) error {
+    // Your business logic
+    _, err := ob.DBTx(txCtx).ExecContext(txCtx, "INSERT INTO orders (...) VALUES (...)")
+    if err != nil {
+        return err
+    }
+    
+    // Enqueue outbox message
+    return ob.Create(txCtx, outbox.Message{
+        AggregateID:   "order-123",
+        AggregateType: "order",
+        Type:          "order.created",
+        Payload:       json.RawMessage(`{"order_id": "123"}`),
+    })
+})
+
+// Process outbox messages
+err = ob.RunInTx(ctx, func(txCtx context.Context) error {
+    event, err := ob.LoadAndDelete(txCtx)
+    if err != nil {
+        if errors.Is(err, sql.ErrNoRows) {
+            return nil // No messages to process
+        }
+        return err
+    }
+    
+    // Process event...
+    fmt.Printf("Processing event: %s\n", event.Type)
+    return nil
+})
+```
+
+### Distributed Locking
+
+PostgreSQL advisory locks for distributed coordination:
+
+```go
+import "github.com/alextanhongpin/dbtx/postgres/lock"
+
 err = atomic.RunInTx(ctx, func(ctx context.Context) error {
-	dbtx := atomic.DBTx(ctx)
-	_, err := dbtx.Exec("INSERT INTO users (name) VALUES (?)", "Bob")
-	return err
+    tx := atomic.DBTx(ctx)
+    
+    // Acquire lock
+    acquired, err := lock.TryLock(ctx, tx, "my-resource")
+    if err != nil {
+        return err
+    }
+    if !acquired {
+        return errors.New("could not acquire lock")
+    }
+    
+    // Critical section - only one process can execute this
+    // Lock is automatically released when transaction ends
+    
+    return nil
 })
-if err != nil {
-	log.Fatal(err)
-}
+```
 
-// Using atomic.Tx(ctx)
-err = atomic.RunInTx(ctx, func(ctx context.Context) error {
-	tx := atomic.Tx(ctx)
-	_, err := tx.Exec("INSERT INTO users (name) VALUES (?)", "Charlie")
-	return err
-})
-if err != nil {
-	log.Fatal(err)
+## Testing Utilities
+
+Comprehensive testing support with Docker containers and test databases:
+
+```go
+import (
+    "github.com/alextanhongpin/dbtx/testing/dbtest"
+    "github.com/alextanhongpin/dbtx/testing/testcontainer"
+)
+
+func TestWithDatabase(t *testing.T) {
+    // Start PostgreSQL container
+    db := testcontainer.MustPostgres(t, testcontainer.PostgresConfig{
+        Database: "testdb",
+        Username: "test",
+        Password: "test",
+    })
+    defer db.Close()
+    
+    // Use test utilities
+    dbtest.MustExec(t, db, "CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT)")
+    
+    atomic := dbtx.New(db)
+    
+    // Your tests...
 }
 ```
 
-## Interfaces
+## API Reference
 
-### DBTX
+### Core Interface
 
-The `DBTX` interface abstracts common database operations:
+The `DBTX` interface provides a unified abstraction over database operations:
 
 ```go
 type DBTX interface {
-	Exec(query string, args ...any) (sql.Result, error)
-	Prepare(query string) (*sql.Stmt, error)
-	Query(query string, args ...any) (*sql.Rows, error)
-	QueryRow(query string, args ...any) *sql.Row
-
-	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
-	PrepareContext(ctx context.Context, query string) (*sql.Stmt, error)
-	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+    ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+    PrepareContext(ctx context.Context, query string) (*sql.Stmt, error)
+    QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+    QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 ```
 
-### atomic
+### UnitOfWork Interface
 
-The `atomic` interface defines methods for managing database operations and transactions:
+The main interface for transaction management:
 
 ```go
-type atomic interface {
-	DB() DBTX
-	DBTx(ctx context.Context) DBTX
-	Tx(ctx context.Context) DBTX
-	RunInTx(ctx context.Context, fn func(txCtx context.Context) error) (err error)
+type UnitOfWork interface {
+    DB() DBTX                                                              // Direct database access
+    DBTx(ctx context.Context) DBTX                                        // Context-aware database access
+    Tx(ctx context.Context) DBTX                                          // Transaction-only access (panics if not in tx)
+    RunInTx(ctx context.Context, fn func(txCtx context.Context) error) error // Execute function in transaction
 }
 ```
 
-## Error Handling
+### Method Differences
 
-- `ErrNotTransaction`: Raised when attempting to access a transaction from a non-transactional context.
+| Method | Description | Use Case |
+|--------|-------------|----------|
+| `DB()` | Returns wrapped `*sql.DB` | Non-transactional operations |
+| `DBTx(ctx)` | Returns transaction if in context, otherwise DB | Context-aware operations |
+| `Tx(ctx)` | Returns transaction, panics if not in transaction context | Transaction-required operations |
+
+### Error Handling
+
+- `ErrNotTransaction`: Returned when `Tx(ctx)` is called outside a transaction context
+
+## Package Structure
+
+```
+dbtx/
+├── dbtx.go              # Core transaction management
+├── context.go           # Context utilities
+├── logger.go            # Logging utilities
+├── buntx/              # Bun ORM adapter
+├── pgxtx/              # pgx driver adapter  
+├── sqlxtx/             # sqlx adapter
+├── postgres/
+│   ├── outbox/         # Transactional outbox pattern
+│   ├── lock/           # Advisory locks
+│   └── violations/     # Constraint violation handling
+└── testing/
+    ├── dbtest/         # Database testing utilities
+    ├── buntest/        # Bun-specific test utilities
+    ├── pgxtest/        # pgx-specific test utilities
+    ├── redistest/      # Redis testing utilities
+    └── testcontainer/  # Docker container management
+```
+
+## Best Practices
+
+### 1. Always Use Context
+
+```go
+// ✅ Good
+err := atomic.RunInTx(ctx, func(txCtx context.Context) error {
+    tx := atomic.DBTx(txCtx)
+    return tx.ExecContext(txCtx, query, args...)
+})
+
+// ❌ Avoid
+err := atomic.RunInTx(ctx, func(txCtx context.Context) error {
+    tx := atomic.DBTx(txCtx)
+    return tx.Exec(query, args...) // No context
+})
+```
+
+### 2. Handle Errors Properly
+
+```go
+err := atomic.RunInTx(ctx, func(txCtx context.Context) error {
+    tx := atomic.DBTx(txCtx)
+    
+    if _, err := tx.ExecContext(txCtx, query1, args1...); err != nil {
+        return fmt.Errorf("failed to execute query1: %w", err)
+    }
+    
+    if _, err := tx.ExecContext(txCtx, query2, args2...); err != nil {
+        return fmt.Errorf("failed to execute query2: %w", err)
+    }
+    
+    return nil
+})
+```
+
+### 3. Use Appropriate Method
+
+```go
+// For operations that might or might not be in a transaction
+tx := atomic.DBTx(ctx)
+
+// For operations that MUST be in a transaction
+tx := atomic.Tx(ctx) // Will panic if not in transaction
+
+// For operations that should NOT be in a transaction
+db := atomic.DB()
+```
+
+## Contributing
+
+We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details.
+
+### Development Setup
+
+```bash
+# Clone the repository
+git clone https://github.com/alextanhongpin/dbtx.git
+cd dbtx
+
+# Run tests
+make test
+
+# Run tests with Docker containers
+make test-integration
+
+# Lint code
+make lint
+```
+
+### Running Tests
+
+```bash
+# Unit tests
+go test ./...
+
+# Integration tests (requires Docker)
+go test -tags=integration ./...
+
+# Specific package tests
+go test ./buntx/
+go test ./pgxtx/
+go test ./testing/dbtest/
+```
 
 ## License
 
-This project is licensed under the MIT License. See the LICENSE file for details.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Acknowledgments
+
+- Inspired by the need for consistent transaction management across different Go database libraries
+- Built with lessons learned from production database applications
+- Thanks to the Go community for excellent database libraries like `pgx`, `bun`, and `sqlx`
+
+---
+
+**Made with ❤️ for the Go community**
 ````
