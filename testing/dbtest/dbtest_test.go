@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/alextanhongpin/dbtx/testing/dbtest"
+	"github.com/alextanhongpin/testdump/yamldump"
 	_ "github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 )
@@ -59,7 +60,7 @@ func TestConnection(t *testing.T) {
 	var n int
 	err := db.QueryRowContext(ctx, "SELECT 1 + 1").Scan(&n)
 	is := assert.New(t)
-	is.Nil(err)
+	is.NoError(err)
 	is.Equal(2, n)
 }
 
@@ -71,6 +72,17 @@ func TestStandalone(t *testing.T) {
 	var n int
 	err := db.QueryRowContext(ctx, "SELECT 1 + 1").Scan(&n)
 	is := assert.New(t)
-	is.Nil(err)
+	is.NoError(err)
 	is.Equal(2, n)
+}
+
+func TestDump(t *testing.T) {
+	is := assert.New(t)
+
+	db := dbtest.Tx(t)
+	_, err := db.ExecContext(ctx, `INSERT INTO users (name) VALUES ('Alice'), ('Bob')`)
+	is.NoError(err)
+
+	dbtest.Dump(t, db, "select * from users", nil)
+	dbtest.Dump(t, db, "select * from users where name=$1", []any{"Bob"}, yamldump.File("where"))
 }

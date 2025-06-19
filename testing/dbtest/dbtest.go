@@ -9,6 +9,8 @@ import (
 
 	"github.com/DATA-DOG/go-txdb"
 	"github.com/alextanhongpin/dbtx/testing/testcontainer"
+	"github.com/alextanhongpin/testdump/sqldump"
+	"github.com/alextanhongpin/testdump/yamldump"
 	"github.com/google/uuid"
 )
 
@@ -187,4 +189,15 @@ func (c *Client) Tx(t *testing.T) *sql.DB {
 
 func (c *Client) DSN() string {
 	return c.dsn
+}
+
+func Dump(t *testing.T, db *sql.DB, query string, args []any, options ...yamldump.Option) {
+	t.Helper()
+
+	r, err := sqldump.Dump(t.Context(), db, query, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	yamldump.Dump(t, r, options...)
 }

@@ -110,6 +110,10 @@ func (d *DB) RunInTx(ctx context.Context, fn func(context.Context) error) (err e
 	return tx.Commit()
 }
 
+func (d *DB) Unwrap() *sql.DB {
+	return d.db
+}
+
 type Tx struct {
 	tx  *sql.Tx
 	fns []func(DBTX) DBTX
@@ -117,6 +121,10 @@ type Tx struct {
 
 func (t *Tx) Tx() DBTX {
 	return apply(t.tx, t.fns...)
+}
+
+func (t *Tx) Unwrap() *sql.Tx {
+	return t.tx
 }
 
 func apply(dbtx DBTX, fns ...func(DBTX) DBTX) DBTX {
