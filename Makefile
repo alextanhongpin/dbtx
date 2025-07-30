@@ -1,3 +1,4 @@
+args := -failfast -cover -coverprofile=cover.out -race
 test:
-	@go test -v -failfast -cover -coverprofile=cover.out -race ./...
+	@find . -name go.mod -execdir go test $(args) ./... \;
 	@go tool cover -html=cover.out

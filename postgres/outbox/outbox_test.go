@@ -9,26 +9,36 @@ import (
 
 	_ "embed"
 
-	"github.com/alextanhongpin/core/storage/pg/pgtest"
 	"github.com/alextanhongpin/dbtx"
 	"github.com/alextanhongpin/dbtx/postgres/outbox"
+	"github.com/alextanhongpin/dbtx/testing/dbtest"
 	"github.com/stretchr/testify/assert"
 )
 
-var ErrRollback = errors.New("rollback")
+var (
+	ErrRollback = errors.New("rollback")
 
-const postgresVersion = "postgres:17.4"
+	dbtestOpts = dbtest.Options{
+		Image: "postgres:17.4",
+		Hook:  migrate,
+	}
+)
 
 //go:embed internal/schema.sql
 var schema string
 
-func migrate(db *sql.DB) error {
-	_, err := db.Exec(schema)
+func migrate(dsn string) error {
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	_, err = db.Exec(schema)
 	return err
 }
 
 func TestMain(m *testing.M) {
-	stop := pgtest.Init(pgtest.Image(postgresVersion), pgtest.Hook(migrate))
+	stop := dbtest.Init(dbtestOpts)
 	defer stop()
 
 	m.Run()
@@ -36,7 +46,7 @@ func TestMain(m *testing.M) {
 
 func TestOutbox(t *testing.T) {
 	ctx := t.Context()
-	ob := outbox.New(dbtx.New(pgtest.DB(t)))
+	ob := outbox.New(dbtx.New(dbtest.DB(t)))
 
 	err := ob.RunInTx(ctx, func(txCtx context.Context) error {
 		return ob.Create(txCtx,
