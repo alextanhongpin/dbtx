@@ -3,7 +3,7 @@ module github.com/alextanhongpin/dbtx/testing/pgxtest
 go 1.24.2
 
 require (
-	github.com/alextanhongpin/dbtx/testing/testcontainer v0.0.0-20250619141301-b448192c6887
+	github.com/alextanhongpin/dbtx/testing/testcontainer v0.0.1
 	github.com/jackc/pgx/v5 v5.7.5
 	github.com/stretchr/testify v1.10.0
 )

@@ -4,7 +4,7 @@ go 1.24.2
 
 require (
 	github.com/DATA-DOG/go-txdb v0.2.1
-	github.com/alextanhongpin/dbtx/testing/testcontainer v0.0.0-20250619141301-b448192c6887
+	github.com/alextanhongpin/dbtx/testing/testcontainer v0.0.1
 	github.com/google/uuid v1.6.0
 	github.com/stretchr/testify v1.10.0
 	github.com/uptrace/bun v1.2.15

@@ -15,7 +15,7 @@ require (
 	github.com/DATA-DOG/go-txdb v0.2.1 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/Nvveen/Gotty v0.0.0-20120604004816-cd527374f1e5 // indirect
-	github.com/alextanhongpin/dbtx/testing/testcontainer v0.0.0-20250619141301-b448192c6887 // indirect
+	github.com/alextanhongpin/dbtx/testing/testcontainer v0.0.1 // indirect
 	github.com/alextanhongpin/testdump/pkg/diff v0.0.0-20250703151453-77514452c9aa // indirect
 	github.com/alextanhongpin/testdump/pkg/file v0.0.0-20250703151453-77514452c9aa // indirect
 	github.com/alextanhongpin/testdump/pkg/reviver v0.0.0-20250703151453-77514452c9aa // indirect
