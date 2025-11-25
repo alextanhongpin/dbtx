@@ -9,6 +9,76 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func ExampleNew_insert() {
+	q := dbt.New[User, InsertUserParams](`INSERT INTO users {{ insert }} RETURNING {{ columns }}`)
+
+	fmt.Println(q.String())
+	fmt.Println(q.Args(&InsertUserParams{
+		Name:  "john",
+		Email: "john@appleseed.com",
+	}))
+
+	// Output:
+	// INSERT INTO users (email, name) VALUES ($1, $2) RETURNING created_at, email, id, name, updated_at
+	// [john@appleseed.com john]
+}
+
+func ExampleNew_select() {
+	q := dbt.New[User, FilterUserParams](`SELECT {{ columns "u" "user" }}
+FROM users u
+WHERE name = @name AND email = @email AND age = @age
+LIMIT 3`)
+
+	fmt.Println(q.String())
+	fmt.Println(q.Args(&FilterUserParams{
+		Name:  "john",
+		Email: "john.appleseed@mail.com",
+		Age:   20,
+	}))
+
+	// Output:
+	// SELECT u.created_at AS user_created_at, u.email AS user_email, u.id AS user_id, u.name AS user_name, u.updated_at AS user_updated_at
+	// FROM users u
+	// WHERE name = $1 AND email = $2 AND age = $3
+	// LIMIT 3
+	// [john john.appleseed@mail.com 20]
+}
+
+func ExampleNew_update() {
+	q := dbt.New[User, FilterUserParams](`UPDATE users
+SET {{ set "ex" "email" }}
+WHERE email = @email
+LIMIT 3`)
+
+	fmt.Println(q.String())
+	fmt.Println(q.Args(&FilterUserParams{
+		Name:  "john",
+		Email: "john.appleseed@mail.com",
+		Age:   32,
+	}))
+
+	// Output:
+	// UPDATE users
+	// SET age = $1, name = $2
+	// WHERE email = $3
+	// LIMIT 3
+	// [32 john john.appleseed@mail.com]
+}
+
+func ExampleNew_aggregate() {
+	q := dbt.New[UserBookAggregate, dbt.NoArgs](`SELECT {{ columns }}
+FROM users u
+JOIN books b ON (u.id = b.user_id)`)
+	fmt.Println(q.String())
+	fmt.Println(q.Args(&dbt.NoArgs{}))
+
+	// Output:
+	// SELECT b.author AS book_author, b.created_at AS book_created_at, b.id AS book_id, b.isbn AS book_isbn, b.published_at AS book_published_at, b.title AS book_title, b.updated_at AS book_updated_at, u.created_at AS user_created_at, u.email AS user_email, u.id AS user_id, u.name AS user_name, u.updated_at AS user_updated_at, ub.book_id AS user_book_book_id, ub.created_at AS user_book_created_at, ub.id AS user_book_id, ub.status AS user_book_status, ub.updated_at AS user_book_updated_at, ub.user_id AS user_book_user_id
+	// FROM users u
+	// JOIN books b ON (u.id = b.user_id)
+	// []
+}
+
 type ABC struct {
 }
 
@@ -131,69 +201,6 @@ func TestDBT_params(t *testing.T) {
 	for _, tt := range tests {
 		is.Equal(tt.want, tt.got, tt.name)
 	}
-}
-
-func ExampleNew_insert() {
-	q := dbt.New[User, InsertUserParams](`INSERT INTO users {{ insert }} RETURNING {{ columns }}`)
-
-	fmt.Println(q.String())
-	fmt.Println(q.Args(&InsertUserParams{
-		Name:  "john",
-		Email: "john@appleseed.com",
-	}))
-
-	// Output:
-	// INSERT INTO users (email, name) VALUES ($1, $2) RETURNING created_at, email, id, name, updated_at
-	// [john@appleseed.com john]
-}
-
-func ExampleNew_select() {
-	q := dbt.New[User, FilterUserParams](`SELECT {{ columns "u" "user" }}
-FROM users u
-WHERE name = @name AND email = @email AND age = @age
-LIMIT 3`)
-
-	fmt.Println(q.String())
-	fmt.Println(q.Args(&FilterUserParams{
-		Name:  "john",
-		Email: "john.appleseed@mail.com",
-		Age:   20,
-	}))
-}
-
-func ExampleNew_update() {
-	q := dbt.New[User, FilterUserParams](`UPDATE users
-SET {{ set "ex" "email" }}
-WHERE email = @email
-LIMIT 3`)
-
-	fmt.Println(q.String())
-	fmt.Println(q.Args(&FilterUserParams{
-		Name:  "john",
-		Email: "john.appleseed@mail.com",
-		Age:   32,
-	}))
-
-	// Output:
-	// UPDATE users
-	// SET age = $1, name = $2
-	// WHERE email = $3
-	// LIMIT 3
-	// [32 john john.appleseed@mail.com]
-}
-
-func ExampleNew_aggregate() {
-	q := dbt.New[UserBookAggregate, dbt.NoArgs](`SELECT {{ columns }}
-FROM users u
-JOIN books b ON (u.id = b.user_id)`)
-	fmt.Println(q.String())
-	fmt.Println(q.Args(&dbt.NoArgs{}))
-
-	// Output:
-	// SELECT b.author AS book_author, b.created_at AS book_created_at, b.id AS book_id, b.isbn AS book_isbn, b.published_at AS book_published_at, b.title AS book_title, b.updated_at AS book_updated_at, u.created_at AS user_created_at, u.email AS user_email, u.id AS user_id, u.name AS user_name, u.updated_at AS user_updated_at, ub.book_id AS user_book_book_id, ub.created_at AS user_book_created_at, ub.id AS user_book_id, ub.status AS user_book_status, ub.updated_at AS user_book_updated_at, ub.user_id AS user_book_user_id
-	// FROM users u
-	// JOIN books b ON (u.id = b.user_id)
-	// []
 }
 
 type User struct {
