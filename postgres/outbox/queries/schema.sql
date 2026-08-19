@@ -1,5 +1,6 @@
-CREATE TABLE outbox (
-	id bigint GENERATED ALWAYS AS IDENTITY,
+CREATE SCHEMA outbox;
+CREATE TABLE outbox.messages (
+	id uuid NOT NULL DEFAULT uuidv7(),
 	aggregate_id text NOT NULL,
 	aggregate_type text NOT NULL,
 	type text NOT NULL,

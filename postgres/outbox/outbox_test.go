@@ -1,13 +1,15 @@
 package outbox_test
 
 import (
+	_ "embed"
+	"sync"
+	"time"
+
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"testing"
-
-	_ "embed"
 
 	"github.com/alextanhongpin/dbtx"
 	"github.com/alextanhongpin/dbtx/postgres/outbox"
@@ -19,12 +21,12 @@ var (
 	ErrRollback = errors.New("rollback")
 
 	dbtestOpts = dbtest.Options{
-		Image: "postgres:17.4",
+		Image: "postgres:18.4-bookworm",
 		Hook:  migrate,
 	}
 )
 
-//go:embed internal/schema.sql
+//go:embed queries/schema.sql
 var schema string
 
 func migrate(dsn string) error {
@@ -50,13 +52,13 @@ func TestOutbox(t *testing.T) {
 
 	err := ob.RunInTx(ctx, func(txCtx context.Context) error {
 		return ob.Create(txCtx,
-			outbox.Message{
+			&outbox.Message{
 				AggregateID:   "a-id-1",
 				AggregateType: "a-type-1",
 				Type:          "type-1",
 				Payload:       json.RawMessage(`{"foo": "bar"}`),
 			},
-			outbox.Message{
+			&outbox.Message{
 				AggregateID:   "a-id-2",
 				AggregateType: "a-type-2",
 				Type:          "type-2",
@@ -105,6 +107,52 @@ func TestOutbox(t *testing.T) {
 			count, err := ob.Count(ctx)
 			is.NoError(err)
 			is.Equal(counts[i], count)
+		}
+	})
+
+	t.Run("wait", func(t *testing.T) {
+		var wg sync.WaitGroup
+
+		err := ob.RunInTx(ctx, func(txCtx context.Context) error {
+			return ob.Create(txCtx,
+				&outbox.Message{
+					AggregateID:   "a-id-1",
+					AggregateType: "a-type-1",
+					Type:          "type-1",
+					Payload:       json.RawMessage(`{"foo": "bar"}`),
+				},
+				&outbox.Message{
+					AggregateID:   "a-id-2",
+					AggregateType: "a-type-2",
+					Type:          "type-2",
+					Payload:       json.RawMessage(`{"one": 1}`),
+				},
+			)
+		})
+		is := assert.New(t)
+		is.NoError(err, err)
+
+		count, err := ob.Count(ctx)
+		is.NoError(err)
+		is.Equal(int64(2), count)
+
+		for range 3 {
+			wg.Go(func() {
+				err := ob.RunInTx(ctx, func(txCtx context.Context) error {
+					evt, err := ob.LoadAndDelete(txCtx)
+					if err != nil {
+						return err
+					}
+					t.Log(evt)
+					time.Sleep(time.Second)
+
+					return nil
+				})
+				if err != nil {
+					t.Log(err)
+				}
+			})
+			wg.Wait()
 		}
 	})
 }
