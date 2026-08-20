@@ -89,13 +89,9 @@ func (d *DB) RunInTx(ctx context.Context, fn func(context.Context) error) (err e
 	}
 
 	defer func() {
-		if r := recover(); r != nil {
-			txErr := tx.Rollback()
-			if e, ok := r.(error); ok {
-				panic(errors.Join(err, e, txErr))
-			} else {
-				panic(r)
-			}
+		if p := recover(); p != nil {
+			_ = tx.Rollback()
+			panic(p)
 		}
 	}()
 
@@ -104,10 +100,15 @@ func (d *DB) RunInTx(ctx context.Context, fn func(context.Context) error) (err e
 		fns: d.fns,
 	})
 	if err := fn(ctx); err != nil {
-		return errors.Join(tx.Rollback(), err)
+		_ = tx.Rollback()
+		return err
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return nil
 }
 
 func (d *DB) Unwrap() *sql.DB {
