@@ -5,8 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
-
-	"github.com/google/uuid"
+	"uuid"
 )
 
 // Message is the enqueued message.

@@ -92,6 +92,8 @@ func (d *DB) RunInTx(ctx context.Context, fn func(context.Context) error) (err e
 		if p := recover(); p != nil {
 			_ = tx.Rollback()
 			panic(p)
+		} else if err != nil {
+			_ = tx.Rollback()
 		}
 	}()
 
@@ -100,15 +102,46 @@ func (d *DB) RunInTx(ctx context.Context, fn func(context.Context) error) (err e
 		fns: d.fns,
 	})
 	if err := fn(ctx); err != nil {
-		_ = tx.Rollback()
 		return err
 	}
 
-	if err := tx.Commit(); err != nil {
-		_ = tx.Rollback()
-		return err
+	return tx.Commit()
+}
+
+func (d *DB) RunInTx2[T any](ctx context.Context, fn func(context.Context) (T, error)) (res T, err error) {
+	if IsTx(ctx) {
+		return fn(ctx)
 	}
-	return nil
+	var zero T
+
+	tx, err := d.db.BeginTx(ctx, TxOptions(ctx))
+	if err != nil {
+		return zero, err
+	}
+
+	defer func() {
+		if p := recover(); p != nil {
+			_ = tx.Rollback()
+			panic(p)
+		} else if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	ctx = txCtxKey.WithValue(ctx, &Tx{
+		tx:  tx,
+		fns: d.fns,
+	})
+	res, err = fn(ctx)
+	if err != nil {
+		return zero, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return zero, err
+	}
+
+	return res, nil
 }
 
 func (d *DB) Unwrap() *sql.DB {

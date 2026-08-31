@@ -6,12 +6,12 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"uuid"
 
 	"github.com/DATA-DOG/go-txdb"
 	"github.com/alextanhongpin/dbtx/testing/testcontainer"
 	"github.com/alextanhongpin/testdump/sqldump"
 	"github.com/alextanhongpin/testdump/yamldump"
-	"github.com/google/uuid"
 )
 
 var once sync.Once
@@ -168,12 +168,12 @@ func (c *Client) Tx(t *testing.T) *sql.DB {
 
 	// Lazily initialize the txdb.
 	c.once.Do(func() {
-		c.txdb = fmt.Sprintf("txdb:%s", uuid.New())
+		c.txdb = fmt.Sprintf("txdb:%s", uuid.NewV7())
 		txdb.Register(c.txdb, c.driver, c.dsn)
 	})
 
 	// Returns a new identifier for every open connection.
-	db, err := sql.Open(c.txdb, uuid.New().String())
+	db, err := sql.Open(c.txdb, uuid.NewV7().String())
 	if err != nil {
 		t.Fatal(err)
 	}

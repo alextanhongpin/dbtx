@@ -1,6 +1,6 @@
 module github.com/alextanhongpin/dbtx/testing/dbtest
 
-go 1.24.2
+go 1.27.0
 
 require (
 	github.com/DATA-DOG/go-txdb v0.2.1

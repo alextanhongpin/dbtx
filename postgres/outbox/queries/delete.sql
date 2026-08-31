@@ -1,14 +1,9 @@
-WITH deleted AS (
-	DELETE FROM outbox.messages
-	WHERE id = (
-		SELECT id
-		FROM outbox.messages
-		ORDER BY id
-		FOR UPDATE
-		SKIP LOCKED
-		LIMIT 1
-	)
-	RETURNING *
+with deleted as (
+       delete
+         from dbtx.outbox
+        where id = (
+    select id from dbtx.outbox order by id for update SKIP LOCKED limit 1
+  )
+    returning *
 )
-SELECT row_to_json(t)
-FROM deleted t;
+select row_to_json(t) from deleted t;

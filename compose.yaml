@@ -1,0 +1,12 @@
+services:
+  db:
+    image: postgres:19beta3-alpine3.24
+    ports:
+      - 127.0.0.1:5432:5432
+    command: "-c log_statement=all"
+    environment:
+      POSTGRES_DB: dev
+      POSTGRES_PASSWORD: 123456
+      POSTGRES_USER: john
+    volumes:
+      - ./tmp:/var/lib/postgresql

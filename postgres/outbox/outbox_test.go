@@ -2,14 +2,14 @@ package outbox_test
 
 import (
 	_ "embed"
-	"sync"
-	"time"
 
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/alextanhongpin/dbtx"
 	"github.com/alextanhongpin/dbtx/postgres/outbox"

@@ -6,10 +6,10 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"uuid"
 
 	"github.com/DATA-DOG/go-txdb"
 	"github.com/alextanhongpin/dbtx/testing/testcontainer"
-	"github.com/google/uuid"
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
 	"github.com/uptrace/bun/driver/pgdriver"
@@ -166,14 +166,14 @@ func (c *Client) Tx(t *testing.T) *bun.DB {
 			t.Fatalf("failed to close bun: %v", err)
 		}
 
-		c.txdb = fmt.Sprintf("txdb:%s", uuid.New())
+		c.txdb = fmt.Sprintf("txdb:%s", uuid.NewV7())
 
 		// NOTE: We use `pg` driver, which bun uses instead of `postgres`.
 		txdb.Register(c.txdb, "pg", c.dsn)
 	})
 
 	// Create a unique transaction for each connection.
-	sqldb, err := sql.Open(c.txdb, uuid.NewString())
+	sqldb, err := sql.Open(c.txdb, uuid.NewV7().String())
 	if err != nil {
 		t.Fatalf("failed to open tx: %v", err)
 	}

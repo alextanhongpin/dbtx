@@ -45,7 +45,11 @@ func main() {
 }
 ```
 
-## ✨ Features
+## ✨ Status
+
+- **Current Version:** 1.0.0 (Stable)
+- **Focus:** Unified transaction management and advanced patterns (Outbox, Locking).
+- **Development:** Active development for support with new database drivers.
 
 - **🔄 Unified Transaction Interface**: Common interface for `*sql.DB` and `*sql.Tx`
 - **🎯 Multiple Database Support**: Works with `database/sql`, `pgx`, `bun`, and `sqlx`

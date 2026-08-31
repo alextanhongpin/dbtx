@@ -1,2 +1,1 @@
-SELECT count(*)
-FROM outbox.messages;
+select count(*) from dbtx.outbox;

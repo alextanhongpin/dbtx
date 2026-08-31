@@ -1,10 +1,13 @@
-CREATE SCHEMA outbox;
-CREATE TABLE outbox.messages (
-	id uuid NOT NULL DEFAULT uuidv7(),
-	aggregate_id text NOT NULL,
-	aggregate_type text NOT NULL,
-	type text NOT NULL,
-	payload jsonb NOT NULL DEFAULT '{}',
-	created_at timestamptz NOT NULL DEFAULT now(),
-	PRIMARY KEY (id)
+create schema if not exists dbtx;
+
+create table if not exists dbtx.outbox
+ (
+  id             uuid not null default uuidv7(),
+  aggregate_id   text not null,
+  aggregate_type text not null,
+  type           text not null,
+  payload        jsonb not null default '{}',
+  created_at     timestamptz not null default now(),
+
+  primary key (id)
 );
