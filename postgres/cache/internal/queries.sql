@@ -4,6 +4,12 @@ select * from dbtx.cache where key = $1 for update;
 -- name: Delete :one
 delete from dbtx.cache where key = $1 returning *;
 
+-- name: StoreOnce :one
+insert into dbtx.cache(key, value, digest, expires_at)
+     values ($1, $2, $3, $4)
+on conflict (key) do nothing
+  returning *;
+
 -- name: Store :one
 insert into dbtx.cache(key, value, digest, expires_at)
      values ($1, $2, $3, $4)
@@ -15,19 +21,24 @@ on conflict (key) do
 -- name: Expire :exec
 update dbtx.cache set expires_at = $1 where key = $2;
 
--- name: DeleteExpired :execrows
-   delete
-     from dbtx.cache
-    where key = $1
-      and expires_at is not null
-      and expires_at <= now()
+-- name: DeleteExpired :one
+delete
+ from dbtx.cache
+where key = $1
+  and expires_at is not null
+  and expires_at <= now()
 returning *;
 
--- name: CompareAndDelete :execrows
+-- name: CompareAndDelete :one
 delete
   from dbtx.cache
  where key = $1
-   and (digest = $2 or (expires_at is not null and expires_at <= now()));
+   and (digest = $2 or (expires_at is not null and expires_at <= now()))
+returning *;
 
--- name: CompareAndSwap :execrows
-update dbtx.cache set value = $1 where key = $2 and digest = $3;
+-- name: CompareAndSwap :one
+update dbtx.cache set value = $1 where key = $2 and digest = $3
+returning *;
+
+-- name: TTL :one
+select * from dbtx.cache where key = $1;

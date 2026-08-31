@@ -9,13 +9,15 @@ import (
 )
 
 type Querier interface {
-	CompareAndDelete(ctx context.Context, arg CompareAndDeleteParams) (int64, error)
-	CompareAndSwap(ctx context.Context, arg CompareAndSwapParams) (int64, error)
+	CompareAndDelete(ctx context.Context, arg CompareAndDeleteParams) (*DbtxCache, error)
+	CompareAndSwap(ctx context.Context, arg CompareAndSwapParams) (*DbtxCache, error)
 	Delete(ctx context.Context, key string) (*DbtxCache, error)
-	DeleteExpired(ctx context.Context, key string) (int64, error)
+	DeleteExpired(ctx context.Context, key string) (*DbtxCache, error)
 	Expire(ctx context.Context, arg ExpireParams) error
 	Load(ctx context.Context, key string) (*DbtxCache, error)
 	Store(ctx context.Context, arg StoreParams) (*DbtxCache, error)
+	StoreOnce(ctx context.Context, arg StoreOnceParams) (*DbtxCache, error)
+	TTL(ctx context.Context, key string) (*DbtxCache, error)
 }
 
 var _ Querier = (*Queries)(nil)

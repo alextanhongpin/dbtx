@@ -11,11 +11,12 @@ import (
 	"encoding/json"
 )
 
-const compareAndDelete = `-- name: CompareAndDelete :execrows
+const compareAndDelete = `-- name: CompareAndDelete :one
 delete
   from dbtx.cache
  where key = $1
    and (digest = $2 or (expires_at is not null and expires_at <= now()))
+returning key, value, digest, created_at, updated_at, expires_at
 `
 
 type CompareAndDeleteParams struct {
@@ -23,16 +24,23 @@ type CompareAndDeleteParams struct {
 	Digest string
 }
 
-func (q *Queries) CompareAndDelete(ctx context.Context, arg CompareAndDeleteParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, compareAndDelete, arg.Key, arg.Digest)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
+func (q *Queries) CompareAndDelete(ctx context.Context, arg CompareAndDeleteParams) (*DbtxCache, error) {
+	row := q.db.QueryRowContext(ctx, compareAndDelete, arg.Key, arg.Digest)
+	var i DbtxCache
+	err := row.Scan(
+		&i.Key,
+		&i.Value,
+		&i.Digest,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ExpiresAt,
+	)
+	return &i, err
 }
 
-const compareAndSwap = `-- name: CompareAndSwap :execrows
+const compareAndSwap = `-- name: CompareAndSwap :one
 update dbtx.cache set value = $1 where key = $2 and digest = $3
+returning key, value, digest, created_at, updated_at, expires_at
 `
 
 type CompareAndSwapParams struct {
@@ -41,12 +49,18 @@ type CompareAndSwapParams struct {
 	Digest string
 }
 
-func (q *Queries) CompareAndSwap(ctx context.Context, arg CompareAndSwapParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, compareAndSwap, arg.Value, arg.Key, arg.Digest)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
+func (q *Queries) CompareAndSwap(ctx context.Context, arg CompareAndSwapParams) (*DbtxCache, error) {
+	row := q.db.QueryRowContext(ctx, compareAndSwap, arg.Value, arg.Key, arg.Digest)
+	var i DbtxCache
+	err := row.Scan(
+		&i.Key,
+		&i.Value,
+		&i.Digest,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ExpiresAt,
+	)
+	return &i, err
 }
 
 const delete = `-- name: Delete :one
@@ -67,21 +81,27 @@ func (q *Queries) Delete(ctx context.Context, key string) (*DbtxCache, error) {
 	return &i, err
 }
 
-const deleteExpired = `-- name: DeleteExpired :execrows
-   delete
-     from dbtx.cache
-    where key = $1
-      and expires_at is not null
-      and expires_at <= now()
+const deleteExpired = `-- name: DeleteExpired :one
+delete
+ from dbtx.cache
+where key = $1
+  and expires_at is not null
+  and expires_at <= now()
 returning key, value, digest, created_at, updated_at, expires_at
 `
 
-func (q *Queries) DeleteExpired(ctx context.Context, key string) (int64, error) {
-	result, err := q.db.ExecContext(ctx, deleteExpired, key)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
+func (q *Queries) DeleteExpired(ctx context.Context, key string) (*DbtxCache, error) {
+	row := q.db.QueryRowContext(ctx, deleteExpired, key)
+	var i DbtxCache
+	err := row.Scan(
+		&i.Key,
+		&i.Value,
+		&i.Digest,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ExpiresAt,
+	)
+	return &i, err
 }
 
 const expire = `-- name: Expire :exec
@@ -139,6 +159,57 @@ func (q *Queries) Store(ctx context.Context, arg StoreParams) (*DbtxCache, error
 		arg.Digest,
 		arg.ExpiresAt,
 	)
+	var i DbtxCache
+	err := row.Scan(
+		&i.Key,
+		&i.Value,
+		&i.Digest,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ExpiresAt,
+	)
+	return &i, err
+}
+
+const storeOnce = `-- name: StoreOnce :one
+insert into dbtx.cache(key, value, digest, expires_at)
+     values ($1, $2, $3, $4)
+on conflict (key) do nothing
+  returning key, value, digest, created_at, updated_at, expires_at
+`
+
+type StoreOnceParams struct {
+	Key       string
+	Value     json.RawMessage
+	Digest    string
+	ExpiresAt sql.NullTime
+}
+
+func (q *Queries) StoreOnce(ctx context.Context, arg StoreOnceParams) (*DbtxCache, error) {
+	row := q.db.QueryRowContext(ctx, storeOnce,
+		arg.Key,
+		arg.Value,
+		arg.Digest,
+		arg.ExpiresAt,
+	)
+	var i DbtxCache
+	err := row.Scan(
+		&i.Key,
+		&i.Value,
+		&i.Digest,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ExpiresAt,
+	)
+	return &i, err
+}
+
+const tTL = `-- name: TTL :one
+select key, value, digest, created_at, updated_at, expires_at from dbtx.cache where key = $1
+`
+
+func (q *Queries) TTL(ctx context.Context, key string) (*DbtxCache, error) {
+	row := q.db.QueryRowContext(ctx, tTL, key)
 	var i DbtxCache
 	err := row.Scan(
 		&i.Key,

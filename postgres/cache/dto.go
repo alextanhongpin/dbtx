@@ -38,7 +38,7 @@ func newDto(row *postgres.DbtxCache) *dto {
 func (d *dto) Load[T any]() (T, error) {
 	if !d.Valid() {
 		var zero T
-		return zero, ErrNotFound
+		return zero, ErrNotExist
 	}
 	var res T
 	err := json.Unmarshal(d.Value, &res)
