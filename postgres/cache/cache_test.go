@@ -5,6 +5,7 @@ import (
 
 	_ "github.com/lib/pq"
 
+	"context"
 	"database/sql"
 	"errors"
 	"testing"
@@ -191,5 +192,125 @@ func TestCache(t *testing.T) {
 		loaded, err := c.Load[[]byte](ctx, key)
 		is.NoError(err)
 		is.Equal(newValue, loaded)
+	})
+}
+
+func TestCacheCoverage(t *testing.T) {
+	ctx := t.Context()
+	c := cache.New(dbtest.DB(t))
+	t.Helper()
+
+	t.Run("exists", func(t *testing.T) {
+		key := t.Name()
+		exists, err := c.Exists(ctx, key)
+		assert.NoError(t, err)
+		assert.False(t, exists)
+
+		err = c.Store(ctx, key, []byte("hello"), time.Second)
+		assert.NoError(t, err)
+
+		exists, err = c.Exists(ctx, key)
+		assert.NoError(t, err)
+		assert.True(t, exists)
+	})
+
+	t.Run("ttl", func(t *testing.T) {
+		key := t.Name()
+		ttl, err := c.TTL(ctx, key)
+		assert.NoError(t, err)
+		assert.Equal(t, time.Duration(-2), ttl)
+
+		err = c.Store(ctx, key, []byte("hello"), 2*time.Second)
+		assert.NoError(t, err)
+		ttl, err = c.TTL(ctx, key)
+		assert.NoError(t, err)
+		assert.True(t, ttl > 0 && ttl <= 2*time.Second)
+
+		key2 := t.Name() + "2"
+		err = c.Store(ctx, key2, []byte("hello"), 0)
+		assert.NoError(t, err)
+		ttl, err = c.TTL(ctx, key2)
+		assert.NoError(t, err)
+		assert.Equal(t, time.Duration(-1), ttl)
+	})
+
+	t.Run("expire", func(t *testing.T) {
+		key := t.Name()
+		err := c.Store(ctx, key, []byte("hello"), 0)
+		assert.NoError(t, err)
+
+		ttl, err := c.TTL(ctx, key)
+		assert.NoError(t, err)
+		assert.Equal(t, time.Duration(-1), ttl)
+
+		err = c.Expire(ctx, key, time.Second)
+		assert.NoError(t, err)
+
+		ttl, err = c.TTL(ctx, key)
+		assert.NoError(t, err)
+		assert.True(t, ttl > 0 && ttl <= time.Second)
+	})
+
+	t.Run("delete", func(t *testing.T) {
+		key := t.Name()
+		err := c.Delete(ctx, key)
+		assert.ErrorIs(t, err, cache.ErrNotExist)
+
+		err = c.Store(ctx, key, []byte("hello"), time.Second)
+		assert.NoError(t, err)
+
+		err = c.Delete(ctx, key)
+		assert.NoError(t, err)
+
+		_, err = c.Load[any](ctx, key)
+		assert.ErrorIs(t, err, cache.ErrNotExist)
+	})
+
+	t.Run("load or create", func(t *testing.T) {
+		key := t.Name()
+		called := false
+		curr, loaded, err := c.LoadOrCreate(ctx, key, func(ctx context.Context, key string) (string, time.Duration, error) {
+			called = true
+			return "value", time.Second, nil
+		})
+		assert.NoError(t, err)
+		assert.False(t, loaded)
+		assert.Equal(t, "value", curr)
+		assert.True(t, called)
+
+		called = false
+		curr, loaded, err = c.LoadOrCreate(ctx, key, func(ctx context.Context, key string) (string, time.Duration, error) {
+			called = true
+			return "value2", time.Second, nil
+		})
+		assert.NoError(t, err)
+		assert.True(t, loaded)
+		assert.Equal(t, "value", curr)
+		assert.False(t, called)
+	})
+
+	t.Run("compare and delete mismatch", func(t *testing.T) {
+		key := t.Name()
+		err := c.Store(ctx, key, []byte("hello"), time.Second)
+		assert.NoError(t, err)
+
+		err = c.CompareAndDelete(ctx, key, []byte("wrong"))
+		assert.ErrorIs(t, err, cache.ErrNotExist)
+
+		_, err = c.Load[[]byte](ctx, key)
+		assert.NoError(t, err)
+	})
+
+	t.Run("compare and swap mismatch", func(t *testing.T) {
+		key := t.Name()
+		err := c.Store(ctx, key, []byte("hello"), time.Second)
+		assert.NoError(t, err)
+
+		err = c.CompareAndSwap(ctx, key, []byte("wrong"), []byte("world"), time.Second)
+		assert.ErrorIs(t, err, cache.ErrNotExist)
+
+		loaded, err := c.Load[[]byte](ctx, key)
+		assert.NoError(t, err)
+		assert.Equal(t, []byte("hello"), loaded)
 	})
 }
