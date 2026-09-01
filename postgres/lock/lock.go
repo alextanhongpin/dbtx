@@ -17,7 +17,18 @@ var (
 // will wait for the previous operation to complete.
 // Lock must be run within a transaction context, panics otherwise.
 func Lock(ctx context.Context, key *Key) error {
-	tx, ok := dbtx.Value(ctx)
+	return NamedLock(ctx, dbtx.ID, key)
+}
+
+// TryLock locks the given key. If multiple operations lock the same key, only
+// the first will succeed. The rest will fail with the error ErrAlreadyLocked.
+// TryLock must be run within a transaction context, panics otherwise.
+func TryLock(ctx context.Context, key *Key) error {
+	return NamedTryLock(ctx, dbtx.ID, key)
+}
+
+func NamedLock(ctx context.Context, id string, key *Key) error {
+	tx, ok := dbtx.NamedValue(ctx, id)
 	if !ok {
 		return fmt.Errorf("%w: %s", ErrLockOutsideTx, key)
 	}
@@ -31,11 +42,8 @@ func Lock(ctx context.Context, key *Key) error {
 	return err
 }
 
-// TryLock locks the given key. If multiple operations lock the same key, only
-// the first will succeed. The rest will fail with the error ErrAlreadyLocked.
-// TryLock must be run within a transaction context, panics otherwise.
-func TryLock(ctx context.Context, key *Key) error {
-	tx, ok := dbtx.Value(ctx)
+func NamedTryLock(ctx context.Context, id string, key *Key) error {
+	tx, ok := dbtx.NamedValue(ctx, id)
 	if !ok {
 		return fmt.Errorf("%w: %s", ErrLockOutsideTx, key)
 	}

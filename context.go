@@ -5,38 +5,52 @@ import (
 	"database/sql"
 )
 
-type ctxKey[T any] string
+const ID = "dbtx"
 
-var (
-	txCtxKey     = ctxKey[*Tx]("tx")
-	txOptsCtxKey = ctxKey[*sql.TxOptions]("tx_opts")
-)
+type ctxKey string
 
-func (key ctxKey[T]) Value(ctx context.Context) (T, bool) {
-	v, ok := ctx.Value(key).(T)
-	return v, ok
-}
-
-func (key ctxKey[T]) WithValue(ctx context.Context, v T) context.Context {
-	return context.WithValue(ctx, key, v)
-}
+type txOptsCtxKey string
 
 func WithTxOptions(ctx context.Context, opts *sql.TxOptions) context.Context {
-	return txOptsCtxKey.WithValue(ctx, opts)
+	return WithNamedTxOptions(ctx, ID, opts)
 }
 
 func TxOptions(ctx context.Context) *sql.TxOptions {
-	v, _ := txOptsCtxKey.Value(ctx)
-	return v
+	return NamedTxOptions(ctx, ID)
 }
 
 func IsTx(ctx context.Context) bool {
-	_, ok := txCtxKey.Value(ctx)
-	return ok
+	return IsNamedTx(ctx, ID)
 }
 
 func Value(ctx context.Context) (DBTX, bool) {
-	tx, ok := txCtxKey.Value(ctx)
+	return NamedValue(ctx, ID)
+}
+
+func WithValue(ctx context.Context, tx *Tx) context.Context {
+	return WithNamedValue(ctx, ID, tx)
+}
+
+func WithNamedTxOptions(ctx context.Context, id string, opts *sql.TxOptions) context.Context {
+	return context.WithValue(ctx, txOptsCtxKey(id), opts)
+}
+
+func NamedTxOptions(ctx context.Context, id string) *sql.TxOptions {
+	v, _ := ctx.Value(txOptsCtxKey(id)).(*sql.TxOptions)
+	return v
+}
+
+func IsNamedTx(ctx context.Context, id string) bool {
+	_, ok := ctx.Value(ctxKey(id)).(*Tx)
+	return ok
+}
+
+func WithNamedValue(ctx context.Context, id string, tx *Tx) context.Context {
+	return context.WithValue(ctx, ctxKey(id), tx)
+}
+
+func NamedValue(ctx context.Context, id string) (DBTX, bool) {
+	tx, ok := ctx.Value(ctxKey(id)).(*Tx)
 	if !ok {
 		return nil, false
 	}

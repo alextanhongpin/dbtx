@@ -9,10 +9,11 @@ import (
 	"testing"
 	"time"
 
+	_ "github.com/lib/pq"
+
 	"github.com/alextanhongpin/dbtx"
 	"github.com/alextanhongpin/dbtx/postgres/lock"
 	"github.com/alextanhongpin/dbtx/testing/dbtest"
-	_ "github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -154,9 +155,8 @@ func TestAtomicIntLockKeyLocked(t *testing.T) {
 	is := assert.New(t)
 
 	var wg sync.WaitGroup
-	wg.Add(1)
 
-	go func() {
+	wg.Go(func() {
 		defer wg.Done()
 
 		err := atm.RunInTx(t.Context(), func(txCtx context.Context) error {
@@ -170,7 +170,7 @@ func TestAtomicIntLockKeyLocked(t *testing.T) {
 			return nil
 		})
 		is.NoError(err)
-	}()
+	})
 
 	time.Sleep(50 * time.Millisecond)
 	err := atm.RunInTx(t.Context(), func(txCtx context.Context) error {

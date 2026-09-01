@@ -31,6 +31,7 @@ var _ UnitOfWork = (*DB)(nil)
 
 // DB represents a unit of work.
 type DB struct {
+	id  string
 	db  *sql.DB
 	fns []func(DBTX) DBTX
 }
@@ -38,9 +39,18 @@ type DB struct {
 // New returns a pointer to DB.
 func New(db *sql.DB, fns ...func(DBTX) DBTX) *DB {
 	return &DB{
+		id:  ID,
 		db:  db,
 		fns: fns,
 	}
+}
+
+func (d *DB) ID() string {
+	return d.id
+}
+
+func (d *DB) SetID(id string) {
+	d.id = id
 }
 
 // DB returns the underlying *sql.DB as DBTX interface, to avoid the caller to
@@ -55,7 +65,7 @@ func (d *DB) DB() DBTX {
 // *sql.Tx.
 // Returns the UnitOfWork underlying type if the context is empty.
 func (d *DB) DBTx(ctx context.Context) DBTX {
-	if tx, ok := Value(ctx); ok {
+	if tx, ok := NamedValue(ctx, d.id); ok {
 		return tx
 	}
 
@@ -67,7 +77,7 @@ func (d *DB) DBTx(ctx context.Context) DBTX {
 // When dealing with nested transaction, only the parent of the transaction can
 // commit the transaction.
 func (d *DB) Tx(ctx context.Context) DBTX {
-	tx, ok := Value(ctx)
+	tx, ok := NamedValue(ctx, d.id)
 	if !ok {
 		panic(ErrNotTransaction)
 	}
@@ -79,11 +89,11 @@ func (d *DB) Tx(ctx context.Context) DBTX {
 // passed in, then it will use the context tx. Transaction cannot be nested.
 // The transaction can only be committed by the parent.
 func (d *DB) RunInTx(ctx context.Context, fn func(context.Context) error) (err error) {
-	if IsTx(ctx) {
+	if IsNamedTx(ctx, d.id) {
 		return fn(ctx)
 	}
 
-	tx, err := d.db.BeginTx(ctx, TxOptions(ctx))
+	tx, err := d.db.BeginTx(ctx, NamedTxOptions(ctx, d.id))
 	if err != nil {
 		return err
 	}
@@ -97,7 +107,7 @@ func (d *DB) RunInTx(ctx context.Context, fn func(context.Context) error) (err e
 		}
 	}()
 
-	ctx = txCtxKey.WithValue(ctx, &Tx{
+	ctx = WithNamedValue(ctx, d.id, &Tx{
 		tx:  tx,
 		fns: d.fns,
 	})
@@ -109,12 +119,12 @@ func (d *DB) RunInTx(ctx context.Context, fn func(context.Context) error) (err e
 }
 
 func (d *DB) RunInTx2[T any](ctx context.Context, fn func(context.Context) (T, error)) (res T, err error) {
-	if IsTx(ctx) {
+	if IsNamedTx(ctx, d.id) {
 		return fn(ctx)
 	}
 	var zero T
 
-	tx, err := d.db.BeginTx(ctx, TxOptions(ctx))
+	tx, err := d.db.BeginTx(ctx, NamedTxOptions(ctx, d.id))
 	if err != nil {
 		return zero, err
 	}
@@ -128,7 +138,7 @@ func (d *DB) RunInTx2[T any](ctx context.Context, fn func(context.Context) (T, e
 		}
 	}()
 
-	ctx = txCtxKey.WithValue(ctx, &Tx{
+	ctx = WithNamedValue(ctx, d.id, &Tx{
 		tx:  tx,
 		fns: d.fns,
 	})

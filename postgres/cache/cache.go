@@ -23,8 +23,14 @@ type Cache struct {
 }
 
 func New(db *sql.DB) *Cache {
+	dbt := dbtx.New(db)
+
+	// Do not share the same transaction as other dbtx instance to avoid
+	// conflict.
+	dbt.SetID("dbtx.cache")
+
 	return &Cache{
-		DB: dbtx.New(db),
+		DB: dbt,
 	}
 }
 
@@ -142,7 +148,7 @@ func (c *Cache) LoadAndDelete[T any](ctx context.Context, key string) (value T, 
 // Returns the current value and whether it was loaded (true) or stored (false).
 func (c *Cache) LoadOrStore[T any](ctx context.Context, key string, value T, ttl time.Duration) (curr T, loaded bool, err error) {
 	err = c.RunInTx(ctx, func(ctx context.Context) error {
-		if err := lock.Lock(ctx, lock.NewStrKey(key)); err != nil {
+		if err := lock.NamedLock(ctx, c.ID(), lock.NewStrKey(key)); err != nil {
 			return err
 		}
 
@@ -172,8 +178,18 @@ func (c *Cache) LoadOrStore[T any](ctx context.Context, key string, value T, ttl
 }
 
 func (c *Cache) LoadOrCreate[T any](ctx context.Context, key string, fn func(ctx context.Context, key string) (T, time.Duration, error)) (curr T, loaded bool, err error) {
+	dto, err := c.load(ctx, key)
+	if err == nil {
+		curr, err = dto.Load[T]()
+		if err != nil {
+			return
+		}
+		loaded = true
+		return
+	}
+
 	err = c.RunInTx(ctx, func(ctx context.Context) error {
-		if err := lock.Lock(ctx, lock.NewStrKey(key)); err != nil {
+		if err := lock.NamedLock(ctx, c.ID(), lock.NewStrKey(key)); err != nil {
 			return err
 		}
 		dto, err := c.load(ctx, key)
