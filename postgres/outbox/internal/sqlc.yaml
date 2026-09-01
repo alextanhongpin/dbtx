@@ -1,0 +1,24 @@
+---
+version: "2"
+sql:
+  - schema: "schema.sql"
+    queries: "queries"
+    engine: "postgresql"
+    gen:
+      go:
+        emit_all_enum_values: true
+        emit_empty_slices: true
+        emit_enum_valid_method: true
+        emit_interface: true
+        emit_pointers_for_null_types: true
+        emit_result_struct_pointers: true
+        out: "postgres"
+        package: "postgres"
+        overrides:
+          - db_type: "uuid"
+            nullable: false # If you need to set nullable true, create another instance of override.
+            go_type:
+              import: "uuid"
+              type: "UUID"
+    rules:
+      - sqlc/db-prepare

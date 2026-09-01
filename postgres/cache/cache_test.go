@@ -1,8 +1,6 @@
 package cache_test
 
 import (
-	_ "embed"
-
 	_ "github.com/lib/pq"
 
 	"context"
@@ -15,18 +13,14 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-var (
-	//go:embed internal/schema.sql
-	schema string
-)
-
 func migrate(dsn string) error {
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
-	_, err = db.Exec(schema)
+	c := cache.New(db)
+	err = c.Migrate(context.Background())
 	if err != nil {
 		return err
 	}

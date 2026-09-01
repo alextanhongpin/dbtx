@@ -1,13 +1,13 @@
 package cache
 
 import (
+	_ "embed"
+
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"time"
-
-	_ "embed"
 
 	"github.com/alextanhongpin/dbtx"
 	"github.com/alextanhongpin/dbtx/postgres/cache/internal/postgres"
@@ -15,6 +15,10 @@ import (
 )
 
 var (
+	//go:embed internal/schema.sql
+	schema string
+
+	// Errors.
 	ErrNotExist = errors.New("cache: not exist")
 	ErrConflict = errors.New("cache: conflict")
 	ErrExists   = errors.New("cache: exists")
@@ -318,6 +322,11 @@ func (c *Cache) load(ctx context.Context, key string) (*dto, error) {
 
 func (c *Cache) Cleanup(ctx context.Context) (int64, error) {
 	return c.db(ctx).CleanupExpired(ctx)
+}
+
+func (c *Cache) Migrate(ctx context.Context) error {
+	_, err := c.DBTx(ctx).ExecContext(ctx, schema)
+	return err
 }
 
 func (c *Cache) invalidate(ctx context.Context, key string) (bool, error) {

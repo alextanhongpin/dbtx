@@ -1,15 +1,13 @@
 package outbox_test
 
 import (
-	_ "embed"
-
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"sync"
 	"testing"
 	"time"
+	"uuid"
 
 	"github.com/alextanhongpin/dbtx"
 	"github.com/alextanhongpin/dbtx/postgres/outbox"
@@ -26,17 +24,14 @@ var (
 	}
 )
 
-//go:embed queries/schema.sql
-var schema string
-
 func migrate(dsn string) error {
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
-	_, err = db.Exec(schema)
-	return err
+	o := outbox.New(db)
+	return o.Migrate(context.Background())
 }
 
 func TestMain(m *testing.M) {
@@ -47,24 +42,36 @@ func TestMain(m *testing.M) {
 }
 
 func TestOutbox(t *testing.T) {
-	ctx := t.Context()
-	ob := outbox.New(dbtx.New(dbtest.DB(t)))
+	db := dbtest.New(t, dbtestOpts)
 
+	ctx := t.Context()
+	ob := outbox.New(db.DB(t))
+
+	var ids []uuid.UUID
 	err := ob.RunInTx(ctx, func(txCtx context.Context) error {
-		return ob.Create(txCtx,
-			&outbox.Message{
-				AggregateID:   "a-id-1",
-				AggregateType: "a-type-1",
-				Type:          "type-1",
-				Payload:       json.RawMessage(`{"foo": "bar"}`),
-			},
-			&outbox.Message{
-				AggregateID:   "a-id-2",
-				AggregateType: "a-type-2",
-				Type:          "type-2",
-				Payload:       json.RawMessage(`{"one": 1}`),
-			},
+		id, err := ob.Create(txCtx, outbox.Message{
+			AggregateID:   "a-id-1",
+			AggregateType: "a-type-1",
+			Type:          "type-1",
+			Payload:       json.RawMessage(`{"foo": "bar"}`),
+		},
 		)
+		if err != nil {
+			return err
+		}
+		ids = append(ids, id)
+		id, err = ob.Create(txCtx, outbox.Message{
+			AggregateID:   "a-id-2",
+			AggregateType: "a-type-2",
+			Type:          "type-2",
+			Payload:       json.RawMessage(`{"one": 1}`),
+		})
+		if err != nil {
+			return err
+		}
+		ids = append(ids, id)
+
+		return nil
 	})
 	is := assert.New(t)
 	is.NoError(err, err)
@@ -75,14 +82,13 @@ func TestOutbox(t *testing.T) {
 
 	t.Run("process failed", func(t *testing.T) {
 		is := assert.New(t)
-		err := ob.RunInTx(ctx, func(txCtx context.Context) error {
-			evt, err := ob.LoadAndDelete(txCtx)
-			is.NoError(err)
-			is.NotNil(evt)
-
-			return ErrRollback
-		})
-		is.ErrorIs(err, ErrRollback)
+		for range 3 {
+			err := ob.Poll(ctx, func(txCtx context.Context, msg *outbox.Message) error {
+				is.Contains(ids, msg.ID)
+				return ErrRollback
+			})
+			is.ErrorIs(err, ErrRollback)
+		}
 
 		count, err := ob.Count(ctx)
 		is.NoError(err)
@@ -92,14 +98,14 @@ func TestOutbox(t *testing.T) {
 	t.Run("process success", func(t *testing.T) {
 		is := assert.New(t)
 
-		var errs = []error{nil, nil, sql.ErrNoRows}
+		var errs = []error{nil, nil, outbox.ErrEOQ}
 		var counts = []int64{1, 0, 0}
 
-		for i := range 2 {
-			err := ob.RunInTx(ctx, func(txCtx context.Context) error {
+		for i := range 3 {
+			err := ob.Poll(ctx, func(txCtx context.Context, msg *outbox.Message) error {
 				is.True(dbtx.IsTx(txCtx))
-				evt, err := ob.LoadAndDelete(txCtx)
-				t.Log("iter", i, "event", evt)
+				is.Contains(ids, msg.ID)
+				t.Log("iter", i, "message", msg)
 				return err
 			})
 			is.ErrorIs(err, errs[i])
@@ -109,50 +115,159 @@ func TestOutbox(t *testing.T) {
 			is.Equal(counts[i], count)
 		}
 	})
+}
 
-	t.Run("wait", func(t *testing.T) {
-		var wg sync.WaitGroup
+func TestOutbox_MaxRetry(t *testing.T) {
+	ctx := t.Context()
+	ob := outbox.New(dbtest.Tx(t))
+	ob.MaxRetry = 3
 
-		err := ob.RunInTx(ctx, func(txCtx context.Context) error {
-			return ob.Create(txCtx,
-				&outbox.Message{
-					AggregateID:   "a-id-1",
-					AggregateType: "a-type-1",
-					Type:          "type-1",
-					Payload:       json.RawMessage(`{"foo": "bar"}`),
-				},
-				&outbox.Message{
-					AggregateID:   "a-id-2",
-					AggregateType: "a-type-2",
-					Type:          "type-2",
-					Payload:       json.RawMessage(`{"one": 1}`),
-				},
-			)
-		})
+	var ids []uuid.UUID
+	err := ob.RunInTx(ctx, func(txCtx context.Context) error {
+		id, err := ob.Create(txCtx, outbox.Message{
+			AggregateID:   "a-id-1",
+			AggregateType: "a-type-1",
+			Type:          "type-1",
+			Payload:       json.RawMessage(`{"foo": "bar"}`),
+		},
+		)
+		if err != nil {
+			return err
+		}
+		ids = append(ids, id)
+
+		return nil
+	})
+	is := assert.New(t)
+	is.NoError(err, err)
+
+	count, err := ob.Count(ctx)
+	is.NoError(err)
+	is.Equal(int64(1), count)
+
+	t.Run("max retry exceeded", func(t *testing.T) {
 		is := assert.New(t)
-		is.NoError(err, err)
+		for range 3 {
+			err := ob.Poll(ctx, func(txCtx context.Context, msg *outbox.Message) error {
+				is.Contains(ids, msg.ID)
+				return ErrRollback
+			})
+			is.ErrorIs(err, ErrRollback)
+		}
 
 		count, err := ob.Count(ctx)
 		is.NoError(err)
-		is.Equal(int64(2), count)
+		is.Equal(int64(0), count)
 
-		for range 3 {
-			wg.Go(func() {
-				err := ob.RunInTx(ctx, func(txCtx context.Context) error {
-					evt, err := ob.LoadAndDelete(txCtx)
-					if err != nil {
-						return err
-					}
-					t.Log(evt)
-					time.Sleep(time.Second)
+		count, err = ob.CountDLQ(ctx)
+		is.NoError(err)
+		is.Equal(int64(1), count)
+	})
+}
 
-					return nil
-				})
-				if err != nil {
-					t.Log(err)
-				}
-			})
-			wg.Wait()
+func TestOutbox_RetryAfter(t *testing.T) {
+	db := dbtest.New(t, dbtestOpts)
+
+	ctx := t.Context()
+	ob := outbox.New(db.DB(t))
+	ob.RetryAfter = func(attempts int) time.Duration {
+		return 100 * time.Millisecond
+	}
+
+	var ids []uuid.UUID
+	err := ob.RunInTx(ctx, func(txCtx context.Context) error {
+		id, err := ob.Create(txCtx, outbox.Message{
+			AggregateID:   "a-id-1",
+			AggregateType: "a-type-1",
+			Type:          "type-1",
+			Payload:       json.RawMessage(`{"foo": "bar"}`),
+		},
+		)
+		if err != nil {
+			return err
 		}
+		ids = append(ids, id)
+
+		return nil
+	})
+	is := assert.New(t)
+	is.NoError(err, err)
+
+	count, err := ob.Count(ctx)
+	is.NoError(err)
+	is.Equal(int64(1), count)
+
+	t.Run("visibility timeout", func(t *testing.T) {
+		is := assert.New(t)
+		err := ob.Poll(ctx, func(txCtx context.Context, msg *outbox.Message) error {
+			is.Contains(ids, msg.ID)
+			return ErrRollback
+		})
+		is.ErrorIs(err, ErrRollback)
+
+		err = ob.Poll(ctx, func(txCtx context.Context, msg *outbox.Message) error {
+			panic("won't be called")
+		})
+		is.ErrorIs(err, outbox.ErrEOQ)
+
+		time.Sleep(110 * time.Millisecond)
+
+		err = ob.Poll(ctx, func(txCtx context.Context, msg *outbox.Message) error {
+			is.Contains(ids, msg.ID)
+			return ErrRollback
+		})
+		is.ErrorIs(err, ErrRollback)
+	})
+}
+
+func TestOutbox_DLQ(t *testing.T) {
+	db := dbtest.New(t, dbtestOpts)
+
+	ctx := t.Context()
+	ob := outbox.New(db.DB(t))
+
+	var ids []uuid.UUID
+	err := ob.RunInTx(ctx, func(txCtx context.Context) error {
+		id, err := ob.Create(txCtx, outbox.Message{
+			AggregateID:   "a-id-1",
+			AggregateType: "a-type-1",
+			Type:          "type-1",
+			Payload:       json.RawMessage(`{"foo": "bar"}`),
+		},
+		)
+		if err != nil {
+			return err
+		}
+		ids = append(ids, id)
+
+		return nil
+	})
+	is := assert.New(t)
+	is.NoError(err, err)
+
+	count, err := ob.Count(ctx)
+	is.NoError(err)
+	is.Equal(int64(1), count)
+
+	t.Run("dlq", func(t *testing.T) {
+		is := assert.New(t)
+		err := ob.Poll(ctx, func(txCtx context.Context, msg *outbox.Message) error {
+			is.Contains(ids, msg.ID)
+			return outbox.ErrDLQ
+		})
+		is.ErrorIs(err, outbox.ErrDLQ)
+
+		err = ob.Poll(ctx, func(txCtx context.Context, msg *outbox.Message) error {
+			panic("won't be called")
+		})
+		is.ErrorIs(err, outbox.ErrEOQ)
+
+		count, err := ob.Count(ctx)
+		is.NoError(err)
+		is.Equal(int64(0), count)
+
+		count, err = ob.CountDLQ(ctx)
+		is.NoError(err)
+		is.Equal(int64(1), count)
 	})
 }
