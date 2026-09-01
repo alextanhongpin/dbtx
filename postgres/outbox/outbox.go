@@ -1,11 +1,11 @@
 package outbox
 
 import (
-	"cmp"
 	_ "embed"
 
 	_ "github.com/lib/pq"
 
+	"cmp"
 	"fmt"
 	"time"
 

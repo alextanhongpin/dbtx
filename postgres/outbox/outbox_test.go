@@ -19,7 +19,7 @@ var (
 	ErrRollback = errors.New("rollback")
 
 	dbtestOpts = dbtest.Options{
-		Image: "postgres:18.4-bookworm",
+		Image: "postgres:19beta3-alpine3.24",
 		Hook:  migrate,
 	}
 )

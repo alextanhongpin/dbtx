@@ -1,0 +1,158 @@
+package jsonb_test
+
+import (
+	_ "github.com/lib/pq"
+
+	"database/sql"
+	"testing"
+	"uuid"
+
+	"github.com/alextanhongpin/dbtx/postgres/jsonb"
+	"github.com/alextanhongpin/dbtx/testing/dbtest"
+	"github.com/stretchr/testify/assert"
+)
+
+func TestMain(m *testing.M) {
+	opts := dbtest.Options{
+		Image: "postgres:19beta3-alpine3.24",
+		Hook:  migrate,
+	}
+	stop := dbtest.Init(opts)
+	defer stop()
+
+	m.Run()
+}
+
+func migrate(dsn string) error {
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	_, err = db.Exec(`create table books (
+		id uuid default uuidv7(),
+		title text not null
+	);
+	`)
+	return err
+}
+
+type Book struct {
+	ID    uuid.UUID `json:"id"`
+	Title string    `json:"title"`
+}
+
+func TestJSONB(t *testing.T) {
+	ctx := t.Context()
+	js := jsonb.New(dbtest.DB(t))
+
+	res, err := js.Query[[]Book](ctx, `
+with inserted as (
+	insert into books (title)
+	select value
+	from jsonb_array_elements_text($1::jsonb)
+	returning *
+)
+-- when returning multiple, aggregate it first.
+select jsonb_agg(inserted) from inserted;
+	`, []string{"a", "b", "c"})
+	is := assert.New(t)
+	is.NoError(err)
+	is.Len(res, 3)
+	for i, b := range res {
+		t.Logf("%d) %v\n", i+1, b)
+	}
+
+	type Query struct {
+		Cursor string `json:"cursor"`
+	}
+	res, err = js.Query[[]Book](ctx, `
+select jsonb_agg(b)
+from books b
+join jsonb_to_record($1::jsonb) as input(cursor text)
+on b.title > input.cursor
+	`, Query{Cursor: "a"})
+	is.NoError(err)
+	is.Len(res, 2)
+	for i, b := range res {
+		t.Logf("%d) %v\n", i+1, b)
+	}
+
+	// Using json_table.
+	{
+		res, err = js.Query[[]Book](ctx, `
+with input as (
+	select *
+	from json_table(
+		$1::jsonb,
+		'$'
+		columns (
+			cursor text path '$.cursor'
+		)
+	)
+)
+select jsonb_agg(b)
+from books b, input
+where b.title > input.cursor
+	`, Query{Cursor: "a"})
+		is.NoError(err)
+		is.Len(res, 2)
+		for i, b := range res {
+			t.Logf("%d) %v\n", i+1, b)
+		}
+	}
+
+	// Using json_to_record.
+	{
+		res, err = js.Query[[]Book](ctx, `
+with input as (
+	select *
+	from jsonb_to_record($1::jsonb) as t(cursor text)
+)
+select jsonb_agg(b)
+from books b, input
+where b.title > input.cursor
+	`, Query{Cursor: "a"})
+		is.NoError(err)
+		is.Len(res, 2)
+		for i, b := range res {
+			t.Logf("%d) %v\n", i+1, b)
+		}
+	}
+
+	type Params struct {
+		ID    uuid.UUID `json:"id"`
+		Title string    `json:"title"`
+	}
+
+	params := Params{ID: res[0].ID, Title: "edited"}
+	b, err := js.Query[Book](ctx, `
+update books
+set title = input.title
+from jsonb_to_record($1::jsonb) as input(id uuid, title text)
+where books.id = input.id
+-- when returning 1 row, use to_jsonb.
+returning to_jsonb(books)
+	`, params)
+	is.NoError(err)
+	t.Log(b)
+
+	{
+		params := Params{ID: res[0].ID, Title: "edited again"}
+		b, err := js.Query[Book](ctx, `
+with input as (
+	select *
+	from jsonb_to_record($1::jsonb) as input(id uuid, title text)
+)
+update books
+set title = input.title
+from input
+where books.id = input.id
+-- when returning 1 row, use to_jsonb.
+returning to_jsonb(books)
+	`, params)
+		is.NoError(err)
+		t.Log(b)
+	}
+}
