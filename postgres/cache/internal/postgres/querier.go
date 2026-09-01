@@ -13,7 +13,7 @@ type Querier interface {
 	CompareAndSwap(ctx context.Context, arg CompareAndSwapParams) (*DbtxCache, error)
 	Delete(ctx context.Context, key string) (*DbtxCache, error)
 	DeleteExpired(ctx context.Context, key string) (*DbtxCache, error)
-	Expire(ctx context.Context, arg ExpireParams) error
+	Expire(ctx context.Context, arg ExpireParams) (*DbtxCache, error)
 	Load(ctx context.Context, key string) (*DbtxCache, error)
 	Store(ctx context.Context, arg StoreParams) (*DbtxCache, error)
 	StoreOnce(ctx context.Context, arg StoreOnceParams) (*DbtxCache, error)
