@@ -157,8 +157,6 @@ func TestAtomicIntLockKeyLocked(t *testing.T) {
 	var wg sync.WaitGroup
 
 	wg.Go(func() {
-		defer wg.Done()
-
 		err := atm.RunInTx(t.Context(), func(txCtx context.Context) error {
 			if err := lock.TryLock(txCtx, key); err != nil {
 				return err
@@ -197,10 +195,8 @@ func TestAtomicLocker(t *testing.T) {
 	db := dbtx.New(dbtest.DB(t))
 
 	var wg sync.WaitGroup
-	wg.Add(3)
 
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 
 		var errTimeout = errors.New("timeout")
 		ctx, cancel := context.WithTimeoutCause(ctx, 1*time.Second, errTimeout)
@@ -218,11 +214,9 @@ func TestAtomicLocker(t *testing.T) {
 			return context.Cause(ctx)
 		})
 		is.ErrorIs(err, errTimeout)
-	}()
+	})
 
-	go func() {
-		defer wg.Done()
-
+	wg.Go(func() {
 		time.Sleep(10 * time.Millisecond)
 
 		// Lock2 fails when locking the same key.
@@ -231,11 +225,9 @@ func TestAtomicLocker(t *testing.T) {
 			return lock.TryLock(ctx, key)
 		})
 		is.ErrorIs(err, lock.ErrAlreadyLocked)
-	}()
+	})
 
-	go func() {
-		defer wg.Done()
-
+	wg.Go(func() {
 		time.Sleep(10 * time.Millisecond)
 
 		// Lock3 will wait for the previous lock to be released.
@@ -244,7 +236,7 @@ func TestAtomicLocker(t *testing.T) {
 			return lock.Lock(ctx, key)
 		})
 		is.NoError(err)
-	}()
+	})
 
 	wg.Wait()
 }

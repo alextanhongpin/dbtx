@@ -50,6 +50,28 @@ func newDto(key string, value any, ttl time.Duration) (*dto, error) {
 	}, nil
 }
 
+func hash(v any) (string, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "", err
+	}
+
+	// Unmarshal to map[string]any.
+	var a any
+	err = json.Unmarshal(b, &a)
+	if err != nil {
+		return "", err
+	}
+
+	// Marshal with deterministic ordering for map.
+	b, err = json.Marshal(a, json.Deterministic(true))
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprint(xxh3.Hash(b)), nil
+}
+
 func (d *dto) NullExpiresAt() sql.NullTime {
 	if d.ExpiresAt == nil {
 		return sql.NullTime{}

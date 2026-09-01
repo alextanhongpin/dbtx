@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -32,13 +33,44 @@ func Func[K, V any](fn fun[K, V], cfg *FuncConfig[K, V]) ifun[K, V] {
 	}
 }
 
-func Idempotent() {}
+func Idempotent[K, V any](fn fun[K, V], cfg *FuncConfig[K, V]) ifun[K, V] {
+	type dto struct {
+		Request  K `json:"request"`
+		Response V `json:"response"`
+	}
 
-// in transaction
-func Set() {
+	return func(ctx context.Context, req K) (V, bool, error) {
+		var zero V
+		key, err := cfg.KeyFn(ctx, req)
+		if err != nil {
+			return zero, false, err
+		}
+		res, loaded, err := cfg.Cache.LoadOrCreate(ctx, key, func(ctx context.Context, _ string) (*dto, time.Duration, error) {
+			res, ttl, err := fn(ctx, req)
+			if err != nil {
+				return nil, 0, err
+			}
 
-}
+			return &dto{
+				Request:  req,
+				Response: res,
+			}, ttl, nil
+		})
+		if err != nil {
+			return zero, false, err
+		}
+		curr, err := hash(req)
+		if err != nil {
+			return zero, false, err
+		}
+		prev, err := hash(res.Request)
+		if err != nil {
+			return zero, false, err
+		}
+		if curr != prev {
+			return zero, false, fmt.Errorf("%w: request", ErrConflict)
+		}
 
-func Del() {
-
+		return res.Response, loaded, err
+	}
 }

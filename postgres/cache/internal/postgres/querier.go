@@ -9,6 +9,7 @@ import (
 )
 
 type Querier interface {
+	CleanupExpired(ctx context.Context) (int64, error)
 	CompareAndDelete(ctx context.Context, arg CompareAndDeleteParams) (*DbtxCache, error)
 	CompareAndSwap(ctx context.Context, arg CompareAndSwapParams) (*DbtxCache, error)
 	Delete(ctx context.Context, key string) (*DbtxCache, error)

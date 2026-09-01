@@ -27,6 +27,14 @@ func migrate(dsn string) error {
 	}
 	defer db.Close()
 	_, err = db.Exec(schema)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`create table books (
+		id uuid default uuidv7(),
+		title text not null
+	);
+	`)
 	return err
 }
 

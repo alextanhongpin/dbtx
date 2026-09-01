@@ -123,7 +123,6 @@ func (d *DB) RunInTx2[T any](ctx context.Context, fn func(context.Context) (T, e
 		return fn(ctx)
 	}
 	var zero T
-
 	tx, err := d.db.BeginTx(ctx, NamedTxOptions(ctx, d.id))
 	if err != nil {
 		return zero, err

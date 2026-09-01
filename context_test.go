@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/alextanhongpin/dbtx"
+	"github.com/alextanhongpin/dbtx/testing/dbtest"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -32,4 +33,26 @@ func TestContext(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestContextNamed(t *testing.T) {
+	a := dbtx.New(dbtest.DB(t))
+	a.SetID("a")
+	b := dbtx.New(dbtest.DB(t))
+	b.SetID("b")
+
+	is := assert.New(t)
+
+	err := a.RunInTx(t.Context(), func(aCtx context.Context) error {
+		b.RunInTx(aCtx, func(bCtx context.Context) error {
+			is.True(dbtx.IsNamedTx(bCtx, "a"))
+			is.True(dbtx.IsNamedTx(bCtx, "b"))
+			return nil
+		})
+
+		is.True(dbtx.IsNamedTx(aCtx, "a"))
+		is.False(dbtx.IsNamedTx(aCtx, "b"))
+		return nil
+	})
+	is.NoError(err)
 }
