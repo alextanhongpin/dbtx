@@ -16,14 +16,10 @@ func New(db *sql.DB) *JSONB {
 	}
 }
 
-func (j *JSONB) Query[T any](ctx context.Context, stmt string, data any) (T, error) {
+func (j *JSONB) Query[T any](ctx context.Context, stmt string, args ...any) (T, error) {
 	var zero T
-	b, err := json.Marshal(data)
-	if err != nil {
-		return zero, err
-	}
 	var res json.RawMessage
-	err = j.db.QueryRowContext(ctx, stmt, b).Scan(&res)
+	err := j.db.QueryRowContext(ctx, stmt, args...).Scan(&res)
 	if err != nil {
 		return zero, err
 	}
