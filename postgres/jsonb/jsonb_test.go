@@ -2,7 +2,6 @@ package jsonb_test
 
 import (
 	"github.com/lib/pq"
-	_ "github.com/lib/pq"
 
 	"database/sql"
 	"testing"
