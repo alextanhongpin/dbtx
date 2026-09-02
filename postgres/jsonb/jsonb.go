@@ -16,7 +16,7 @@ func New(db *sql.DB) *JSONB {
 	}
 }
 
-func (j *JSONB) Query[T any](ctx context.Context, stmt string, args ...any) (T, error) {
+func (j *JSONB) QueryJSONContext[T any](ctx context.Context, stmt string, args ...any) (T, error) {
 	var zero T
 	var res json.RawMessage
 	err := j.db.QueryRowContext(ctx, stmt, args...).Scan(&res)
