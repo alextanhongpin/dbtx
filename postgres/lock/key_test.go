@@ -1,6 +1,7 @@
 package lock_test
 
 import (
+	"fmt"
 	"math"
 	"testing"
 
@@ -8,13 +9,25 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestKey(t *testing.T) {
-	is := assert.New(t)
+func ExampleHash32() {
+	fmt.Println(lock.Hash32("hello world"))
 
-	is.Equal("Key(42)", lock.NewIntKey(42).String())
-	is.Equal("Key(2, 21)", lock.NewIntKeyPair(2, 21).String())
-	is.Equal(`Key("hello world"|9065573210506989167)`, lock.NewStrKey("hello world").String())
-	is.Equal(`Key("foo"|1083137555, "bar"|513390112)`, lock.NewStrKeyPair("foo", "bar").String())
+	// Output:
+	// -712294489
+}
+
+func ExampleHash64() {
+	fmt.Println(lock.Hash64("hello world"))
+
+	// Output:
+	// 8618312879776256743
+}
+
+func ExamplePair() {
+	fmt.Println(fmt.Errorf("Key(%v)", lock.Pair[string]{"Foo", "Bar"}))
+
+	// Output:
+	// Key(Foo, Bar)
 }
 
 func TestUint32ToInt32_Overflow(t *testing.T) {

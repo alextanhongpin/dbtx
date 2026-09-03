@@ -164,7 +164,7 @@ func (c *Cache) LoadAndDelete[T any](ctx context.Context, key string) (value T, 
 func (c *Cache) LoadOrStore[T any](ctx context.Context, key string, value T, ttl time.Duration) (curr T, loaded bool, err error) {
 	key = c.buildKey(key)
 	err = c.RunInTx(ctx, func(ctx context.Context) error {
-		if err := lock.NamedLock(ctx, c.ID(), lock.NewStrKey(key)); err != nil {
+		if err := lock.NamedLock(ctx, c.ID(), lock.Pair[string]{Key1: c.prefix, Key2: key}); err != nil {
 			return err
 		}
 
@@ -206,7 +206,7 @@ func (c *Cache) LoadOrCreate[T any](ctx context.Context, key string, fn func(ctx
 	}
 
 	err = c.RunInTx(ctx, func(ctx context.Context) error {
-		if err := lock.NamedLock(ctx, c.ID(), lock.NewStrKey(key)); err != nil {
+		if err := lock.NamedLock(ctx, c.ID(), lock.Pair[string]{Key1: c.prefix, Key2: key}); err != nil {
 			return err
 		}
 		dto, err := c.load(ctx, key)

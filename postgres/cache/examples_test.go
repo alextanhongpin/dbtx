@@ -148,7 +148,7 @@ func (r *BookRepository) Find(ctx context.Context, id uuid.UUID) (*Book, bool, e
 
 	b, err = r.RunInTx2(ctx, func(ctx context.Context) (*Book, error) {
 		// No longer need singleflight, only one transaction will have access to this.
-		if err := lock.Lock(ctx, lock.NewStrKey(key)); err != nil {
+		if err := lock.Lock(ctx, key); err != nil {
 			return nil, err
 		}
 

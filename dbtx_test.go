@@ -118,16 +118,20 @@ func TestPanic(t *testing.T) {
 }
 
 func TestAtomicIntKeyPairLocked(t *testing.T) {
-	key := lock.NewIntKeyPair(1, 1)
+	key := lock.Pair[int32]{Key1: 1, Key2: 1}
 	atm := dbtx.New(dbtest.DB(t))
 	err := atm.RunInTx(t.Context(), func(txCtx context.Context) error {
-		if err := lock.TryLock(txCtx, key); err != nil {
+		if locked, err := lock.TryLock(txCtx, key); err != nil {
 			return err
+		} else if !locked {
+			return errors.New("failed to acquire lock")
 		}
 
 		// Locking twice in the same transaction will not cause a deadlock.
-		if err := lock.TryLock(txCtx, key); err != nil {
+		if locked, err := lock.TryLock(txCtx, key); err != nil {
 			return err
+		} else if !locked {
+			return errors.New("failed to acquire lock")
 		}
 
 		return nil
@@ -139,9 +143,9 @@ func TestAtomicLockBoundary(t *testing.T) {
 	is := assert.New(t)
 	tx := dbtx.New(dbtest.DB(t))
 	err := tx.RunInTx(t.Context(), func(ctx context.Context) error {
-		is.NoError(lock.Lock(ctx, lock.NewIntKeyPair(math.MinInt32, math.MaxInt32)))
-		is.NoError(lock.Lock(ctx, lock.NewIntKey(math.MinInt64)))
-		is.NoError(lock.Lock(ctx, lock.NewIntKey(math.MaxInt64)))
+		is.NoError(lock.Lock(ctx, lock.Pair[int32]{Key1: math.MinInt32, Key2: math.MaxInt32}))
+		is.NoError(lock.Lock(ctx, int64(math.MinInt64)))
+		is.NoError(lock.Lock(ctx, int64(math.MaxInt64)))
 
 		return nil
 	})
@@ -150,7 +154,7 @@ func TestAtomicLockBoundary(t *testing.T) {
 
 func TestAtomicIntLockKeyLocked(t *testing.T) {
 	atm := dbtx.New(dbtest.DB(t))
-	key := lock.NewIntKey(10)
+	key := int64(10)
 
 	is := assert.New(t)
 
@@ -158,8 +162,10 @@ func TestAtomicIntLockKeyLocked(t *testing.T) {
 
 	wg.Go(func() {
 		err := atm.RunInTx(t.Context(), func(txCtx context.Context) error {
-			if err := lock.TryLock(txCtx, key); err != nil {
+			if locked, err := lock.TryLock(txCtx, key); err != nil {
 				return err
+			} else if !locked {
+				return errors.New("already locked")
 			}
 
 			t.Log("goroutine0: locked=true")
@@ -172,16 +178,23 @@ func TestAtomicIntLockKeyLocked(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 	err := atm.RunInTx(t.Context(), func(txCtx context.Context) error {
-		err := lock.TryLock(txCtx, key)
+		locked, err := lock.TryLock(txCtx, key)
+		if err != nil {
+			return err
+		}
 
 		// ̃NOTE: Both of this is expected to return false, but it is true now
 		// because of the test library which puts everything in a single transaction.
 		//assert.False(locked1)
 		//assert.False(locked2)
-		t.Logf("goroutine1: locked1=%t\n", errors.Is(err, lock.ErrAlreadyLocked))
+		t.Logf("goroutine1: locked1=%t\n", locked)
+		if !locked {
+			// To indicate it is locked.
+			return assert.AnError
+		}
 		return err
 	})
-	is.ErrorIs(err, lock.ErrAlreadyLocked)
+	is.ErrorIs(err, assert.AnError)
 	wg.Wait()
 }
 
@@ -190,7 +203,7 @@ func TestAtomicLocker(t *testing.T) {
 
 	// Arrange.
 	ctx := t.Context()
-	key := lock.NewStrKey("The meaning of life...")
+	key := "The meaning of life..."
 
 	db := dbtx.New(dbtest.DB(t))
 
@@ -207,8 +220,9 @@ func TestAtomicLocker(t *testing.T) {
 		err := db.RunInTx(ctx, func(ctx context.Context) error {
 			is.True(dbtx.IsTx(ctx))
 
-			err := lock.TryLock(ctx, key)
+			locked, err := lock.TryLock(ctx, key)
 			is.NoError(err)
+			is.True(locked)
 
 			<-ctx.Done()
 			return context.Cause(ctx)
@@ -222,9 +236,16 @@ func TestAtomicLocker(t *testing.T) {
 		// Lock2 fails when locking the same key.
 		err := db.RunInTx(ctx, func(ctx context.Context) error {
 			is.True(dbtx.IsTx(ctx))
-			return lock.TryLock(ctx, key)
+			locked, err := lock.TryLock(ctx, key)
+			if err != nil {
+				return err
+			}
+			if !locked {
+				return assert.AnError
+			}
+			return nil
 		})
-		is.ErrorIs(err, lock.ErrAlreadyLocked)
+		is.ErrorIs(err, assert.AnError)
 	})
 
 	wg.Go(func() {
