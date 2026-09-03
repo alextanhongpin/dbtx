@@ -3,6 +3,7 @@ package dbt_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"testing"
 	"uuid"
 
@@ -181,6 +182,15 @@ var (
 	createUserBook = dbt.Must(dbt.New[CreateUserBookParams, *UserBook](`insert into user_books {{ vals }} returning {{ cols }}`))
 	listUserBooks  = dbt.Must(dbt.New[any, UserBookAggregate](`select {{ cols }} from users u join books b on true`))
 )
+
+func init() {
+	fmt.Println(createUser.String())
+	fmt.Println(updateUser.String())
+	fmt.Println(listUsers.String())
+	fmt.Println(createBook.String())
+	fmt.Println(createUserBook.String())
+	fmt.Println(listUserBooks.String())
+}
 
 func (r *Repository) CreateUser(ctx context.Context, name string) (*User, error) {
 	return createUser.QueryRowContext(ctx, r.db, CreateUserParams{

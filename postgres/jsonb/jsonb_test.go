@@ -47,7 +47,7 @@ func TestJSONB(t *testing.T) {
 	ctx := t.Context()
 	js := jsonb.New(dbtest.DB(t))
 
-	res, err := js.QueryJSONContext[[]Book](ctx, `
+	res, err := js.QueryRowContext[[]Book](ctx, `
 with inserted as (
 	insert into books (title)
 	select *
@@ -64,7 +64,7 @@ select jsonb_agg(inserted) from inserted;
 		t.Logf("%d) %v\n", i+1, b)
 	}
 
-	res, err = js.QueryJSONContext[[]Book](ctx, `
+	res, err = js.QueryRowContext[[]Book](ctx, `
 select jsonb_agg(b)
 from books b
 where b.title > $1
@@ -80,7 +80,7 @@ where b.title > $1
 		Title string    `json:"title"`
 	}
 
-	b, err := js.QueryJSONContext[Book](ctx, `
+	b, err := js.QueryRowContext[Book](ctx, `
 update books
 set title = $1
 where books.id = $2

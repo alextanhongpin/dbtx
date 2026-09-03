@@ -16,7 +16,36 @@ func New(db *sql.DB) *JSONB {
 	}
 }
 
-func (j *JSONB) QueryJSONContext[T any](ctx context.Context, stmt string, args ...any) (T, error) {
+func (j *JSONB) QueryContext[T any](ctx context.Context, stmt string, args ...any) ([]T, error) {
+	rows, err := j.db.QueryContext(ctx, stmt, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []T
+	for rows.Next() {
+		var res json.RawMessage
+		err := rows.Scan(&res)
+		if err != nil {
+			return nil, err
+		}
+
+		var v T
+		err = json.Unmarshal(res, &v)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
+func (j *JSONB) QueryRowContext[T any](ctx context.Context, stmt string, args ...any) (T, error) {
 	var zero T
 	var res json.RawMessage
 	err := j.db.QueryRowContext(ctx, stmt, args...).Scan(&res)
