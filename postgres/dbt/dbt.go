@@ -5,356 +5,282 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"maps"
 	"regexp"
 	"slices"
 	"strings"
 	"text/template"
+
+	"github.com/alextanhongpin/dbtx/postgres/dbt/internal"
 )
 
-// DB represents the common db operations for both *sql.DB and *sql.Tx.
+var paramRe = regexp.MustCompile(`@\w+`)
+
+// DB is the common interface for database execution.
 type DB interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
-	PrepareContext(ctx context.Context, query string) (*sql.Stmt, error)
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-type Scanner interface {
-	Scan() map[string]any
-}
-
-type Valuer interface {
-	Value() map[string]any
-}
-
-type Map interface {
-	Map() map[string]any
-}
-
-var re = regexp.MustCompile(`@\w+`)
-
-type NoSelect struct{}
-
-func (n *NoSelect) Scan() map[string]any {
-	return nil
-}
-
-type NoArgs struct{}
-
-func (n *NoArgs) Value() map[string]any {
-	return nil
-}
-
-type Statement[
-	T any,
-	V any,
-	TP interface {
-		*T
-		Scanner
-	},
-	VP interface {
-		*V
-		Valuer
-	},
-] struct {
-	stmt string
-	args []string
-}
-
-func New[
-	T any,
-	V any,
-	TP interface {
-		*T
-		Scanner
-	},
-	VP interface {
-		*V
-		Valuer
-	},
-](stmt string) *Statement[T, V, TP, VP] {
-	var tp TP = new(T)
-	var vp VP = new(V)
-	var tpm = M(tp.Scan())
-	var vpm = M(vp.Value())
-
-	stmt, err := executeTemplate(stmt, nil, template.FuncMap{
-		"set": func(op string, options ...string) string {
-			return set(vpm, op, options...)
-		},
-		"insert": func() string {
-			return insert(vpm)
-		},
-		"columns": func(opts ...string) string {
-			return columns(tpm, opts...)
-		},
-	})
+func Must[T any](v T, err error) T {
 	if err != nil {
 		panic(err)
 	}
-
-	stmt, args := replaceNamedArgs(stmt)
-	cols := sortedKeys(vpm)
-	if !isEqual(cols, args) {
-		panic(fmt.Errorf("dbt.New[%T, %T](%s) returns unexpected difference in args value (-want +got):\n%s", tp, vp, stmt, symmetricDifference(args, cols)))
-	}
-
-	return &Statement[T, V, TP, VP]{
-		stmt: stmt,
-		args: args,
-	}
+	return v
 }
 
-func (s *Statement[T, V, TP, VP]) Args(in VP) []any {
-	m := in.Value()
-	res := make([]any, len(s.args))
-	for i, k := range s.args {
-		res[i] = m[k]
-	}
-
-	return res
+// SQL holds a compiled query with positional parameters.
+type SQL[K, V any] struct {
+	query string
+	args  []string
 }
 
-func (s *Statement[T, V, TP, VP]) ExecContext(ctx context.Context, db DB, in VP) (sql.Result, error) {
-	res, err := db.ExecContext(ctx, s.stmt, s.Args(in)...)
-	return res, err
-}
-
-func (s *Statement[T, V, TP, VP]) QueryRowContext(ctx context.Context, db DB, in VP) (TP, error) {
-	var v TP = new(T)
-	err := db.QueryRowContext(ctx, s.stmt, s.Args(in)...).Scan(sortedValues(M(v.Scan()))...)
+// New compiles a query template using struct tags for columns.
+func New[K, V any](tmpl string) (*SQL[K, V], error) {
+	query, args, err := Parse[K, V](tmpl)
 	if err != nil {
 		return nil, err
 	}
 
+	query, err = internal.ParseQuery(query)
+	if err != nil {
+		return nil, err
+	}
+
+	return &SQL[K, V]{query: query, args: args}, nil
+}
+
+func Parse[K, V any](tmpl string) (string, []string, error) {
+	setterCols := structNames(internal.Make[K]())
+	getterCols := structNames(internal.Make[V]())
+
+	funcMap := template.FuncMap{
+		"cols": func(opts ...string) (string, error) {
+			cols, err := selectColumns(getterCols, opts...)
+			if err != nil {
+				return "", err
+			}
+			return strings.Join(aliasColumns(cols), ", "), nil
+		},
+		"set": func(opts ...string) (string, error) {
+			cols, err := selectColumns(setterCols, opts...)
+			if err != nil {
+				return "", err
+			}
+			assign := make([]string, len(cols))
+			for i, c := range cols {
+				assign[i] = fmt.Sprintf("%s = @%s", c, c)
+			}
+			return strings.Join(assign, ", "), nil
+		},
+		"vals": func(opts ...string) (string, error) {
+			cols, err := selectColumns(setterCols, opts...)
+			if err != nil {
+				return "", err
+			}
+			ph := make([]string, len(cols))
+			for i, c := range cols {
+				ph[i] = "@" + c
+			}
+			return fmt.Sprintf("(%s) values (%s)", strings.Join(cols, ", "), strings.Join(ph, ", ")), nil
+		},
+	}
+
+	t := template.Must(template.New("sql").Funcs(funcMap).Parse(tmpl))
+	var buf bytes.Buffer
+	if err := t.Execute(&buf, nil); err != nil {
+		return "", nil, err
+	}
+	query, args := replaceParams(buf.String())
+	if !containsAll(args, setterCols) {
+		return "", nil, fmt.Errorf("query references unknown parameters %v", difference(args, setterCols))
+	}
+	return query, args, nil
+}
+
+// QueryContext executes a SELECT and scans all rows into a slice of V.
+func (s *SQL[K, V]) QueryContext(ctx context.Context, db DB, params K) ([]V, error) {
+	args, err := s.Args(params)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, s.query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	isPtr := internal.IsPointerType[V]()
+	var out []V
+	for rows.Next() {
+		v := internal.Make[V]()
+		target := any(v)
+		if !isPtr {
+			target = &v
+		}
+		if err := rows.Scan(scanPointers(target)...); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// QueryRowContext executes a SELECT that returns a single row.
+func (s *SQL[K, V]) QueryRowContext(ctx context.Context, db DB, params K) (V, error) {
+	var zero V
+	args, err := s.Args(params)
+	if err != nil {
+		return zero, err
+	}
+	v := internal.Make[V]()
+	target := any(v)
+	if !internal.IsPointerType[V]() {
+		target = &v
+	}
+	if err := db.QueryRowContext(ctx, s.query, args...).Scan(scanPointers(target)...); err != nil {
+		return zero, err
+	}
 	return v, nil
 }
 
-func (s *Statement[T, V, TP, VP]) QueryContext(ctx context.Context, db DB, in VP) ([]TP, error) {
-	rows, err := db.QueryContext(ctx, s.stmt, s.Args(in)...)
+// ExecContext executes a mutating statement.
+func (s *SQL[K, V]) ExecContext(ctx context.Context, db DB, params K) (sql.Result, error) {
+	args, err := s.Args(params)
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		err := rows.Close()
-		if err != nil {
-			panic(err)
-		}
-	}()
-
-	var result []TP
-	for rows.Next() {
-		var v TP = new(T)
-		err := rows.Scan(sortedValues(M(v.Scan()))...)
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, v)
-	}
-
-	if err = rows.Err(); err != nil {
-		return result, err
-	}
-
-	return result, nil
+	return db.ExecContext(ctx, s.query, args...)
 }
 
-func (s *Statement[T, V, TP, VP]) String() string {
-	return s.stmt
+// Args returns the args from value.
+func (s *SQL[K, V]) Args(k K) ([]any, error) {
+	values := structValues(k)
+	args := make([]any, len(s.args))
+	for i, name := range s.args {
+		v, ok := values[name]
+		if !ok {
+			return nil, fmt.Errorf("parameter %q not found in struct", name)
+		}
+		args[i] = v
+	}
+	return args, nil
 }
 
-func set(v Map, op string, options ...string) string {
-	cols := sortedKeys(v)
+func (s *SQL[K, V]) Build(v K) (string, []any, error) {
+	args, err := s.Args(v)
+	if err != nil {
+		return "", nil, err
+	}
+	return s.query, args, nil
+}
+
+func (s *SQL[K, V]) String() string {
+	return s.query
+}
+
+// ---------- scanning helpers ----------
+
+func scanPointers(v any) []any {
+	fields := internal.StructFields(v)
+	pts := make([]any, len(fields))
+	for i, f := range fields {
+		pts[i] = f.Value.Addr().Interface()
+	}
+	return pts
+}
+
+func structNames(v any) []string {
+	fs := internal.StructFields(v)
+	names := make([]string, len(fs))
+	for i, f := range fs {
+		names[i] = f.Name
+	}
+	return names
+}
+
+func structValues(v any) map[string]any {
+	fields := internal.StructFields(v)
+	values := make(map[string]any, len(fields))
+	for _, f := range fields {
+		values[f.Name] = f.Value.Interface()
+	}
+	return values
+}
+
+// ---------- column selection ----------
+
+func selectColumns(cols []string, opts ...string) ([]string, error) {
+	op := "*"
+	args := opts
+	if len(opts) > 0 {
+		op = opts[0]
+		args = opts[1:]
+	}
 	switch op {
 	case "*":
-	case "in": // Include.
-		if !isSubsetOf(cols, options) {
-			panic(fmt.Errorf("columns %v not present in %v", difference(options, cols), cols))
+		if len(args) != 0 {
+			return nil, fmt.Errorf("operator * does not accept arguments: %v", args)
 		}
-		cols = options
-	case "ex": // Exclude.
-		if !isSubsetOf(cols, options) {
-			panic(fmt.Errorf("columns %v not present in %v", difference(options, cols), cols))
+		return cols, nil
+	case "-":
+		return difference(cols, args), nil
+	case "=":
+		if !containsAll(args, cols) {
+			return nil, fmt.Errorf("columns %v not found in %v", difference(args, cols), cols)
 		}
-		cols = difference(cols, options)
+		return args, nil
 	default:
-		panic(fmt.Errorf(`invalid set option %q: must be one of "*", "in" or "ex"`, op))
+		return nil, fmt.Errorf("unknown operator %q", op)
 	}
-
-	var res []string
-	for _, c := range cols {
-		res = append(res, fmt.Sprintf("%s = @%s", c, c))
-	}
-	return join(res)
 }
 
-func insert(v Map) string {
-	cols := sortedKeys(v)
-	if len(cols) == 0 {
-		return ""
-	}
-
-	ps := make([]string, len(cols))
-
+func aliasColumns(cols []string) []string {
+	out := make([]string, len(cols))
 	for i, c := range cols {
-		ps[i] = fmt.Sprintf("@%s", c)
+		if strings.Contains(c, ".") {
+			out[i] = fmt.Sprintf("%s as %s", c, strings.ReplaceAll(c, ".", "_"))
+		} else {
+			out[i] = c
+		}
 	}
-
-	return fmt.Sprintf("(%s) VALUES (%s)", join(cols), join(ps))
+	return out
 }
 
-func columns[T Map](v T, opts ...string) string {
-	switch len(opts) {
-	case 0:
-		return join(sortedKeys(v))
-	case 1:
-		return join(sortedKeys(M(v.Map()).WithPrefix(opts[0])))
-	case 2:
-		return join(sortedKeys(M(v.Map()).WithPrefix(opts[0]).WithAlias(opts[1])))
-	default:
-		panic("unknown option")
-	}
-}
+// ---------- utilities ----------
 
-func sortedKeys(m Map) []string {
-	return slices.Sorted(maps.Keys(m.Map()))
-}
-
-func sortedValues(v Map) []any {
-	if v == nil {
-		return nil
-	}
-
-	m := v.Map()
-	cols := sortedKeys(v)
-	args := make([]any, 0, len(cols))
-	for _, c := range cols {
-		args = append(args, m[c])
-	}
-
-	return args
-}
-
-func replaceNamedArgs(s string) (string, []string) {
+func replaceParams(s string) (string, []string) {
 	var args []string
-	s = re.ReplaceAllStringFunc(s, func(match string) string {
-		match = match[1:] // remove ampersand
-		i := slices.Index(args, match)
-		if i != -1 {
+	s = paramRe.ReplaceAllStringFunc(s, func(m string) string {
+		name := m[1:]
+		if i := slices.Index(args, name); i != -1 {
 			return fmt.Sprintf("$%d", i+1)
 		}
-		args = append(args, match)
+		args = append(args, name)
 		return fmt.Sprintf("$%d", len(args))
 	})
-
 	return s, args
 }
 
-func join(cols []string) string {
-	return strings.Join(cols, ", ")
-}
-
-func executeTemplate(in string, data any, fn template.FuncMap) (string, error) {
-	t := template.Must(template.New("").Funcs(fn).Parse(in))
-	var b bytes.Buffer
-	err := t.Execute(&b, data)
-	if err != nil {
-		return "", err
-	}
-	return b.String(), nil
-}
-
-type M map[string]any
-
-func (m M) Map() map[string]any {
-	return m
-}
-
-func (m M) As(prefix, alias string) M {
-	return m.WithPrefix(prefix).WithAlias(alias)
-}
-
-func (m M) WithPrefix(prefix string) M {
-	c := make(M)
-	for k, v := range m {
-		c[fmt.Sprintf("%s.%s", prefix, k)] = v
-	}
-
-	return c
-}
-
-func (m M) WithAlias(alias string) M {
-	c := make(M)
-	for k, v := range m {
-		p := strings.Index(k, ".")
-		c[fmt.Sprintf("%s AS %s_%s", k, alias, k[p+1:])] = v
-	}
-
-	return c
-}
-
-func (m M) Merge(o M) {
-	maps.Copy(m, o)
-}
-
-func Merge(os ...M) M {
-	res := make(M)
-	for _, o := range os {
-		res.Merge(o)
-	}
-
-	return res
-}
-
-type ID[T any] struct {
-	Val T
-}
-
-func (i *ID[T]) Scan() map[string]any {
-	return map[string]any{
-		"id": &i.Val,
-	}
-}
-
-func (i *ID[T]) Value() map[string]any {
-	return map[string]any{
-		"id": i.Val,
-	}
-}
-
-func isSubsetOf[T comparable](a, b []T) bool {
-	for _, v := range b {
-		if !slices.Contains(a, v) {
+func containsAll(a, b []string) bool {
+	for _, v := range a {
+		if !slices.Contains(b, v) {
 			return false
 		}
 	}
-
 	return true
 }
 
-// difference returns a - b
-func difference[T comparable, S []T](a, b S) S {
-	m := make(map[T]struct{})
-	for _, v := range b {
-		m[v] = struct{}{}
-	}
-
-	var res S
+func difference(a, b []string) []string {
+	var out []string
 	for _, v := range a {
-		if _, ok := m[v]; !ok {
-			res = append(res, v)
+		if slices.Contains(b, v) {
+			continue
 		}
+		out = append(out, v)
 	}
-
-	return res
-}
-
-// Returns a new set containing elements that are unique to each set (not common to both).
-func symmetricDifference[T comparable](a, b []T) []T {
-	return append(difference(a, b), difference(b, a)...)
-}
-
-func isEqual[T comparable](a, b []T) bool {
-	return len(a) == len(b) && len(difference(a, b)) == 0 && len(difference(b, a)) == 0
+	return out
 }
