@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 )
 
 type JSONB struct {
@@ -25,18 +26,13 @@ func (j *JSONB) QueryContext[T any](ctx context.Context, stmt string, args ...an
 
 	var result []T
 	for rows.Next() {
-		var res json.RawMessage
+		var res Raw[T]
 		err := rows.Scan(&res)
 		if err != nil {
 			return nil, err
 		}
 
-		var v T
-		err = json.Unmarshal(res, &v)
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, v)
+		result = append(result, res.value)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -47,15 +43,28 @@ func (j *JSONB) QueryContext[T any](ctx context.Context, stmt string, args ...an
 
 func (j *JSONB) QueryRowContext[T any](ctx context.Context, stmt string, args ...any) (T, error) {
 	var zero T
-	var res json.RawMessage
+	var res Raw[T]
 	err := j.db.QueryRowContext(ctx, stmt, args...).Scan(&res)
 	if err != nil {
 		return zero, err
 	}
-	var v T
-	err = json.Unmarshal(res, &v)
-	if err != nil {
-		return zero, err
+	return res.value, nil
+}
+
+var _ sql.Scanner = (*Raw[any])(nil)
+
+type Raw[T any] struct {
+	value T
+}
+
+func (r *Raw[T]) Scan(src any) error {
+	if src == nil {
+		return nil
 	}
-	return v, nil
+	b, ok := src.([]byte)
+	if !ok {
+		return fmt.Errorf("cannot scan type %T into Status", src)
+	}
+
+	return json.Unmarshal(b, &r.value)
 }
