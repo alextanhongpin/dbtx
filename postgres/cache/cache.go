@@ -113,6 +113,10 @@ func (c *Cache) Expire(ctx context.Context, key string, ttl time.Duration) error
 // Load retrieves the value for a key. Returns ErrNotExist if the key doesn't exist.
 func (c *Cache) Load[T any](ctx context.Context, key string) (T, error) {
 	key = c.buildKey(key)
+	return c.load[T](ctx, key)
+}
+
+func (c *Cache) load[T any](ctx context.Context, key string) (T, error) {
 	var zero T
 	dto, err := c.db(ctx).Load(ctx, key)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -160,8 +164,8 @@ func (c *Cache) LoadOrStore[T any](ctx context.Context, key string, value T, ttl
 			return err
 		}
 
-		dto, err := c.db(ctx).Load(ctx, key)
-		if errors.Is(err, sql.ErrNoRows) {
+		v, err := c.load[T](ctx, key)
+		if errors.Is(err, ErrNotExist) {
 			err = c.store(ctx, key, value, ttl)
 			if err != nil {
 				return err
@@ -174,11 +178,6 @@ func (c *Cache) LoadOrStore[T any](ctx context.Context, key string, value T, ttl
 			return err
 		}
 
-		var v T
-		err = json.Unmarshal(dto.Value, &v)
-		if err != nil {
-			return err
-		}
 		curr = v
 		loaded = true
 		return nil
@@ -189,16 +188,11 @@ func (c *Cache) LoadOrStore[T any](ctx context.Context, key string, value T, ttl
 
 func (c *Cache) LoadOrCreate[T any](ctx context.Context, key string, fn func(ctx context.Context, key string) (T, time.Duration, error)) (curr T, loaded bool, err error) {
 	key = c.buildKey(key)
-	dto, err := c.db(ctx).Load(ctx, key)
+	v, err := c.load[T](ctx, key)
 	if err == nil {
-		var v T
-		err = json.Unmarshal(dto.Value, &v)
-		if err != nil {
-			return curr, false, err
-		}
 		return v, true, nil
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
+	if !errors.Is(err, ErrNotExist) {
 		return curr, false, err
 	}
 
@@ -206,8 +200,8 @@ func (c *Cache) LoadOrCreate[T any](ctx context.Context, key string, fn func(ctx
 		if err := lock.NamedLock(ctx, c.ID(), lock.Pair[string]{Key1: c.prefix, Key2: key}); err != nil {
 			return err
 		}
-		dto, err := c.db(ctx).Load(ctx, key)
-		if errors.Is(err, sql.ErrNoRows) {
+		v, err := c.load[T](ctx, key)
+		if errors.Is(err, ErrNotExist) {
 			val, ttl, err := fn(ctx, key)
 			if err != nil {
 				return err
@@ -225,11 +219,6 @@ func (c *Cache) LoadOrCreate[T any](ctx context.Context, key string, fn func(ctx
 			return err
 		}
 
-		var v T
-		err = json.Unmarshal(dto.Value, &v)
-		if err != nil {
-			return err
-		}
 		curr = v
 		loaded = true
 		return nil
