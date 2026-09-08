@@ -12,11 +12,13 @@ import (
 )
 
 const store = `-- name: Store :one
-insert into dbtx.cache(key, value, digest, expires_at)
+insert into dbtx.live_cache(key, value, digest, expires_at)
      values ($1, $2, $3, $4)
 on conflict (key) do
      update
-        set value = EXCLUDED.value, digest = EXCLUDED.digest, expires_at = EXCLUDED.expires_at
+        set value = EXCLUDED.value,
+            digest = EXCLUDED.digest,
+            expires_at = EXCLUDED.expires_at
   returning key, value, digest, created_at, updated_at, expires_at
 `
 
@@ -27,14 +29,14 @@ type StoreParams struct {
 	ExpiresAt sql.NullTime
 }
 
-func (q *Queries) Store(ctx context.Context, arg StoreParams) (*DbtxCache, error) {
+func (q *Queries) Store(ctx context.Context, arg StoreParams) (*DbtxLiveCache, error) {
 	row := q.db.QueryRowContext(ctx, store,
 		arg.Key,
 		arg.Value,
 		arg.Digest,
 		arg.ExpiresAt,
 	)
-	var i DbtxCache
+	var i DbtxLiveCache
 	err := row.Scan(
 		&i.Key,
 		&i.Value,

@@ -10,7 +10,7 @@ import (
 )
 
 const compareAndDelete = `-- name: CompareAndDelete :one
-delete from dbtx.cache where key = $1 and digest = $2 returning key, value, digest, created_at, updated_at, expires_at
+delete from dbtx.live_cache where key = $1 and digest = $2 returning key, value, digest, created_at, updated_at, expires_at
 `
 
 type CompareAndDeleteParams struct {
@@ -18,9 +18,9 @@ type CompareAndDeleteParams struct {
 	Digest string
 }
 
-func (q *Queries) CompareAndDelete(ctx context.Context, arg CompareAndDeleteParams) (*DbtxCache, error) {
+func (q *Queries) CompareAndDelete(ctx context.Context, arg CompareAndDeleteParams) (*DbtxLiveCache, error) {
 	row := q.db.QueryRowContext(ctx, compareAndDelete, arg.Key, arg.Digest)
-	var i DbtxCache
+	var i DbtxLiveCache
 	err := row.Scan(
 		&i.Key,
 		&i.Value,

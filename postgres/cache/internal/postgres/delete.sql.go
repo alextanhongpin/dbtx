@@ -10,12 +10,12 @@ import (
 )
 
 const delete = `-- name: Delete :one
-delete from dbtx.cache where key = $1 returning key, value, digest, created_at, updated_at, expires_at
+delete from dbtx.live_cache where key = $1 returning key, value, digest, created_at, updated_at, expires_at
 `
 
-func (q *Queries) Delete(ctx context.Context, key string) (*DbtxCache, error) {
+func (q *Queries) Delete(ctx context.Context, key string) (*DbtxLiveCache, error) {
 	row := q.db.QueryRowContext(ctx, delete, key)
-	var i DbtxCache
+	var i DbtxLiveCache
 	err := row.Scan(
 		&i.Key,
 		&i.Value,

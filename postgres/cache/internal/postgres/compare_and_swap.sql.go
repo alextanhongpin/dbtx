@@ -11,7 +11,11 @@ import (
 )
 
 const compareAndSwap = `-- name: CompareAndSwap :one
-update dbtx.cache set value = $1 where key = $2 and digest = $3 returning key, value, digest, created_at, updated_at, expires_at
+   update dbtx.live_cache
+      set value = $1
+    where key = $2
+      and digest = $3
+returning key, value, digest, created_at, updated_at, expires_at
 `
 
 type CompareAndSwapParams struct {
@@ -20,9 +24,9 @@ type CompareAndSwapParams struct {
 	Digest string
 }
 
-func (q *Queries) CompareAndSwap(ctx context.Context, arg CompareAndSwapParams) (*DbtxCache, error) {
+func (q *Queries) CompareAndSwap(ctx context.Context, arg CompareAndSwapParams) (*DbtxLiveCache, error) {
 	row := q.db.QueryRowContext(ctx, compareAndSwap, arg.Value, arg.Key, arg.Digest)
-	var i DbtxCache
+	var i DbtxLiveCache
 	err := row.Scan(
 		&i.Key,
 		&i.Value,

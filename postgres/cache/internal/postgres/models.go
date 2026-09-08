@@ -18,3 +18,12 @@ type DbtxCache struct {
 	UpdatedAt time.Time
 	ExpiresAt sql.NullTime
 }
+
+type DbtxLiveCache struct {
+	Key       string
+	Value     json.RawMessage
+	Digest    string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	ExpiresAt sql.NullTime
+}

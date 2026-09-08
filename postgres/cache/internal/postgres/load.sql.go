@@ -10,12 +10,12 @@ import (
 )
 
 const load = `-- name: Load :one
-select key, value, digest, created_at, updated_at, expires_at from dbtx.cache where key = $1 for update
+select key, value, digest, created_at, updated_at, expires_at from dbtx.live_cache where key = $1 for update
 `
 
-func (q *Queries) Load(ctx context.Context, key string) (*DbtxCache, error) {
+func (q *Queries) Load(ctx context.Context, key string) (*DbtxLiveCache, error) {
 	row := q.db.QueryRowContext(ctx, load, key)
-	var i DbtxCache
+	var i DbtxLiveCache
 	err := row.Scan(
 		&i.Key,
 		&i.Value,

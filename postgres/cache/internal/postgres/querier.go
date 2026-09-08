@@ -9,16 +9,14 @@ import (
 )
 
 type Querier interface {
-	CleanupExpired(ctx context.Context) (int64, error)
-	CompareAndDelete(ctx context.Context, arg CompareAndDeleteParams) (*DbtxCache, error)
-	CompareAndSwap(ctx context.Context, arg CompareAndSwapParams) (*DbtxCache, error)
-	Delete(ctx context.Context, key string) (*DbtxCache, error)
-	DeleteExpired(ctx context.Context, key string) (*DbtxCache, error)
-	Expire(ctx context.Context, arg ExpireParams) (*DbtxCache, error)
-	Load(ctx context.Context, key string) (*DbtxCache, error)
-	Store(ctx context.Context, arg StoreParams) (*DbtxCache, error)
-	StoreOnce(ctx context.Context, arg StoreOnceParams) (*DbtxCache, error)
-	TTL(ctx context.Context, key string) (*DbtxCache, error)
+	CompareAndDelete(ctx context.Context, arg CompareAndDeleteParams) (*DbtxLiveCache, error)
+	CompareAndSwap(ctx context.Context, arg CompareAndSwapParams) (*DbtxLiveCache, error)
+	Delete(ctx context.Context, key string) (*DbtxLiveCache, error)
+	Expire(ctx context.Context, arg ExpireParams) (*DbtxLiveCache, error)
+	Load(ctx context.Context, key string) (*DbtxLiveCache, error)
+	Purge(ctx context.Context) (int64, error)
+	Store(ctx context.Context, arg StoreParams) (*DbtxLiveCache, error)
+	StoreOnce(ctx context.Context, arg StoreOnceParams) (*DbtxLiveCache, error)
 }
 
 var _ Querier = (*Queries)(nil)

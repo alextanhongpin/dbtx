@@ -5,6 +5,7 @@ import (
 
 	"context"
 	"database/sql"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"time"
@@ -46,13 +47,6 @@ func (c *Cache) SetPrefix(prefix string) {
 // CompareAndDelete atomically deletes a key only if its current value matches the expected old value.
 func (c *Cache) CompareAndDelete[T any](ctx context.Context, key string, old T) error {
 	key = c.buildKey(key)
-	ok, err := c.invalidate(ctx, key)
-	if err != nil {
-		return err
-	}
-	if ok {
-		return ErrNotExist
-	}
 	row, err := newDto(key, old, 0)
 	if err != nil {
 		return err
@@ -70,13 +64,6 @@ func (c *Cache) CompareAndDelete[T any](ctx context.Context, key string, old T) 
 // CompareAndSwap atomically updates a key only if its current value matches the expected old value.
 func (c *Cache) CompareAndSwap[T any](ctx context.Context, key string, old, value T, ttl time.Duration) error {
 	key = c.buildKey(key)
-	ok, err := c.invalidate(ctx, key)
-	if err != nil {
-		return err
-	}
-	if ok {
-		return ErrNotExist
-	}
 	oldVal, err := newDto(key, old, 0)
 	if err != nil {
 		return err
@@ -99,14 +86,7 @@ func (c *Cache) CompareAndSwap[T any](ctx context.Context, key string, old, valu
 // Delete removes one or more keys from the cache.
 func (c *Cache) Delete(ctx context.Context, key string) error {
 	key = c.buildKey(key)
-	ok, err := c.invalidate(ctx, key)
-	if err != nil {
-		return err
-	}
-	if ok {
-		return ErrNotExist
-	}
-	_, err = c.db(ctx).Delete(ctx, key)
+	_, err := c.db(ctx).Delete(ctx, key)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotExist
 	}
@@ -117,14 +97,7 @@ func (c *Cache) Delete(ctx context.Context, key string) error {
 // Expire sets a timeout on a key. After the timeout has expired, the key will automatically be ok.
 func (c *Cache) Expire(ctx context.Context, key string, ttl time.Duration) error {
 	key = c.buildKey(key)
-	ok, err := c.invalidate(ctx, key)
-	if err != nil {
-		return err
-	}
-	if ok {
-		return ErrNotExist
-	}
-	_, err = c.db(ctx).Expire(ctx, postgres.ExpireParams{
+	_, err := c.db(ctx).Expire(ctx, postgres.ExpireParams{
 		ExpiresAt: sql.NullTime{
 			Time:  time.Now().Add(ttl),
 			Valid: ttl > 0,
@@ -141,22 +114,41 @@ func (c *Cache) Expire(ctx context.Context, key string, ttl time.Duration) error
 func (c *Cache) Load[T any](ctx context.Context, key string) (T, error) {
 	key = c.buildKey(key)
 	var zero T
-	dto, err := c.load(ctx, key)
+	dto, err := c.db(ctx).Load(ctx, key)
+	if errors.Is(err, sql.ErrNoRows) {
+		return zero, ErrNotExist
+	}
 	if err != nil {
 		return zero, err
 	}
-	return dto.Load[T]()
+
+	var v T
+	err = json.Unmarshal(dto.Value, &v)
+	if err != nil {
+		return zero, err
+	}
+	return v, nil
 }
 
 // LoadAndDelete atomically retrieves and deletes a key's value.
 func (c *Cache) LoadAndDelete[T any](ctx context.Context, key string) (value T, err error) {
 	key = c.buildKey(key)
+
 	var zero T
-	dto, err := c.delete(ctx, key)
+	dto, err := c.db(ctx).Delete(ctx, key)
+	if errors.Is(err, sql.ErrNoRows) {
+		return zero, ErrNotExist
+	}
 	if err != nil {
 		return zero, err
 	}
-	return dto.Load[T]()
+
+	var v T
+	err = json.Unmarshal(dto.Value, &v)
+	if err != nil {
+		return zero, err
+	}
+	return v, nil
 }
 
 // LoadOrStore atomically loads a key's value if it exists, or stores the provided value if it doesn't.
@@ -168,9 +160,9 @@ func (c *Cache) LoadOrStore[T any](ctx context.Context, key string, value T, ttl
 			return err
 		}
 
-		dto, err := c.load(ctx, key)
-		if errors.Is(err, ErrNotExist) {
-			err = c.storeOnce(ctx, key, value, ttl)
+		dto, err := c.db(ctx).Load(ctx, key)
+		if errors.Is(err, sql.ErrNoRows) {
+			err = c.store(ctx, key, value, ttl)
 			if err != nil {
 				return err
 			}
@@ -182,10 +174,12 @@ func (c *Cache) LoadOrStore[T any](ctx context.Context, key string, value T, ttl
 			return err
 		}
 
-		curr, err = dto.Load[T]()
+		var v T
+		err = json.Unmarshal(dto.Value, &v)
 		if err != nil {
 			return err
 		}
+		curr = v
 		loaded = true
 		return nil
 	})
@@ -195,48 +189,66 @@ func (c *Cache) LoadOrStore[T any](ctx context.Context, key string, value T, ttl
 
 func (c *Cache) LoadOrCreate[T any](ctx context.Context, key string, fn func(ctx context.Context, key string) (T, time.Duration, error)) (curr T, loaded bool, err error) {
 	key = c.buildKey(key)
-	dto, err := c.load(ctx, key)
+	dto, err := c.db(ctx).Load(ctx, key)
 	if err == nil {
-		curr, err = dto.Load[T]()
+		var v T
+		err = json.Unmarshal(dto.Value, &v)
 		if err != nil {
-			return
+			return curr, false, err
 		}
-		loaded = true
-		return
+		return v, true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return curr, false, err
 	}
 
 	err = c.RunInTx(ctx, func(ctx context.Context) error {
 		if err := lock.NamedLock(ctx, c.ID(), lock.Pair[string]{Key1: c.prefix, Key2: key}); err != nil {
 			return err
 		}
-		dto, err := c.load(ctx, key)
-		if errors.Is(err, ErrNotExist) {
+		dto, err := c.db(ctx).Load(ctx, key)
+		if errors.Is(err, sql.ErrNoRows) {
 			val, ttl, err := fn(ctx, key)
 			if err != nil {
 				return err
 			}
-			if err := c.storeOnce(ctx, key, val, ttl); err != nil {
+
+			err = c.store(ctx, key, val, ttl)
+			if err != nil {
 				return err
 			}
+
 			curr = val
 			return nil
 		}
 		if err != nil {
 			return err
 		}
-		curr, err = dto.Load[T]()
+
+		var v T
+		err = json.Unmarshal(dto.Value, &v)
 		if err != nil {
 			return err
 		}
+		curr = v
 		loaded = true
 		return nil
 	})
-	return
+	if err != nil {
+		var zero T
+		return zero, false, err
+	}
+
+	return curr, loaded, nil
 }
 
 // Store sets a key's value with the specified TTL.
 func (c *Cache) Store[T any](ctx context.Context, key string, value T, ttl time.Duration) error {
 	key = c.buildKey(key)
+	return c.store(ctx, key, value, ttl)
+}
+
+func (c *Cache) store[T any](ctx context.Context, key string, value T, ttl time.Duration) error {
 	row, err := newDto(key, value, ttl)
 	if err != nil {
 		return err
@@ -245,7 +257,7 @@ func (c *Cache) Store[T any](ctx context.Context, key string, value T, ttl time.
 		Key:       row.Key,
 		Value:     row.Value,
 		Digest:    row.Digest,
-		ExpiresAt: row.NullExpiresAt(),
+		ExpiresAt: row.ExpiresAt,
 	})
 	return err
 }
@@ -256,81 +268,27 @@ func (c *Cache) StoreOnce[T any](ctx context.Context, key string, value T, ttl t
 	return c.storeOnce(ctx, key, value, ttl)
 }
 
-// Exists checks if a key exists in the cache.
-func (c *Cache) Exists(ctx context.Context, key string) (bool, error) {
-	key = c.buildKey(key)
-	dto, err := c.load(ctx, key)
-	if errors.Is(err, ErrNotExist) {
-		return false, nil
-	}
+func (c *Cache) storeOnce[T any](ctx context.Context, key string, value T, ttl time.Duration) error {
+	row, err := newDto(key, value, ttl)
 	if err != nil {
-		return false, err
+		return err
 	}
-	return dto.Valid(), nil
-}
-
-// TTL returns the remaining time to live for a key.
-// Returns -1 if the key exists but has no expiration.
-// Returns -2 if the key does not exist.
-func (c *Cache) TTL(ctx context.Context, key string) (time.Duration, error) {
-	key = c.buildKey(key)
-	row, err := c.db(ctx).TTL(ctx, key)
+	_, err = c.db(ctx).StoreOnce(ctx, postgres.StoreOnceParams{
+		Key:       row.Key,
+		Value:     row.Value,
+		Digest:    row.Digest,
+		ExpiresAt: row.ExpiresAt,
+	})
 	if errors.Is(err, sql.ErrNoRows) {
-		return -2, nil
+		return ErrExists
 	}
-	if err != nil {
-		return 0, err
-	}
-	dto := toDto(row)
-	if dto.Valid() {
-		return time.Until(*dto.ExpiresAt), nil
-	}
-	return -1, nil
-}
-
-func (c *Cache) delete(ctx context.Context, key string) (*dto, error) {
-	row, err := c.db(ctx).Delete(ctx, key)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotExist
-	}
-	if err != nil {
-		return nil, err
-	}
-	return toDto(row), nil
-}
-
-func (c *Cache) load(ctx context.Context, key string) (*dto, error) {
-	row, err := c.db(ctx).Load(ctx, key)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotExist
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	d := toDto(row)
-	if !d.Valid() {
-		err = c.Delete(ctx, key)
-		if err != nil {
-			return nil, err
-		}
-		return nil, ErrNotExist
-	}
-
-	return d, nil
-}
-
-func (c *Cache) Cleanup(ctx context.Context) (int64, error) {
-	return c.db(ctx).CleanupExpired(ctx)
-}
-
-func (c *Cache) Migrate(ctx context.Context) error {
-	_, err := c.DBTx(ctx).ExecContext(ctx, schema)
 	return err
 }
 
-func (c *Cache) invalidate(ctx context.Context, key string) (bool, error) {
-	_, err := c.db(ctx).DeleteExpired(ctx, key)
+// Exists checks if a key exists in the cache.
+func (c *Cache) Exists(ctx context.Context, key string) (bool, error) {
+	key = c.buildKey(key)
+	_, err := c.db(ctx).Load(ctx, key)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -340,24 +298,31 @@ func (c *Cache) invalidate(ctx context.Context, key string) (bool, error) {
 	return true, nil
 }
 
-func (c *Cache) storeOnce[T any](ctx context.Context, key string, value T, ttl time.Duration) error {
-	_, err := c.invalidate(ctx, key)
-	if err != nil {
-		return err
-	}
-	row, err := newDto(key, value, ttl)
-	if err != nil {
-		return err
-	}
-	_, err = c.db(ctx).StoreOnce(ctx, postgres.StoreOnceParams{
-		Key:       row.Key,
-		Value:     row.Value,
-		Digest:    row.Digest,
-		ExpiresAt: row.NullExpiresAt(),
-	})
+// TTL returns the remaining time to live for a key.
+// Returns -1 if the key exists but has no expiration.
+// Returns -2 if the key does not exist.
+func (c *Cache) TTL(ctx context.Context, key string) (time.Duration, error) {
+	key = c.buildKey(key)
+	row, err := c.db(ctx).Load(ctx, key)
 	if errors.Is(err, sql.ErrNoRows) {
-		return ErrExists
+		return -2, nil
 	}
+	if err != nil {
+		return 0, err
+	}
+	if !row.ExpiresAt.Valid {
+		return -1, nil
+	}
+
+	return time.Until(row.ExpiresAt.Time), nil
+}
+
+func (c *Cache) Purge(ctx context.Context) (int64, error) {
+	return c.db(ctx).Purge(ctx)
+}
+
+func (c *Cache) Migrate(ctx context.Context) error {
+	_, err := c.DBTx(ctx).ExecContext(ctx, schema)
 	return err
 }
 

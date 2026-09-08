@@ -12,9 +12,13 @@ import (
 )
 
 const storeOnce = `-- name: StoreOnce :one
-insert into dbtx.cache(key, value, digest, expires_at)
+insert into dbtx.live_cache(key, value, digest, expires_at)
      values ($1, $2, $3, $4)
-on conflict (key) do nothing
+on conflict (key) do
+     update
+        set value = $2, digest = $3, expires_at = $4
+      where dbtx.live_cache.expires_at is not null
+        and dbtx.live_cache.expires_at < now()
   returning key, value, digest, created_at, updated_at, expires_at
 `
 
@@ -25,14 +29,14 @@ type StoreOnceParams struct {
 	ExpiresAt sql.NullTime
 }
 
-func (q *Queries) StoreOnce(ctx context.Context, arg StoreOnceParams) (*DbtxCache, error) {
+func (q *Queries) StoreOnce(ctx context.Context, arg StoreOnceParams) (*DbtxLiveCache, error) {
 	row := q.db.QueryRowContext(ctx, storeOnce,
 		arg.Key,
 		arg.Value,
 		arg.Digest,
 		arg.ExpiresAt,
 	)
-	var i DbtxCache
+	var i DbtxLiveCache
 	err := row.Scan(
 		&i.Key,
 		&i.Value,

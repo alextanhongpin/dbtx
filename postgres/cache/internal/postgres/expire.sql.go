@@ -11,7 +11,7 @@ import (
 )
 
 const expire = `-- name: Expire :one
-update dbtx.cache set expires_at = $1 where key = $2 returning key, value, digest, created_at, updated_at, expires_at
+update dbtx.live_cache set expires_at = $1 where key = $2 returning key, value, digest, created_at, updated_at, expires_at
 `
 
 type ExpireParams struct {
@@ -19,9 +19,9 @@ type ExpireParams struct {
 	Key       string
 }
 
-func (q *Queries) Expire(ctx context.Context, arg ExpireParams) (*DbtxCache, error) {
+func (q *Queries) Expire(ctx context.Context, arg ExpireParams) (*DbtxLiveCache, error) {
 	row := q.db.QueryRowContext(ctx, expire, arg.ExpiresAt, arg.Key)
-	var i DbtxCache
+	var i DbtxLiveCache
 	err := row.Scan(
 		&i.Key,
 		&i.Value,

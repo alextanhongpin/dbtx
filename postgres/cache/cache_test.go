@@ -107,10 +107,11 @@ func TestCompareAndDelete(t *testing.T) {
 		value := []byte("hello")
 
 		// Given that the key expired,
-		err := c.Store(ctx, key, value, -time.Second)
-
+		err := c.Store(ctx, key, value, 100*time.Nanosecond)
 		is := assert.New(t)
 		is.NoError(err)
+
+		time.Sleep(10 * time.Millisecond)
 
 		// When compare and delete,
 		// Then it should invalidate cache,
@@ -165,14 +166,36 @@ func TestCompareAndSwap(t *testing.T) {
 		is.Equal(newValue, loaded)
 	})
 
+	t.Run("mismatch", func(t *testing.T) {
+		key := t.Name()
+		value := []byte("hello")
+
+		// Given that the value exists,
+		err := c.Store(ctx, key, value, time.Second)
+		is := assert.New(t)
+		is.NoError(err)
+
+		// When compare and value mismatch,
+		// Then it should return error.
+		newValue := []byte("world")
+		err = c.CompareAndSwap(ctx, key, newValue, newValue, time.Second)
+		is.ErrorIs(err, cache.ErrNotExist)
+
+		loaded, err := c.Load[[]byte](ctx, key)
+		is.NoError(err)
+		is.Equal(value, loaded)
+	})
+
 	t.Run("expired", func(t *testing.T) {
 		key := t.Name()
 		value := []byte("hello")
 
 		// Given that the value expired,
-		err := c.Store(ctx, key, value, -time.Second)
+		err := c.Store(ctx, key, value, 100*time.Nanosecond)
 		is := assert.New(t)
 		is.NoError(err)
+
+		time.Sleep(10 * time.Millisecond)
 
 		// When compare and swap,
 		newValue := []byte("world")
@@ -239,9 +262,11 @@ func TestDelete(t *testing.T) {
 	t.Run("expired", func(t *testing.T) {
 		key := t.Name()
 		// Given that the key expired.
-		err := c.Store(ctx, key, []byte("hello"), -time.Second)
+		err := c.Store(ctx, key, []byte("hello"), 100*time.Nanosecond)
 		is := assert.New(t)
 		is.NoError(err)
+
+		time.Sleep(10 * time.Millisecond)
 
 		// When deleting
 		// Then it should invalidate
@@ -289,9 +314,11 @@ func TestExists(t *testing.T) {
 	t.Run("expired", func(t *testing.T) {
 		key := t.Name()
 		// Given that the key expired.
-		err := c.Store(ctx, key, []byte("hello"), -time.Second)
+		err := c.Store(ctx, key, []byte("hello"), 100*time.Nanosecond)
 		is := assert.New(t)
 		is.NoError(err)
+
+		time.Sleep(10 * time.Millisecond)
 
 		// When checking exists,
 		// Then it should return false.
@@ -335,9 +362,11 @@ func TestExpire(t *testing.T) {
 	t.Run("expired", func(t *testing.T) {
 		// Given that the key expired.
 		key := t.Name()
-		err := c.Store(ctx, key, []byte("hello"), -time.Second)
+		err := c.Store(ctx, key, []byte("hello"), 100*time.Nanosecond)
 		is := assert.New(t)
 		is.NoError(err)
+
+		time.Sleep(10 * time.Millisecond)
 
 		// When expiring.
 		err = c.Expire(ctx, key, time.Second)
@@ -386,10 +415,11 @@ func TestLoad(t *testing.T) {
 		value := []byte("hello")
 
 		// Given that the key expired,
-		err := c.Store(ctx, key, value, -time.Second)
-
+		err := c.Store(ctx, key, value, 100*time.Nanosecond)
 		is := assert.New(t)
 		is.NoError(err)
+
+		time.Sleep(10 * time.Millisecond)
 
 		// When loading,
 		loaded, err := c.Load[[]byte](ctx, key)
@@ -445,9 +475,11 @@ func TestLoadAndDelete(t *testing.T) {
 		value := []byte("hello")
 
 		// Given that the key expired,
-		err := c.Store(ctx, key, value, -time.Second)
+		err := c.Store(ctx, key, value, 100*time.Nanosecond)
 		is := assert.New(t)
 		is.NoError(err)
+
+		time.Sleep(10 * time.Millisecond)
 
 		// When load and delete,
 		old, err := c.LoadAndDelete[[]byte](ctx, key)
@@ -517,9 +549,11 @@ func TestLoadOrCreate(t *testing.T) {
 		value := []byte("hello")
 
 		// Given that the key expired,
-		err := c.Store(ctx, key, value, -time.Second)
+		err := c.Store(ctx, key, value, 100*time.Nanosecond)
 		is := assert.New(t)
 		is.NoError(err)
+
+		time.Sleep(10 * time.Millisecond)
 
 		newValue := []byte("world")
 		// When load or create,
@@ -529,8 +563,9 @@ func TestLoadOrCreate(t *testing.T) {
 		})
 
 		// Then it should create new value.
+		is.NoError(err)
 		is.False(loaded)
-		is.Equal(newValue, curr)
+		is.Equal(string(newValue), string(curr))
 		is.True(called)
 	})
 }
@@ -578,10 +613,11 @@ func TestLoadOrStore(t *testing.T) {
 		value := []byte("hello")
 
 		// Given that the key expired
-		err := c.Store(ctx, key, value, -time.Second)
-
+		err := c.Store(ctx, key, value, 100*time.Nanosecond)
 		is := assert.New(t)
 		is.NoError(err)
+
+		time.Sleep(10 * time.Millisecond)
 
 		// When load or store,
 		newValue := []byte("world")
@@ -642,9 +678,11 @@ func TestStore(t *testing.T) {
 		key := t.Name()
 		value := []byte("hello")
 
-		err := c.Store(ctx, key, value, -time.Second)
+		err := c.Store(ctx, key, value, 100*time.Nanosecond)
 		is := assert.New(t)
 		is.NoError(err)
+
+		time.Sleep(10 * time.Millisecond)
 
 		newValue := []byte("world")
 		// When storing,
@@ -703,10 +741,11 @@ func TestStoreOnce(t *testing.T) {
 		key := t.Name()
 		value := []byte("hello")
 
-		err := c.Store(ctx, key, value, -time.Second)
-
+		err := c.Store(ctx, key, value, 100*time.Nanosecond)
 		is := assert.New(t)
 		is.NoError(err)
+
+		time.Sleep(10 * time.Millisecond)
 
 		// When storing
 		newValue := []byte("world")
@@ -754,15 +793,17 @@ func TestTTL(t *testing.T) {
 	t.Run("expired", func(t *testing.T) {
 		// Given that the key expired,
 		key := t.Name()
-		err := c.Store(ctx, key, []byte("hello"), -time.Second)
+		err := c.Store(ctx, key, []byte("hello"), 100*time.Nanosecond)
 		is := assert.New(t)
 		is.NoError(err)
+
+		time.Sleep(10 * time.Millisecond)
 
 		// When checking ttl,
 		ttl, err := c.TTL(ctx, key)
 
-		// Then it should return -1.
+		// Then it should return -2.
 		is.NoError(err)
-		is.Equal(time.Duration(-1), ttl)
+		is.Equal(time.Duration(-2), ttl)
 	})
 }
