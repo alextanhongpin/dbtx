@@ -5,13 +5,13 @@ package outbox
 
 import (
 	_ "embed"
-	"time"
 
 	_ "github.com/lib/pq"
 
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 	"uuid"
 
 	"github.com/alextanhongpin/dbtx"
@@ -22,7 +22,6 @@ import (
 var schema string
 
 var (
-	ErrOutOfTx  = errors.New("outbox: executing sql outside of transaction boundary")
 	ErrNotFound = errors.New("outbox: not found")
 	ErrEOQ      = errors.New("outbox: end of queue")
 )
@@ -43,10 +42,6 @@ type EnqueueParams = postgres.EnqueueParams
 
 // Enqueue enqueues a new message to outbox.
 func (o *Outbox) Enqueue(ctx context.Context, params EnqueueParams) (uuid.UUID, error) {
-	if !o.IsTx(ctx) {
-		return uuid.Nil(), ErrOutOfTx
-	}
-
 	return o.db(ctx).Enqueue(ctx, params)
 }
 
