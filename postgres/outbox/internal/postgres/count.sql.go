@@ -13,7 +13,7 @@ const count = `-- name: Count :one
 select count(*)
   from dbtx.outbox
  where (max_retry = 0 or retry_count < max_retry)
-   and visible_at <= now()
+   and visible_at <= clock_timestamp()
 `
 
 func (q *Queries) Count(ctx context.Context) (int64, error) {

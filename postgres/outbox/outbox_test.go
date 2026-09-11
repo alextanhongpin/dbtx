@@ -13,6 +13,7 @@ import (
 	"github.com/alextanhongpin/dbtx"
 	"github.com/alextanhongpin/dbtx/postgres/outbox"
 	"github.com/alextanhongpin/dbtx/testing/dbtest"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -68,9 +69,9 @@ func (suite *OutboxTestSuite) TestDequeueError() {
 	n := 1
 	ob := suite.ob
 	suite.createN(n)
-	err := ob.Dequeue(ctx, func(txCtx context.Context, msg outbox.Message) (*outbox.Nack, error) {
+	err := ob.Dequeue(ctx, func(txCtx context.Context, msg outbox.Message) error {
 		suite.Contains(suite.ids, msg.ID)
-		return nil, ErrRollback
+		return ErrRollback
 	})
 	suite.ErrorIs(err, ErrRollback)
 	suite.count(n)
@@ -86,10 +87,10 @@ func (suite *OutboxTestSuite) TestDequeueSuccess() {
 	counts := []int{1, 0, 0}
 
 	for i := range n + 1 {
-		err := ob.Dequeue(ctx, func(txCtx context.Context, msg outbox.Message) (*outbox.Nack, error) {
+		err := ob.Dequeue(ctx, func(txCtx context.Context, msg outbox.Message) error {
 			suite.True(dbtx.IsTx(txCtx))
 			suite.Contains(suite.ids, msg.ID)
-			return nil, nil
+			return nil
 		})
 		suite.ErrorIs(err, errs[i])
 		suite.count(counts[i])
@@ -102,17 +103,14 @@ func (suite *OutboxTestSuite) TestMaxRetry() {
 	n := 1
 	suite.createN(n)
 
-	errs := []error{nil, nil, nil, outbox.ErrEOQ}
+	errs := []error{assert.AnError, assert.AnError, assert.AnError, outbox.ErrEOQ}
 	counts := []int{1, 1, 0, 0}
 
 	for i := range len(errs) {
-		err := ob.Dequeue(ctx, func(txCtx context.Context, msg outbox.Message) (*outbox.Nack, error) {
+		err := ob.Dequeue(ctx, func(txCtx context.Context, msg outbox.Message) error {
 			suite.True(dbtx.IsTx(txCtx))
 			suite.Contains(suite.ids, msg.ID)
-			return &outbox.Nack{
-				Error:   "bad request",
-				Timeout: -time.Second,
-			}, nil
+			return outbox.Nack(assert.AnError)
 		})
 		suite.ErrorIs(err, errs[i], "errors[%d]", i)
 		suite.count(counts[i], "counts[%d]", i)
@@ -127,17 +125,16 @@ func (suite *OutboxTestSuite) TestTimeout() {
 
 	sleep := []time.Duration{0, 0, 100 * time.Millisecond}
 	count := []int{0, 0, 0}
-	errs := []error{nil, outbox.ErrEOQ, nil}
+	errs := []error{assert.AnError, outbox.ErrEOQ, assert.AnError}
 
 	for i := range 3 {
 		time.Sleep(sleep[i])
-		err := ob.Dequeue(ctx, func(txCtx context.Context, msg outbox.Message) (*outbox.Nack, error) {
+		err := ob.Dequeue(ctx, func(txCtx context.Context, msg outbox.Message) error {
 			suite.True(dbtx.IsTx(txCtx))
 			suite.Contains(suite.ids, msg.ID)
-			return &outbox.Nack{
-				Error:   "bad request",
-				Timeout: 100 * time.Millisecond,
-			}, nil
+			nack := outbox.Nack(assert.AnError)
+			nack.Timeout = 100 * time.Millisecond
+			return nack
 		})
 		suite.ErrorIs(err, errs[i], "errs[%d]", i)
 		suite.count(count[i], "counts[%d]", i)
@@ -150,17 +147,16 @@ func (suite *OutboxTestSuite) TestSkip() {
 	n := 1
 	suite.createN(n)
 
-	errs := []error{nil, outbox.ErrEOQ}
+	errs := []error{assert.AnError, outbox.ErrEOQ}
 	count := []int{0, 0}
 
 	for i := range len(count) {
-		err := ob.Dequeue(ctx, func(txCtx context.Context, msg outbox.Message) (*outbox.Nack, error) {
+		err := ob.Dequeue(ctx, func(txCtx context.Context, msg outbox.Message) error {
 			suite.True(dbtx.IsTx(txCtx))
 			suite.Contains(suite.ids, msg.ID)
-			return &outbox.Nack{
-				Error: "bad request",
-				Skip:  true,
-			}, nil
+			nack := outbox.Nack(assert.AnError)
+			nack.Skip = true
+			return nack
 		})
 		suite.ErrorIs(err, errs[i], "errs[%d]", i)
 		suite.count(count[i], "count[%d]", i)

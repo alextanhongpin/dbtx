@@ -50,63 +50,49 @@ func (o *Outbox) Count(ctx context.Context) (int64, error) {
 	return o.db(ctx).Count(ctx)
 }
 
-type Nack struct {
-	Error   string
+type NackError struct {
+	Cause   error
 	Skip    bool
 	Timeout time.Duration
 }
 
-func (o *Outbox) Handle(ctx context.Context, id uuid.UUID, fn func(context.Context, Message) (*Nack, error)) error {
-	return o.RunInTx(ctx, func(txCtx context.Context) error {
-		row, err := o.db(txCtx).Find(txCtx, id)
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrNotFound
-		}
-
-		nack, err := fn(txCtx, *row)
-		if err != nil {
-			return err
-		}
-		if nack == nil {
-			_, err = o.db(txCtx).Delete(txCtx, row.ID)
-			return err
-		}
-
-		params := postgres.RequeueParams{
-			ID:        row.ID,
-			LastError: nack.Error,
-			VisibleAt: time.Now().Add(nack.Timeout),
-		}
-
-		// Emulate DLQ by setting max retry to -1 (no longer retryable).
-		if nack.Skip {
-			params.MaxRetry = -1
-		}
-
-		_, err = o.db(txCtx).Requeue(txCtx, params)
-		return err
-	})
+func Nack(err error) *NackError {
+	return &NackError{
+		Cause: err,
+	}
 }
 
-func (o *Outbox) Dequeue(ctx context.Context, fn func(context.Context, Message) (*Nack, error)) error {
-	return o.RunInTx(ctx, func(txCtx context.Context) error {
-		row, err := o.db(txCtx).Peek(txCtx)
+func (n *NackError) Error() string {
+	return n.Cause.Error()
+}
+
+func (n *NackError) Unwrap() error {
+	if n == nil || n.Cause == nil {
+		return nil
+	}
+	return n.Cause
+}
+
+func (o *Outbox) Handle(ctx context.Context, id uuid.UUID, fn func(context.Context, Message) error) error {
+	nack, err := o.RunInTx2(ctx, func(txCtx context.Context) (*NackError, error) {
+		row, err := o.db(txCtx).Find(txCtx, id)
 		if errors.Is(err, sql.ErrNoRows) {
-			return ErrEOQ
+			return nil, ErrNotFound
 		}
 
-		nack, err := fn(txCtx, *row)
-		if err != nil {
-			return err
-		}
-		if nack == nil {
+		err = fn(txCtx, *row)
+		if err == nil {
 			_, err = o.db(txCtx).Delete(txCtx, row.ID)
-			return err
+			return nil, err
+		}
+		nack, ok := errors.AsType[*NackError](err)
+		if !ok {
+			return nil, err
 		}
 
 		params := postgres.RequeueParams{
 			ID:        row.ID,
-			LastError: nack.Error,
+			LastError: nack.Error(),
 			VisibleAt: time.Now().Add(nack.Timeout),
 		}
 
@@ -117,11 +103,56 @@ func (o *Outbox) Dequeue(ctx context.Context, fn func(context.Context, Message) 
 
 		_, err = o.db(txCtx).Requeue(txCtx, params)
 		if err != nil {
-			return err
+			return nil, err
+		}
+		return nack, nil
+	})
+	if err != nil {
+		return err
+	}
+
+	return nack.Unwrap()
+}
+
+func (o *Outbox) Dequeue(ctx context.Context, fn func(context.Context, Message) error) error {
+	nack, err := o.RunInTx2(ctx, func(txCtx context.Context) (*NackError, error) {
+		row, err := o.db(txCtx).Peek(txCtx)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrEOQ
 		}
 
-		return nil
+		err = fn(txCtx, *row)
+		if err == nil {
+			_, err = o.db(txCtx).Delete(txCtx, row.ID)
+			return nil, err
+		}
+		nack, ok := errors.AsType[*NackError](err)
+		if !ok {
+			return nil, err
+		}
+
+		params := postgres.RequeueParams{
+			ID:        row.ID,
+			LastError: nack.Error(),
+			VisibleAt: time.Now().Add(nack.Timeout),
+		}
+
+		// Emulate DLQ by setting max retry to -1 (no longer retryable).
+		if nack.Skip {
+			params.MaxRetry = -1
+		}
+
+		_, err = o.db(txCtx).Requeue(txCtx, params)
+		if err != nil {
+			return nil, err
+		}
+		return nack, nil
 	})
+	if err != nil {
+		return err
+	}
+
+	return nack.Unwrap()
 }
 
 func (o *Outbox) Migrate(ctx context.Context) error {

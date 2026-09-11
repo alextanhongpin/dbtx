@@ -10,7 +10,7 @@ The outbox pattern lets you write business data and domain events in the same da
 * **At-least-once delivery** – workers `Dequeue` visible messages, process them, and acknowledge. Failures are automatically requeued with a backoff.
 * **Retry with limits** – configure `max_retry` per message. Once the retry count is exceeded the message is no longer returned by `Count`/`Dequeue`.
 * **Delayed visibility** – set `VisibleAt` to schedule future processing.
-* **Dead-letter queue emulation** – return a `Nack{Skip:true}` to stop further retries by setting `max_retry = -1`.
+* **Dead-letter queue emulation** – return `outbox.Nack(err)` with `Skip` set to `true` to stop further retries by setting `max_retry = -1`.
 * **Idempotent processing** – use `AggregateID` / `AggregateType` to correlate events and avoid duplicates in your consumer.
 
 ## Schema
@@ -92,7 +92,7 @@ err := o.RunInTx(ctx, func(ctx context.Context) error {
 ```go
 go func() {
     for {
-        err := o.Dequeue(ctx, func(ctx context.Context, msg outbox.Message) (*outbox.Nack, error) {
+        err := o.Dequeue(ctx, func(ctx context.Context, msg outbox.Message) error {
             // ctx is a dbtx transaction context
             return publish(msg)
         })
@@ -110,14 +110,13 @@ go func() {
 ### Handling a specific message
 
 ```go
-err := o.Handle(ctx, id, func(ctx context.Context, msg outbox.Message) (*outbox.Nack, error) {
+err := o.Handle(ctx, id, func(ctx context.Context, msg outbox.Message) error {
     if err := process(msg); err != nil {
-        return &outbox.Nack{
-            Error:   err.Error(),
-            Timeout: 2 * time.Second, // backoff
-        }, nil
+        nack := outbox.Nack(err)
+        nack.Timeout = 2 * time.Second // backoff
+        return nack
     }
-    return nil, nil // delete on success
+    return nil // delete on success
 })
 ```
 
@@ -125,13 +124,22 @@ err := o.Handle(ctx, id, func(ctx context.Context, msg outbox.Message) (*outbox.
 
 Return `nil` to acknowledge and delete the message.
 
-Return `*outbox.Nack` to requeue:
+Return an error wrapped with `outbox.Nack(err)` to requeue:
 
 ```go
-type Nack struct {
-    Error   string
-    Skip    bool        // set max_retry = -1, emulate DLQ
-    Timeout time.Duration // time until next visibility
+nack := outbox.Nack(err)
+nack.Skip = true          // set max_retry = -1, emulate DLQ
+nack.Timeout = 2 * time.Second // time until next visibility
+return nack
+```
+
+`NackError` implements `error` and carries the original cause:
+
+```go
+type NackError struct {
+    Cause   error
+    Skip    bool
+    Timeout time.Duration
 }
 ```
 
@@ -148,7 +156,7 @@ n, err := o.Count(ctx) // visible, retryable messages
 * `New(db *sql.DB) *Outbox` – create a wrapper around a `*sql.DB`.
 * `Migrate(ctx)` – create `dbtx.outbox`.
 * `Enqueue(ctx, EnqueueParams) (uuid.UUID, error)` – insert a new event. Must run in a transaction.
-* `Dequeue(ctx, fn)` – atomically peek the next visible message with `FOR UPDATE SKIP LOCKED`, increment `retry_count`, and hand it to `fn`. On `Nack` the row is requeued.
+* `Dequeue(ctx, fn func(context.Context, Message) error)` – atomically peek the next visible message with `FOR UPDATE SKIP LOCKED`, increment `retry_count`, and hand it to `fn`. If `fn` returns an error wrapped with `Nack`, the row is requeued.
 * `Handle(ctx, id, fn)` – same as `Dequeue` but for a known message id.
 * `Count(ctx) (int64, error)` – number of visible, retryable messages.
 
