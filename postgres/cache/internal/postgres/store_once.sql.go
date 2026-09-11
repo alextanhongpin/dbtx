@@ -18,7 +18,7 @@ on conflict (key) do
      update
         set value = $2, digest = $3, expires_at = $4
       where dbtx.live_cache.expires_at is not null
-        and dbtx.live_cache.expires_at < now()
+        and dbtx.live_cache.expires_at < clock_timestamp()
   returning key, value, digest, created_at, updated_at, expires_at
 `
 

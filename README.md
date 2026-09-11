@@ -47,8 +47,8 @@ func main() {
 
 ## ✨ Status
 
-- **Current Version:** 1.0.0 (Stable)
-- **Focus:** Unified transaction management and advanced patterns (Outbox, Locking).
+- **Current Version:** 0.0.7 (Latest)
+- **Focus:** Unified transaction management and advanced patterns (Outbox, Locking, Cache, DBT).
 - **Development:** Active development for support with new database drivers.
 
 - **🔄 Unified Transaction Interface**: Common interface for `*sql.DB` and `*sql.Tx`
@@ -56,6 +56,7 @@ func main() {
 - **🔒 Transaction Safety**: Automatic rollback on errors and panic recovery
 - **🧪 Comprehensive Testing**: Built-in testing utilities with Docker containers
 - **📦 Outbox Pattern**: Transactional outbox implementation for reliable messaging
+- **🗄️ PostgreSQL Cache**: Typed cache with TTL, atomic operations, and negative caching
 - **🔐 Distributed Locking**: PostgreSQL-based advisory locks
 - **🎭 Middleware Support**: Customizable database operation wrappers
 - **🏗️ Nested Transactions**: Safe handling of nested transaction contexts
@@ -125,6 +126,18 @@ err := atomic.RunInTx(context.Background(), func(ctx context.Context) error {
 if err != nil {
     log.Fatal(err)
 }
+```
+
+For nested savepoint transactions, use `RunInSubTx` which creates a PostgreSQL SAVEPOINT inside an existing transaction. Inner failures roll back only to the savepoint, allowing the outer transaction to continue.
+
+```go
+err := atomic.RunInTx(ctx, func(ctx context.Context) error {
+    // outer work
+    return atomic.RunInSubTx(ctx, func(ctx context.Context) error {
+        // inner savepoint work, can be rolled back independently
+        return nil
+    })
+})
 ```
 
 ### Custom Wrappers
@@ -368,9 +381,14 @@ dbtx/
 ├── buntx/              # Bun ORM adapter
 ├── pgxtx/              # pgx driver adapter  
 ├── sqlxtx/             # sqlx adapter
+├── engine/
+│   └── sqlite/         # SQLite engine with sqlite-vec support
 ├── postgres/
-│   ├── outbox/         # Transactional outbox pattern
+│   ├── cache/          # PostgreSQL-backed typed cache
+│   ├── dbt/            # Type-safe query builder
+│   ├── jsonb/          # JSONB helpers
 │   ├── lock/           # Advisory locks
+│   ├── outbox/         # Transactional outbox pattern
 │   └── violations/     # Constraint violation handling
 └── testing/
     ├── dbtest/         # Database testing utilities
