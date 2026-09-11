@@ -12,12 +12,10 @@ import (
 
 type Querier interface {
 	Count(ctx context.Context) (int64, error)
-	CountDLQ(ctx context.Context) (int64, error)
 	Delete(ctx context.Context, id uuid.UUID) (*DbtxOutbox, error)
-	Dequeue(ctx context.Context, id uuid.UUID) (*DbtxOutbox, error)
-	DequeueFIFO(ctx context.Context) (*DbtxOutbox, error)
 	Enqueue(ctx context.Context, arg EnqueueParams) (uuid.UUID, error)
-	EnqueueDLQ(ctx context.Context, id uuid.UUID) (*DbtxOutboxDlq, error)
+	Find(ctx context.Context, id uuid.UUID) (*DbtxOutbox, error)
+	Peek(ctx context.Context) (*DbtxOutbox, error)
 	Requeue(ctx context.Context, arg RequeueParams) (*DbtxOutbox, error)
 }
 

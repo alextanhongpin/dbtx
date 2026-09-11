@@ -262,6 +262,52 @@ func TestAtomicLocker(t *testing.T) {
 	wg.Wait()
 }
 
+func TestSubTransaction(t *testing.T) {
+	t.Run("outside tx", func(t *testing.T) {
+		// Arrange.
+		ctx := t.Context()
+
+		db := dbtx.New(dbtest.DB(t))
+		err := db.RunInSubTx(ctx, func(ctx context.Context) error {
+			panic("won't be called")
+		})
+		is := assert.New(t)
+		is.ErrorIs(err, dbtx.ErrOutOfTx)
+	})
+
+	t.Run("inside tx", func(t *testing.T) {
+		// Arrange.
+		ctx := t.Context()
+
+		db := dbtx.New(dbtest.DB(t))
+
+		is := assert.New(t)
+		err := db.RunInTx(ctx, func(txCtx context.Context) error {
+			// Given that there is a row created in tx,
+			create(t, db, txCtx, 40)
+			// And there are two more rows created in subtransaction,
+			subTxErr := db.RunInSubTx(txCtx, func(stxCtx context.Context) error {
+				create(t, db, stxCtx, 41)
+				create(t, db, stxCtx, 42)
+
+				// Then the count until here is 3
+				count(t, db, stxCtx, 3)
+
+				// When subtransaction is rolled back,
+
+				return ErrRollback
+			})
+
+			// Then the rows created by subtransaction will be undo,
+			// And the rows created by transaction will remain.
+			is.ErrorIs(subTxErr, ErrRollback)
+			count(t, db, txCtx, 1)
+			return nil
+		})
+		is.NoError(err)
+	})
+}
+
 func migrate(dsn string) error {
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {

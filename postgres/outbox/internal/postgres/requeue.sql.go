@@ -7,26 +7,37 @@ package postgres
 
 import (
 	"context"
-	"database/sql"
+	"time"
 
 	"uuid"
 )
 
 const requeue = `-- name: Requeue :one
    update dbtx.outbox
-      set retry_at = $1, failure_reason = $2
-    where id = $3
-returning id, aggregate_id, aggregate_type, type, payload, created_at, updated_at, failure_reason, retry_at, retry_count, run_at
+      set last_error = $1,
+          visible_at = $2,
+          max_retry = coalesce(
+            nullif($3::int, 0), dbtx.outbox.max_retry
+          ),
+          updated_at = clock_timestamp()
+    where id = $4
+returning id, aggregate_id, aggregate_type, type, payload, created_at, updated_at, last_error, max_retry, retry_count, visible_at
 `
 
 type RequeueParams struct {
-	RetryAt       sql.NullTime
-	FailureReason string
-	ID            uuid.UUID
+	LastError string
+	VisibleAt time.Time
+	MaxRetry  int32
+	ID        uuid.UUID
 }
 
 func (q *Queries) Requeue(ctx context.Context, arg RequeueParams) (*DbtxOutbox, error) {
-	row := q.db.QueryRowContext(ctx, requeue, arg.RetryAt, arg.FailureReason, arg.ID)
+	row := q.db.QueryRowContext(ctx, requeue,
+		arg.LastError,
+		arg.VisibleAt,
+		arg.MaxRetry,
+		arg.ID,
+	)
 	var i DbtxOutbox
 	err := row.Scan(
 		&i.ID,
@@ -36,10 +47,10 @@ func (q *Queries) Requeue(ctx context.Context, arg RequeueParams) (*DbtxOutbox, 
 		&i.Payload,
 		&i.CreatedAt,
 		&i.UpdatedAt,
-		&i.FailureReason,
-		&i.RetryAt,
+		&i.LastError,
+		&i.MaxRetry,
 		&i.RetryCount,
-		&i.RunAt,
+		&i.VisibleAt,
 	)
 	return &i, err
 }

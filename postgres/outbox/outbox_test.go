@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 	"uuid"
@@ -12,7 +13,7 @@ import (
 	"github.com/alextanhongpin/dbtx"
 	"github.com/alextanhongpin/dbtx/postgres/outbox"
 	"github.com/alextanhongpin/dbtx/testing/dbtest"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/suite"
 )
 
 var (
@@ -41,233 +42,168 @@ func TestMain(m *testing.M) {
 	m.Run()
 }
 
-func TestOutbox(t *testing.T) {
-	db := dbtest.New(t, dbtestOpts)
+func TestOutboxTestSuite(t *testing.T) {
+	suite.Run(t, new(OutboxTestSuite))
+}
 
-	ctx := t.Context()
+type OutboxTestSuite struct {
+	suite.Suite
+	ids      []uuid.UUID
+	ob       *outbox.Outbox
+	maxRetry int
+}
+
+func (suite *OutboxTestSuite) SetupTest() {
+	t := suite.T()
+
+	db := dbtest.New(t, dbtestOpts)
 	ob := outbox.New(db.DB(t))
 
-	var ids []uuid.UUID
-	err := ob.RunInTx(ctx, func(txCtx context.Context) error {
-		id, err := ob.Create(txCtx, outbox.Message{
-			AggregateID:   "a-id-1",
-			AggregateType: "a-type-1",
-			Type:          "type-1",
-			Payload:       json.RawMessage(`{"foo": "bar"}`),
-		},
-		)
-		if err != nil {
-			return err
-		}
-		ids = append(ids, id)
-		id, err = ob.Create(txCtx, outbox.Message{
-			AggregateID:   "a-id-2",
-			AggregateType: "a-type-2",
-			Type:          "type-2",
-			Payload:       json.RawMessage(`{"one": 1}`),
+	suite.ob = ob
+	suite.maxRetry = 3
+}
+
+func (suite *OutboxTestSuite) TestDequeueError() {
+	ctx := suite.T().Context()
+	n := 1
+	ob := suite.ob
+	suite.createN(n)
+	err := ob.Dequeue(ctx, func(txCtx context.Context, msg outbox.Message) (*outbox.Nack, error) {
+		suite.Contains(suite.ids, msg.ID)
+		return nil, ErrRollback
+	})
+	suite.ErrorIs(err, ErrRollback)
+	suite.count(n)
+}
+
+func (suite *OutboxTestSuite) TestDequeueSuccess() {
+	ctx := suite.T().Context()
+	ob := suite.ob
+	n := 2
+	suite.createN(n)
+
+	errs := []error{nil, nil, outbox.ErrEOQ}
+	counts := []int{1, 0, 0}
+
+	for i := range n + 1 {
+		err := ob.Dequeue(ctx, func(txCtx context.Context, msg outbox.Message) (*outbox.Nack, error) {
+			suite.True(dbtx.IsTx(txCtx))
+			suite.Contains(suite.ids, msg.ID)
+			return nil, nil
 		})
-		if err != nil {
-			return err
-		}
-		ids = append(ids, id)
-
-		return nil
-	})
-	is := assert.New(t)
-	is.NoError(err, err)
-
-	count, err := ob.Count(ctx)
-	is.NoError(err)
-	is.Equal(int64(2), count)
-
-	t.Run("process failed", func(t *testing.T) {
-		is := assert.New(t)
-		for range 3 {
-			err := ob.Poll(ctx, func(txCtx context.Context, msg *outbox.Message) error {
-				is.Contains(ids, msg.ID)
-				return ErrRollback
-			})
-			is.ErrorIs(err, ErrRollback)
-		}
-
-		count, err := ob.Count(ctx)
-		is.NoError(err)
-		is.Equal(int64(2), count)
-	})
-
-	t.Run("process success", func(t *testing.T) {
-		is := assert.New(t)
-
-		var errs = []error{nil, nil, outbox.ErrEOQ}
-		var counts = []int64{1, 0, 0}
-
-		for i := range 3 {
-			err := ob.Poll(ctx, func(txCtx context.Context, msg *outbox.Message) error {
-				is.True(dbtx.IsTx(txCtx))
-				is.Contains(ids, msg.ID)
-				t.Log("iter", i, "message", msg)
-				return err
-			})
-			is.ErrorIs(err, errs[i])
-
-			count, err := ob.Count(ctx)
-			is.NoError(err)
-			is.Equal(counts[i], count)
-		}
-	})
-}
-
-func TestOutbox_MaxRetry(t *testing.T) {
-	ctx := t.Context()
-	ob := outbox.New(dbtest.Tx(t))
-	ob.MaxRetry = 3
-
-	var ids []uuid.UUID
-	err := ob.RunInTx(ctx, func(txCtx context.Context) error {
-		id, err := ob.Create(txCtx, outbox.Message{
-			AggregateID:   "a-id-1",
-			AggregateType: "a-type-1",
-			Type:          "type-1",
-			Payload:       json.RawMessage(`{"foo": "bar"}`),
-		},
-		)
-		if err != nil {
-			return err
-		}
-		ids = append(ids, id)
-
-		return nil
-	})
-	is := assert.New(t)
-	is.NoError(err, err)
-
-	count, err := ob.Count(ctx)
-	is.NoError(err)
-	is.Equal(int64(1), count)
-
-	t.Run("max retry exceeded", func(t *testing.T) {
-		is := assert.New(t)
-		for range 3 {
-			err := ob.Poll(ctx, func(txCtx context.Context, msg *outbox.Message) error {
-				is.Contains(ids, msg.ID)
-				return ErrRollback
-			})
-			is.ErrorIs(err, ErrRollback)
-		}
-
-		count, err := ob.Count(ctx)
-		is.NoError(err)
-		is.Equal(int64(0), count)
-
-		count, err = ob.CountDLQ(ctx)
-		is.NoError(err)
-		is.Equal(int64(1), count)
-	})
-}
-
-func TestOutbox_RetryAfter(t *testing.T) {
-	db := dbtest.New(t, dbtestOpts)
-
-	ctx := t.Context()
-	ob := outbox.New(db.DB(t))
-	ob.RetryAfter = func(attempts int) time.Duration {
-		return 100 * time.Millisecond
+		suite.ErrorIs(err, errs[i])
+		suite.count(counts[i])
 	}
-
-	var ids []uuid.UUID
-	err := ob.RunInTx(ctx, func(txCtx context.Context) error {
-		id, err := ob.Create(txCtx, outbox.Message{
-			AggregateID:   "a-id-1",
-			AggregateType: "a-type-1",
-			Type:          "type-1",
-			Payload:       json.RawMessage(`{"foo": "bar"}`),
-		},
-		)
-		if err != nil {
-			return err
-		}
-		ids = append(ids, id)
-
-		return nil
-	})
-	is := assert.New(t)
-	is.NoError(err, err)
-
-	count, err := ob.Count(ctx)
-	is.NoError(err)
-	is.Equal(int64(1), count)
-
-	t.Run("visibility timeout", func(t *testing.T) {
-		is := assert.New(t)
-		err := ob.Poll(ctx, func(txCtx context.Context, msg *outbox.Message) error {
-			is.Contains(ids, msg.ID)
-			return ErrRollback
-		})
-		is.ErrorIs(err, ErrRollback)
-
-		err = ob.Poll(ctx, func(txCtx context.Context, msg *outbox.Message) error {
-			panic("won't be called")
-		})
-		is.ErrorIs(err, outbox.ErrEOQ)
-
-		time.Sleep(110 * time.Millisecond)
-
-		err = ob.Poll(ctx, func(txCtx context.Context, msg *outbox.Message) error {
-			is.Contains(ids, msg.ID)
-			return ErrRollback
-		})
-		is.ErrorIs(err, ErrRollback)
-	})
 }
 
-func TestOutbox_DLQ(t *testing.T) {
-	db := dbtest.New(t, dbtestOpts)
+func (suite *OutboxTestSuite) TestMaxRetry() {
+	ctx := suite.T().Context()
+	ob := suite.ob
+	n := 1
+	suite.createN(n)
+
+	errs := []error{nil, nil, nil, outbox.ErrEOQ}
+	counts := []int{1, 1, 0, 0}
+
+	for i := range len(errs) {
+		err := ob.Dequeue(ctx, func(txCtx context.Context, msg outbox.Message) (*outbox.Nack, error) {
+			suite.True(dbtx.IsTx(txCtx))
+			suite.Contains(suite.ids, msg.ID)
+			return &outbox.Nack{
+				Error:   "bad request",
+				Timeout: -time.Second,
+			}, nil
+		})
+		suite.ErrorIs(err, errs[i], "errors[%d]", i)
+		suite.count(counts[i], "counts[%d]", i)
+	}
+}
+
+func (suite *OutboxTestSuite) TestTimeout() {
+	ctx := suite.T().Context()
+	ob := suite.ob
+	n := 1
+	suite.createN(n)
+
+	sleep := []time.Duration{0, 0, 100 * time.Millisecond}
+	count := []int{0, 0, 0}
+	errs := []error{nil, outbox.ErrEOQ, nil}
+
+	for i := range 3 {
+		time.Sleep(sleep[i])
+		err := ob.Dequeue(ctx, func(txCtx context.Context, msg outbox.Message) (*outbox.Nack, error) {
+			suite.True(dbtx.IsTx(txCtx))
+			suite.Contains(suite.ids, msg.ID)
+			return &outbox.Nack{
+				Error:   "bad request",
+				Timeout: 100 * time.Millisecond,
+			}, nil
+		})
+		suite.ErrorIs(err, errs[i], "errs[%d]", i)
+		suite.count(count[i], "counts[%d]", i)
+	}
+}
+
+func (suite *OutboxTestSuite) TestSkip() {
+	ctx := suite.T().Context()
+	ob := suite.ob
+	n := 1
+	suite.createN(n)
+
+	errs := []error{nil, outbox.ErrEOQ}
+	count := []int{0, 0}
+
+	for i := range len(count) {
+		err := ob.Dequeue(ctx, func(txCtx context.Context, msg outbox.Message) (*outbox.Nack, error) {
+			suite.True(dbtx.IsTx(txCtx))
+			suite.Contains(suite.ids, msg.ID)
+			return &outbox.Nack{
+				Error: "bad request",
+				Skip:  true,
+			}, nil
+		})
+		suite.ErrorIs(err, errs[i], "errs[%d]", i)
+		suite.count(count[i], "count[%d]", i)
+	}
+}
+
+/* Helpers */
+
+func (suite *OutboxTestSuite) createN(n int) {
+	t := suite.T()
+	t.Helper()
 
 	ctx := t.Context()
-	ob := outbox.New(db.DB(t))
+	ob := suite.ob
 
-	var ids []uuid.UUID
 	err := ob.RunInTx(ctx, func(txCtx context.Context) error {
-		id, err := ob.Create(txCtx, outbox.Message{
-			AggregateID:   "a-id-1",
-			AggregateType: "a-type-1",
-			Type:          "type-1",
-			Payload:       json.RawMessage(`{"foo": "bar"}`),
-		},
-		)
-		if err != nil {
-			return err
+		for i := range n {
+			id, err := ob.Enqueue(txCtx, outbox.EnqueueParams{
+				AggregateID:   fmt.Sprintf("a-id-%d", i+1),
+				AggregateType: fmt.Sprintf("a-type-%d", i+1),
+				Type:          fmt.Sprintf("type-%d", i+1),
+				Payload:       json.RawMessage(`{"foo": "bar"}`),
+				MaxRetry:      int32(suite.maxRetry),
+			},
+			)
+			if err != nil {
+				return err
+			}
+			suite.ids = append(suite.ids, id)
 		}
-		ids = append(ids, id)
-
 		return nil
 	})
-	is := assert.New(t)
-	is.NoError(err, err)
 
-	count, err := ob.Count(ctx)
-	is.NoError(err)
-	is.Equal(int64(1), count)
+	suite.NoError(err)
+	suite.count(n)
+}
 
-	t.Run("dlq", func(t *testing.T) {
-		is := assert.New(t)
-		err := ob.Poll(ctx, func(txCtx context.Context, msg *outbox.Message) error {
-			is.Contains(ids, msg.ID)
-			return outbox.ErrDLQ
-		})
-		is.ErrorIs(err, outbox.ErrDLQ)
+func (suite *OutboxTestSuite) count(n int, msgAndArgs ...any) {
+	t := suite.T()
+	t.Helper()
+	ctx := t.Context()
 
-		err = ob.Poll(ctx, func(txCtx context.Context, msg *outbox.Message) error {
-			panic("won't be called")
-		})
-		is.ErrorIs(err, outbox.ErrEOQ)
-
-		count, err := ob.Count(ctx)
-		is.NoError(err)
-		is.Equal(int64(0), count)
-
-		count, err = ob.CountDLQ(ctx)
-		is.NoError(err)
-		is.Equal(int64(1), count)
-	})
+	count, err := suite.ob.Count(ctx)
+	suite.NoError(err)
+	suite.Equal(int64(n), count, msgAndArgs...)
 }

@@ -8,13 +8,15 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"uuid"
 )
 
 const enqueue = `-- name: Enqueue :one
-insert into dbtx.outbox(aggregate_id, aggregate_type, type, payload)
-     values ($1, $2, $3, $4)
+insert into dbtx.outbox(aggregate_id, aggregate_type, type, payload,
+                        max_retry, visible_at)
+     values ($1, $2, $3, $4, $5, $6)
   returning id
 `
 
@@ -23,6 +25,8 @@ type EnqueueParams struct {
 	AggregateType string
 	Type          string
 	Payload       json.RawMessage
+	MaxRetry      int32
+	VisibleAt     time.Time
 }
 
 func (q *Queries) Enqueue(ctx context.Context, arg EnqueueParams) (uuid.UUID, error) {
@@ -31,6 +35,8 @@ func (q *Queries) Enqueue(ctx context.Context, arg EnqueueParams) (uuid.UUID, er
 		arg.AggregateType,
 		arg.Type,
 		arg.Payload,
+		arg.MaxRetry,
+		arg.VisibleAt,
 	)
 	var id uuid.UUID
 	err := row.Scan(&id)

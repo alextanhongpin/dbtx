@@ -10,7 +10,10 @@ import (
 )
 
 const count = `-- name: Count :one
-select count(*) from dbtx.outbox where retry_at is null or retry_at <= now()
+select count(*)
+  from dbtx.outbox
+ where (max_retry = 0 or retry_count < max_retry)
+   and visible_at <= now()
 `
 
 func (q *Queries) Count(ctx context.Context) (int64, error) {

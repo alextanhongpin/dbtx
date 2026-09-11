@@ -5,7 +5,6 @@
 package postgres
 
 import (
-	"database/sql"
 	"encoding/json"
 	"time"
 
@@ -20,21 +19,8 @@ type DbtxOutbox struct {
 	Payload       json.RawMessage
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
-	FailureReason string
-	RetryAt       sql.NullTime
+	LastError     string
+	MaxRetry      int32
 	RetryCount    int32
-	RunAt         sql.NullTime
-}
-
-type DbtxOutboxDlq struct {
-	ID            uuid.UUID
-	AggregateID   string
-	AggregateType string
-	Type          string
-	Payload       json.RawMessage
-	CreatedAt     time.Time
-	FailureReason string
-	RetryAt       sql.NullTime
-	RetryCount    int32
-	RunAt         sql.NullTime
+	VisibleAt     time.Time
 }

@@ -1,13 +1,13 @@
+// package outbox implements outbox pattern using postgres.
+// All operations should run inside a transaction, and user has the full
+// flexibility to commit or rollback the transaction.
 package outbox
 
 import (
 	_ "embed"
+	"time"
 
 	_ "github.com/lib/pq"
-
-	"cmp"
-	"fmt"
-	"time"
 
 	"context"
 	"database/sql"
@@ -22,126 +22,111 @@ import (
 var schema string
 
 var (
-	ErrNotInTx  = errors.New("outbox: not in transaction")
+	ErrOutOfTx  = errors.New("outbox: executing sql outside of transaction boundary")
 	ErrNotFound = errors.New("outbox: not found")
 	ErrEOQ      = errors.New("outbox: end of queue")
-	ErrDLQ      = errors.New("outbox: dlq")
 )
 
-type Config struct {
-	RetryAfter func(attempts int) time.Duration
-	MaxRetry   int
-}
-
-func DefaultConfig() *Config {
-	return &Config{
-		// Constant.
-		RetryAfter: func(attempts int) time.Duration {
-			return 0
-		},
-	}
-}
+type Message = postgres.DbtxOutbox
 
 type Outbox struct {
-	*Config
 	*dbtx.DB
 }
 
 func New(db *sql.DB) *Outbox {
 	return &Outbox{
-		Config: DefaultConfig(),
-		DB:     dbtx.New(db),
+		DB: dbtx.New(db),
 	}
 }
 
-func (o *Outbox) Create(ctx context.Context, msg Message) (uuid.UUID, error) {
-	return o.db(ctx).Enqueue(ctx, postgres.EnqueueParams{
-		AggregateID:   msg.AggregateID,
-		AggregateType: msg.AggregateType,
-		Type:          msg.Type,
-		Payload:       msg.Payload,
-	})
+type EnqueueParams = postgres.EnqueueParams
+
+// Enqueue enqueues a new message to outbox.
+func (o *Outbox) Enqueue(ctx context.Context, params EnqueueParams) (uuid.UUID, error) {
+	if !o.IsTx(ctx) {
+		return uuid.Nil(), ErrOutOfTx
+	}
+
+	return o.db(ctx).Enqueue(ctx, params)
 }
 
+// Count returns the number of visible messages.
 func (o *Outbox) Count(ctx context.Context) (int64, error) {
 	return o.db(ctx).Count(ctx)
 }
 
-func (o *Outbox) CountDLQ(ctx context.Context) (int64, error) {
-	return o.db(ctx).CountDLQ(ctx)
+type Nack struct {
+	Error   string
+	Skip    bool
+	Timeout time.Duration
 }
 
-func (o *Outbox) process(ctx context.Context, msg *Message, cause error) (error, error) {
-	// Nack. requeue=false
-	if errors.Is(cause, ErrDLQ) {
-		_, err := o.db(ctx).EnqueueDLQ(ctx, msg.ID)
-		if err != nil {
-			return nil, fmt.Errorf("enqueuing dlq: %w", err)
-		}
-		return cause, nil
-	}
-	// Nack.
-	if cause != nil {
-		timeout := o.RetryAfter(msg.RetryCount)
-		if o.MaxRetry != 0 && msg.RetryCount >= o.MaxRetry {
-			_, err := o.db(ctx).EnqueueDLQ(ctx, msg.ID)
-			if err != nil {
-				return nil, fmt.Errorf("enqueuing dlq after exceeded max retry: %w", err)
-			}
-			return cause, err
-		}
-		_, err := o.db(ctx).Requeue(ctx, postgres.RequeueParams{
-			ID: msg.ID,
-			RetryAt: sql.NullTime{
-				Time:  time.Now().Add(timeout),
-				Valid: timeout > 0,
-			},
-			FailureReason: cause.Error(),
-		})
-		if err != nil {
-			return nil, fmt.Errorf("requeing: %w", err)
-		}
-		return cause, nil
-	}
-	// Ack.
-	_, err := o.db(ctx).Delete(ctx, msg.ID)
-	if err != nil {
-		return nil, err
-	}
-	return cause, nil
-}
-
-func (o *Outbox) Delete(ctx context.Context, id uuid.UUID, fn func(context.Context, *Message) error) error {
-	cause, err := o.RunInTx2(ctx, func(ctx context.Context) (error, error) {
-		res, err := o.db(ctx).Dequeue(ctx, id)
+func (o *Outbox) Handle(ctx context.Context, id uuid.UUID, fn func(context.Context, Message) (*Nack, error)) error {
+	return o.RunInTx(ctx, func(txCtx context.Context) error {
+		row, err := o.db(txCtx).Find(txCtx, id)
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("%w: %s", ErrNotFound, id)
+			return ErrNotFound
 		}
+
+		nack, err := fn(txCtx, *row)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		msg := newMessage(res)
-		err = fn(ctx, msg)
-		return o.process(ctx, msg, err)
+		if nack == nil {
+			_, err = o.db(txCtx).Delete(txCtx, row.ID)
+			return err
+		}
+
+		params := postgres.RequeueParams{
+			ID:        row.ID,
+			LastError: nack.Error,
+			VisibleAt: time.Now().Add(nack.Timeout),
+		}
+
+		// Emulate DLQ by setting max retry to -1 (no longer retryable).
+		if nack.Skip {
+			params.MaxRetry = -1
+		}
+
+		_, err = o.db(txCtx).Requeue(txCtx, params)
+		return err
 	})
-	return cmp.Or(cause, err)
 }
 
-// Poll polls the message by FIFO order.
-func (o *Outbox) Poll(ctx context.Context, fn func(context.Context, *Message) error) error {
-	cause, err := o.RunInTx2(ctx, func(ctx context.Context) (error, error) {
-		res, err := o.db(ctx).DequeueFIFO(ctx)
+func (o *Outbox) Dequeue(ctx context.Context, fn func(context.Context, Message) (*Nack, error)) error {
+	return o.RunInTx(ctx, func(txCtx context.Context) error {
+		row, err := o.db(txCtx).Peek(txCtx)
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrEOQ
+			return ErrEOQ
 		}
+
+		nack, err := fn(txCtx, *row)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		msg := newMessage(res)
-		err = fn(ctx, msg)
-		return o.process(ctx, msg, err)
+		if nack == nil {
+			_, err = o.db(txCtx).Delete(txCtx, row.ID)
+			return err
+		}
+
+		params := postgres.RequeueParams{
+			ID:        row.ID,
+			LastError: nack.Error,
+			VisibleAt: time.Now().Add(nack.Timeout),
+		}
+
+		// Emulate DLQ by setting max retry to -1 (no longer retryable).
+		if nack.Skip {
+			params.MaxRetry = -1
+		}
+
+		_, err = o.db(txCtx).Requeue(txCtx, params)
+		if err != nil {
+			return err
+		}
+
+		return nil
 	})
-	return cmp.Or(cause, err)
 }
 
 func (o *Outbox) Migrate(ctx context.Context) error {

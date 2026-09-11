@@ -4,10 +4,17 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sync"
 	"time"
+	"uuid"
+
+	"github.com/lib/pq"
 )
 
-var ErrNotTransaction = errors.New("dbtx: underlying type is not a transaction")
+var (
+	ErrOutOfTx        = errors.New("dbtx: running outside of transaction boundary")
+	ErrNotTransaction = errors.New("dbtx: underlying type is not a transaction")
+)
 
 // DBTX represents the common db operations for both *sql.DB and *sql.Tx.
 type DBTX interface {
@@ -23,7 +30,7 @@ type UnitOfWork interface {
 	DBTx(ctx context.Context) DBTX
 	Tx(ctx context.Context) DBTX
 
-	RunInTx(ctx context.Context, fn func(txCtx context.Context) error) (err error)
+	RunInTx(ctx context.Context, fn func(txCtx context.Context) error) error
 }
 
 // Ensures the struct DB implements the interface.
@@ -89,11 +96,27 @@ func (d *DB) Tx(ctx context.Context) DBTX {
 // passed in, then it will use the context tx. Transaction cannot be nested.
 // The transaction can only be committed by the parent.
 func (d *DB) RunInTx(ctx context.Context, fn func(context.Context) error) (err error) {
-	if IsNamedTx(ctx, d.id) {
+	return d.runInNamedTx(ctx, d.id, fn)
+}
+
+func (d *DB) RunInSubTx(ctx context.Context, fn func(context.Context) error) (err error) {
+	return d.runInNamedSubTx(ctx, d.id, fn)
+}
+
+func (d *DB) RunInTx2[T any](ctx context.Context, fn func(context.Context) (T, error)) (res T, err error) {
+	return d.runInNamedTx2(ctx, d.id, fn)
+}
+
+func (d *DB) RunInSubTx2[T any](ctx context.Context, fn func(context.Context) (T, error)) (res T, err error) {
+	return d.runInNamedSubTx2(ctx, d.id, fn)
+}
+
+func (d *DB) runInNamedTx(ctx context.Context, name string, fn func(context.Context) error) (err error) {
+	if IsNamedTx(ctx, name) {
 		return fn(ctx)
 	}
 
-	tx, err := d.db.BeginTx(ctx, NamedTxOptions(ctx, d.id))
+	tx, err := d.db.BeginTx(ctx, NamedTxOptions(ctx, name))
 	if err != nil {
 		return err
 	}
@@ -107,7 +130,7 @@ func (d *DB) RunInTx(ctx context.Context, fn func(context.Context) error) (err e
 		}
 	}()
 
-	ctx = WithNamedValue(ctx, d.id, &Tx{
+	ctx = WithNamedValue(ctx, name, &Tx{
 		tx:  tx,
 		fns: d.fns,
 	})
@@ -118,12 +141,12 @@ func (d *DB) RunInTx(ctx context.Context, fn func(context.Context) error) (err e
 	return tx.Commit()
 }
 
-func (d *DB) RunInTx2[T any](ctx context.Context, fn func(context.Context) (T, error)) (res T, err error) {
-	if IsNamedTx(ctx, d.id) {
+func (d *DB) runInNamedTx2[T any](ctx context.Context, name string, fn func(context.Context) (T, error)) (res T, err error) {
+	if IsNamedTx(ctx, name) {
 		return fn(ctx)
 	}
 	var zero T
-	tx, err := d.db.BeginTx(ctx, NamedTxOptions(ctx, d.id))
+	tx, err := d.db.BeginTx(ctx, NamedTxOptions(ctx, name))
 	if err != nil {
 		return zero, err
 	}
@@ -137,7 +160,7 @@ func (d *DB) RunInTx2[T any](ctx context.Context, fn func(context.Context) (T, e
 		}
 	}()
 
-	ctx = WithNamedValue(ctx, d.id, &Tx{
+	ctx = WithNamedValue(ctx, name, &Tx{
 		tx:  tx,
 		fns: d.fns,
 	})
@@ -153,8 +176,87 @@ func (d *DB) RunInTx2[T any](ctx context.Context, fn func(context.Context) (T, e
 	return res, nil
 }
 
+func (d *DB) runInNamedSubTx(ctx context.Context, name string, fn func(context.Context) error) (err error) {
+	tx, ok := NamedValue(ctx, name)
+	if !ok {
+		return ErrOutOfTx
+	}
+
+	var once sync.Once
+	id := uuid.NewV7().String()
+	rollback := func() (err error) {
+		once.Do(func() {
+			_, err = tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT "+pq.QuoteIdentifier(id))
+		})
+		return err
+	}
+	release := func() (err error) {
+		once.Do(func() {
+			_, err = tx.ExecContext(ctx, "RELEASE SAVEPOINT "+pq.QuoteIdentifier(id))
+		})
+		return err
+	}
+
+	_, err = tx.ExecContext(ctx, "SAVEPOINT "+pq.QuoteIdentifier(id))
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = rollback()
+	}()
+
+	err = fn(ctx)
+	if err != nil {
+		return err
+	}
+	return release()
+}
+
+func (d *DB) runInNamedSubTx2[T any](ctx context.Context, name string, fn func(context.Context) (T, error)) (zero T, err error) {
+	tx, ok := NamedValue(ctx, name)
+	if !ok {
+		return zero, ErrOutOfTx
+	}
+
+	var once sync.Once
+	id := uuid.NewV7().String()
+	rollback := func() (err error) {
+		once.Do(func() {
+			_, err = tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT "+pq.QuoteIdentifier(id))
+		})
+		return err
+	}
+	release := func() (err error) {
+		once.Do(func() {
+			_, err = tx.ExecContext(ctx, "RELEASE SAVEPOINT "+pq.QuoteIdentifier(id))
+		})
+		return err
+	}
+
+	_, err = tx.ExecContext(ctx, "SAVEPOINT "+pq.QuoteIdentifier(id))
+	if err != nil {
+		return zero, err
+	}
+	defer func() {
+		_ = rollback()
+	}()
+
+	res, err := fn(ctx)
+	if err != nil {
+		return zero, err
+	}
+	if err := release(); err != nil {
+		return zero, err
+	}
+	return res, nil
+}
+
 func (d *DB) Unwrap() *sql.DB {
 	return d.db
+}
+
+func (d *DB) IsTx(ctx context.Context) bool {
+	return IsNamedTx(ctx, d.id)
 }
 
 type Tx struct {

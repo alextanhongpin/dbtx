@@ -12,7 +12,7 @@ import (
 )
 
 const delete = `-- name: Delete :one
-delete from dbtx.outbox where id = $1 returning id, aggregate_id, aggregate_type, type, payload, created_at, updated_at, failure_reason, retry_at, retry_count, run_at
+delete from dbtx.outbox where id = $1 returning id, aggregate_id, aggregate_type, type, payload, created_at, updated_at, last_error, max_retry, retry_count, visible_at
 `
 
 func (q *Queries) Delete(ctx context.Context, id uuid.UUID) (*DbtxOutbox, error) {
@@ -26,10 +26,10 @@ func (q *Queries) Delete(ctx context.Context, id uuid.UUID) (*DbtxOutbox, error)
 		&i.Payload,
 		&i.CreatedAt,
 		&i.UpdatedAt,
-		&i.FailureReason,
-		&i.RetryAt,
+		&i.LastError,
+		&i.MaxRetry,
 		&i.RetryCount,
-		&i.RunAt,
+		&i.VisibleAt,
 	)
 	return &i, err
 }
