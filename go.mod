@@ -3,6 +3,7 @@ module github.com/alextanhongpin/dbtx
 go 1.27.0
 
 require (
+	github.com/alextanhongpin/core/types v0.0.39
 	github.com/alextanhongpin/dbtx/testing/dbtest v0.0.1
 	github.com/lib/pq v1.12.3
 	github.com/stretchr/testify v1.12.1
@@ -50,6 +51,7 @@ require (
 	github.com/xeipuuv/gojsonschema v1.2.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/sys v0.34.0 // indirect
+	golang.org/x/text v0.35.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
