@@ -5,9 +5,10 @@ import (
 	"database/sql"
 	"fmt"
 	"testing"
+	"time"
 	"uuid"
 
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 
 	"github.com/alextanhongpin/dbtx/postgres/dbt"
 	"github.com/alextanhongpin/dbtx/testing/dbtest"
@@ -35,11 +36,14 @@ func migrate(dsn string) error {
 			name text not null,
 			primary key (id)
 		);
+
 		create table books (
 			id uuid default uuidv7(),
 			title text not null,
 			primary key (id)
 		);
+
+		-- Test joins.
 		create table user_books (
 			id uuid default uuidv7(),
 			user_id uuid NOT NULL,
@@ -47,6 +51,21 @@ func migrate(dsn string) error {
 			foreign key (user_id) references users(id),
 			foreign key (book_id) references books(id),
 			primary key (id)
+		);
+
+		-- Test serialization of different types.
+		create table go_types (
+			id int generated always as identity primary key,
+
+			-- nullables
+			uuid uuid,
+			name text,
+			age int,
+			married bool,
+			timestamp timestamptz,
+
+			-- arrays
+			tags text[]
 		);
 	`)
 	return err
@@ -120,6 +139,38 @@ func TestDBT(t *testing.T) {
 	})
 }
 
+func TestDBT_go_types(t *testing.T) {
+	db := dbtest.DB(t)
+	ctx := t.Context()
+
+	res, err := createGoType.QueryRowContext(ctx, db, GoType{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("%#v\n", res)
+
+	params := GoType{
+		UUID:      new(uuid.Nil()),
+		Name:      new(t.Name()),
+		Age:       new(42),
+		Married:   new(true),
+		Timestamp: new(time.Now()),
+		Tags:      pq.StringArray{"foo", "bar"},
+	}
+	res, err = createGoType.QueryRowContext(ctx, db, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("%#v\n", res)
+	rows, err := listGoTypes.QueryContext(ctx, db, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		t.Logf("%#v\n", row)
+	}
+}
+
 func TestParse(t *testing.T) {
 	t.Log(dbt.Parse[CreateUserBookParams, User](`{{ cols }}`))
 	t.Log(dbt.Parse[CreateUserBookParams, User](`{{ set }}`))
@@ -170,6 +221,16 @@ type UpdateUserParams struct {
 	Name string
 }
 
+type GoType struct {
+	ID        int
+	UUID      *uuid.UUID
+	Name      *string
+	Age       *int
+	Married   *bool
+	Timestamp *time.Time
+	Tags      pq.StringArray
+}
+
 type Repository struct {
 	db *sql.DB
 }
@@ -181,6 +242,8 @@ var (
 	createBook     = dbt.Must(dbt.New[Book, *Book](`insert into books {{ vals "-" "id" }} returning {{ cols }}`))
 	createUserBook = dbt.Must(dbt.New[CreateUserBookParams, *UserBook](`insert into user_books {{ vals }} returning {{ cols }}`))
 	listUserBooks  = dbt.Must(dbt.New[any, UserBookAggregate](`select {{ cols }} from users u join books b on true`))
+	createGoType   = dbt.Must(dbt.New[GoType, GoType](`insert into go_types {{ vals "-" "id"}} returning {{ cols }}`))
+	listGoTypes    = dbt.Must(dbt.New[any, GoType](`select {{ cols }} from go_types`))
 )
 
 func init() {
