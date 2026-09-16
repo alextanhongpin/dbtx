@@ -10,7 +10,6 @@ require (
 )
 
 require (
-	cel.dev/cel-go v0.32.0 // indirect
 	dario.cat/mergo v1.0.2 // indirect
 	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
 	github.com/DATA-DOG/go-txdb v0.2.1 // indirect

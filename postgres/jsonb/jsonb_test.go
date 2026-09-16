@@ -75,11 +75,6 @@ where b.title > $1
 		t.Logf("%d) %v\n", i+1, b)
 	}
 
-	type Params struct {
-		ID    uuid.UUID `json:"id"`
-		Title string    `json:"title"`
-	}
-
 	b, err := js.QueryRowContext[Book](ctx, `
 update books
 set title = $1
