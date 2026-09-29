@@ -12,11 +12,11 @@ import (
 
 type Querier interface {
 	Count(ctx context.Context) (int64, error)
+	Create(ctx context.Context, arg CreateParams) (*DbtxOutbox, error)
 	Delete(ctx context.Context, id uuid.UUID) (*DbtxOutbox, error)
-	Enqueue(ctx context.Context, arg EnqueueParams) (uuid.UUID, error)
 	Find(ctx context.Context, id uuid.UUID) (*DbtxOutbox, error)
-	Peek(ctx context.Context) (*DbtxOutbox, error)
-	Requeue(ctx context.Context, arg RequeueParams) (*DbtxOutbox, error)
+	Load(ctx context.Context) (*DbtxOutbox, error)
+	Update(ctx context.Context, arg UpdateParams) (*DbtxOutbox, error)
 }
 
 var _ Querier = (*Queries)(nil)

@@ -32,8 +32,8 @@ func migrate(dsn string) error {
 		return err
 	}
 	defer db.Close()
-	o := outbox.New(db)
-	return o.Migrate(context.Background())
+	_, err = db.Exec(outbox.Schema)
+	return err
 }
 
 func TestMain(m *testing.M) {
@@ -58,7 +58,7 @@ func (suite *OutboxTestSuite) SetupTest() {
 	t := suite.T()
 
 	db := dbtest.New(t, dbtestOpts)
-	ob := outbox.New(db.DB(t))
+	ob := outbox.New(outbox.NewRepository(db.DB(t)))
 
 	suite.ob = ob
 	suite.maxRetry = 3
@@ -172,25 +172,18 @@ func (suite *OutboxTestSuite) createN(n int) {
 	ctx := t.Context()
 	ob := suite.ob
 
-	err := ob.RunInTx(ctx, func(txCtx context.Context) error {
-		for i := range n {
-			id, err := ob.Enqueue(txCtx, outbox.EnqueueParams{
-				AggregateID:   fmt.Sprintf("a-id-%d", i+1),
-				AggregateType: fmt.Sprintf("a-type-%d", i+1),
-				Type:          fmt.Sprintf("type-%d", i+1),
-				Payload:       json.RawMessage(`{"foo": "bar"}`),
-				MaxRetry:      int32(suite.maxRetry),
-			},
-			)
-			if err != nil {
-				return err
-			}
-			suite.ids = append(suite.ids, id)
-		}
-		return nil
-	})
-
-	suite.NoError(err)
+	for i := range n {
+		id, err := ob.Enqueue(ctx, outbox.EnqueueParams{
+			AggregateID:   fmt.Sprintf("a-id-%d", i+1),
+			AggregateType: fmt.Sprintf("a-type-%d", i+1),
+			Type:          fmt.Sprintf("type-%d", i+1),
+			Payload:       json.RawMessage(`{"foo": "bar"}`),
+			MaxRetry:      int32(suite.maxRetry),
+		},
+		)
+		suite.NoError(err)
+		suite.ids = append(suite.ids, id)
+	}
 	suite.count(n)
 }
 

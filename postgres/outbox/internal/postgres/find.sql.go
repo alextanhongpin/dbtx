@@ -12,15 +12,7 @@ import (
 )
 
 const find = `-- name: Find :one
-with locked as (
-  select id as locked_id
-    from dbtx.outbox o
-   where o.id = $1 for update SKIP LOCKED
-)
-   update dbtx.outbox o
-      set retry_count = retry_count + 1
-    where o.id = (select locked_id from locked)
-returning id, aggregate_id, aggregate_type, type, payload, created_at, updated_at, last_error, max_retry, retry_count, visible_at
+select id, aggregate_id, aggregate_type, type, payload, created_at, updated_at, last_error, max_retry, retry_count, visible_at from dbtx.outbox o where o.id = $1 for update SKIP LOCKED
 `
 
 func (q *Queries) Find(ctx context.Context, id uuid.UUID) (*DbtxOutbox, error) {
