@@ -39,9 +39,9 @@ type Repository = internal.Repository
 var NewRepository = internal.NewRepository
 
 type repository interface {
-	RunInTx(ctx context.Context, fn func(txCtx context.Context) error) error
 	Delete(ctx context.Context, key string) (*IdempotencyKey, error)
 	LoadOrStore(ctx context.Context, key string) (*IdempotencyKey, bool, error)
+	RunInTx(ctx context.Context, fn func(txCtx context.Context) error) error
 	Update(ctx context.Context, key string, req, res jsontext.Value) error
 }
 
