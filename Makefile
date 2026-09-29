@@ -10,5 +10,5 @@ sqlc:
 	@find . -name 'sqlc.yaml' -execdir sqlc generate  \;
 
 install:
-	go get -tool github.com/dimitri/sqlfmt/cmd/sqlfmt
-	go get -tool github.com/sqlc-dev/sqlc/cmd/sqlc
+	go get -u -tool github.com/dimitri/sqlfmt/cmd/sqlfmt
+	go get -u -tool github.com/sqlc-dev/sqlc/cmd/sqlc
