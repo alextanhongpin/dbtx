@@ -6,143 +6,120 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
-	"errors"
+	"time"
 
 	"github.com/alextanhongpin/dbtx/postgres/idempotent/internal"
-	"github.com/zeebo/xxh3"
 )
 
 //go:embed internal/schema.sql
 var Schema string
 
-var ErrRequestConflict = errors.New("request conflict")
+var (
+	ErrNotFound        = internal.ErrNotFound
+	ErrRequestConflict = internal.ErrRequestConflict
+)
 
-type fun[K, V any] = func(ctx context.Context, req K) (V, error)
-
-type idempotent[K, V any] interface {
+// Handler executes a request at most once per idempotency key.
+type Handler[K, V any] interface {
 	LoadOrCreate(ctx context.Context, key string, req K) (V, bool, error)
 }
 
-type cached[T any] struct {
-	Hit bool
-	Val T
-}
-
 type Idempotent struct {
-	repo repository
+	repo Repository
 }
 
 type IdempotencyKey = internal.IdempotencyKey
 
-type Repository = internal.Repository
+// PostgresRepository is the PostgreSQL implementation of Repository.
+type PostgresRepository = internal.Repository
 
 var NewRepository = internal.NewRepository
 
-type repository interface {
-	Delete(ctx context.Context, key string) (*IdempotencyKey, error)
-	LoadOrStore(ctx context.Context, key string) (*IdempotencyKey, bool, error)
+var _ Repository = (*PostgresRepository)(nil)
+
+// Repository stores idempotency keys. Keys are unique per scope.
+type Repository interface {
+	Delete(ctx context.Context, scope, key string) (*IdempotencyKey, error)
+	DeleteBefore(ctx context.Context, t time.Time) (int64, error)
+	LoadOrStore(ctx context.Context, scope, key string, req jsontext.Value) (*IdempotencyKey, bool, error)
 	RunInTx(ctx context.Context, fn func(txCtx context.Context) error) error
-	Update(ctx context.Context, key string, req, res jsontext.Value) error
+	Update(ctx context.Context, scope, key string, res jsontext.Value) error
 }
 
-func New(repo repository) *Idempotent {
+func New(repo Repository) *Idempotent {
 	return &Idempotent{
 		repo: repo,
 	}
 }
 
-func (i *Idempotent) Delete(ctx context.Context, key string) (*IdempotencyKey, error) {
-	return i.repo.Delete(ctx, key)
+// Delete removes the idempotency key in the given scope. It returns
+// ErrNotFound if the key does not exist.
+func (i *Idempotent) Delete(ctx context.Context, scope, key string) (*IdempotencyKey, error) {
+	return i.repo.Delete(ctx, scope, key)
 }
 
-type idempotentHandler[K, V any] func(ctx context.Context, key string, req K) (V, bool, error)
+// DeleteBefore removes all idempotency keys created before t, and returns the
+// number of keys removed. Call it periodically to keep the table small.
+func (i *Idempotent) DeleteBefore(ctx context.Context, t time.Time) (int64, error) {
+	return i.repo.DeleteBefore(ctx, t)
+}
 
-func (h idempotentHandler[K, V]) LoadOrCreate(ctx context.Context, key string, req K) (V, bool, error) {
+type handlerFunc[K, V any] func(ctx context.Context, key string, req K) (V, bool, error)
+
+func (h handlerFunc[K, V]) LoadOrCreate(ctx context.Context, key string, req K) (V, bool, error) {
 	return h(ctx, key, req)
 }
 
-func (i *Idempotent) Func[K, V any](fn fun[K, V]) idempotent[K, V] {
-	return idempotentHandler[K, V](func(ctx context.Context, key string, req K) (V, bool, error) {
-		var c *cached[V]
-		err := i.repo.RunInTx(ctx, func(ctx context.Context) error {
-			row, loaded, err := i.repo.LoadOrStore(ctx, key)
+// Func wraps fn so that it is executed at most once per key. Keys are unique
+// per scope, so handlers with different scopes can use the same key without
+// conflicting. It panics if scope is empty.
+//
+// fn runs inside the same transaction that holds the idempotency key, and the
+// ctx passed to fn carries that transaction, so writes made through it commit
+// or roll back together with the key. Concurrent calls with the same key block
+// until the first call completes.
+//
+// If fn returns an error, the transaction is rolled back and nothing is
+// stored, so the next call with the same key executes fn again.
+func (i *Idempotent) Func[K, V any](scope string, fn func(ctx context.Context, req K) (V, error)) Handler[K, V] {
+	if scope == "" {
+		panic("idempotent: scope must not be empty")
+	}
+
+	return handlerFunc[K, V](func(ctx context.Context, key string, req K) (res V, loaded bool, err error) {
+		reqb, err := json.Marshal(req)
+		if err != nil {
+			var zero V
+			return zero, false, err
+		}
+
+		err = i.repo.RunInTx(ctx, func(ctx context.Context) error {
+			row, ok, err := i.repo.LoadOrStore(ctx, scope, key, reqb)
+			if err != nil {
+				return err
+			}
+			if ok {
+				loaded = true
+				return json.Unmarshal(row.Response, &res)
+			}
+
+			res, err = fn(ctx, req)
 			if err != nil {
 				return err
 			}
 
-			reqb, err := json.Marshal(req)
-			if err != nil {
-				return err
-			}
-
-			if loaded {
-				want, err := hashBytes(row.Request)
-				if err != nil {
-					return err
-				}
-				got, err := hashBytes(reqb)
-				if err != nil {
-					return err
-				}
-				if want != got {
-					return ErrRequestConflict
-				}
-				var v V
-				err = json.Unmarshal(row.Response, &v)
-				if err != nil {
-					return err
-				}
-
-				c = &cached[V]{
-					Val: v,
-					Hit: true,
-				}
-				return nil
-			}
-			res, err := fn(ctx, req)
-			if err != nil {
-				return err
-			}
 			resb, err := json.Marshal(res)
 			if err != nil {
 				return err
 			}
 
-			err = i.repo.Update(ctx, key, reqb, resb)
-			if err != nil {
-				return err
-			}
-			c = &cached[V]{
-				Val: res,
-			}
-			return nil
+			return i.repo.Update(ctx, scope, key, resb)
 		})
-		var zero V
 		if err != nil {
+			var zero V
 			return zero, false, err
 		}
 
-		return c.Val, c.Hit, nil
+		return res, loaded, nil
 	})
-}
-
-func hashBytes(b []byte) (uint64, error) {
-	b, err := orderedBytes(b)
-	if err != nil {
-		return 0, err
-	}
-
-	return xxh3.Hash(b), nil
-}
-
-func orderedBytes(b []byte) ([]byte, error) {
-	// Unmarshal to map[string]any.
-	var a any
-	err := json.Unmarshal(b, &a)
-	if err != nil {
-		return nil, err
-	}
-
-	// Marshal with deterministic ordering for map.
-	return json.Marshal(a, json.Deterministic(true))
 }

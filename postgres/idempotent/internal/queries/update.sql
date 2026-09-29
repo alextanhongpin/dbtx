@@ -1,2 +1,2 @@
 -- name: Update :exec
-update dbtx.idempotency_keys set request = $1, response = $2 where key = $3;
+update dbtx.idempotency_keys set response = $1 where scope = $2 and key = $3;

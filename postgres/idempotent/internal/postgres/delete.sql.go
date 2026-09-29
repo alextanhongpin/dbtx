@@ -10,13 +10,19 @@ import (
 )
 
 const delete = `-- name: Delete :one
-delete from dbtx.idempotency_keys where key = $1 returning key, request, response, created_at
+delete from dbtx.idempotency_keys where scope = $1 and key = $2 returning scope, key, request, response, created_at
 `
 
-func (q *Queries) Delete(ctx context.Context, key string) (*DbtxIdempotencyKey, error) {
-	row := q.db.QueryRowContext(ctx, delete, key)
+type DeleteParams struct {
+	Scope string
+	Key   string
+}
+
+func (q *Queries) Delete(ctx context.Context, arg DeleteParams) (*DbtxIdempotencyKey, error) {
+	row := q.db.QueryRowContext(ctx, delete, arg.Scope, arg.Key)
 	var i DbtxIdempotencyKey
 	err := row.Scan(
+		&i.Scope,
 		&i.Key,
 		&i.Request,
 		&i.Response,

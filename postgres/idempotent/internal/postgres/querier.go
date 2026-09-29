@@ -6,10 +6,12 @@ package postgres
 
 import (
 	"context"
+	"time"
 )
 
 type Querier interface {
-	Delete(ctx context.Context, key string) (*DbtxIdempotencyKey, error)
+	Delete(ctx context.Context, arg DeleteParams) (*DbtxIdempotencyKey, error)
+	DeleteBefore(ctx context.Context, createdAt time.Time) (int64, error)
 	Update(ctx context.Context, arg UpdateParams) error
 }
 

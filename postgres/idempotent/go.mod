@@ -7,7 +7,6 @@ require (
 	github.com/alextanhongpin/dbtx/testing/dbtest v0.0.1
 	github.com/lib/pq v1.12.3
 	github.com/stretchr/testify v1.12.1
-	github.com/zeebo/xxh3 v1.1.0
 )
 
 require (
@@ -34,7 +33,6 @@ require (
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/klauspost/cpuid/v2 v2.2.10 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
 	github.com/moby/sys/user v0.4.0 // indirect
 	github.com/moby/term v0.5.2 // indirect

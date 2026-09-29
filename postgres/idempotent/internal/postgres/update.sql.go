@@ -11,16 +11,16 @@ import (
 )
 
 const update = `-- name: Update :exec
-update dbtx.idempotency_keys set request = $1, response = $2 where key = $3
+update dbtx.idempotency_keys set response = $1 where scope = $2 and key = $3
 `
 
 type UpdateParams struct {
-	Request  json.RawMessage
 	Response json.RawMessage
+	Scope    string
 	Key      string
 }
 
 func (q *Queries) Update(ctx context.Context, arg UpdateParams) error {
-	_, err := q.db.ExecContext(ctx, update, arg.Request, arg.Response, arg.Key)
+	_, err := q.db.ExecContext(ctx, update, arg.Response, arg.Scope, arg.Key)
 	return err
 }

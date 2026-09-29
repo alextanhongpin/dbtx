@@ -10,6 +10,7 @@ import (
 )
 
 type DbtxIdempotencyKey struct {
+	Scope     string
 	Key       string
 	Request   json.RawMessage
 	Response  json.RawMessage
