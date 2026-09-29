@@ -4,12 +4,11 @@ import (
 	_ "embed"
 
 	"context"
-	"database/sql"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 
-	"github.com/alextanhongpin/dbtx"
-	"github.com/alextanhongpin/dbtx/postgres/idempotent/internal/postgres"
+	"github.com/alextanhongpin/dbtx/postgres/idempotent/internal"
 	"github.com/zeebo/xxh3"
 )
 
@@ -30,26 +29,30 @@ type cached[T any] struct {
 }
 
 type Idempotent struct {
-	db *dbtx.DB
+	repo repository
 }
 
-func New(db *sql.DB) *Idempotent {
+type IdempotencyKey = internal.IdempotencyKey
+
+type Repository = internal.Repository
+
+var NewRepository = internal.NewRepository
+
+type repository interface {
+	RunInTx(ctx context.Context, fn func(txCtx context.Context) error) error
+	Delete(ctx context.Context, key string) (*IdempotencyKey, error)
+	LoadOrStore(ctx context.Context, key string) (*IdempotencyKey, bool, error)
+	Update(ctx context.Context, key string, req, res jsontext.Value) error
+}
+
+func New(repo repository) *Idempotent {
 	return &Idempotent{
-		db: dbtx.New(db),
+		repo: repo,
 	}
 }
 
-func (i *Idempotent) Delete(ctx context.Context, key string) (bool, error) {
-	q := postgres.New(i.db.DBTx(ctx))
-	_, err := q.Delete(ctx, key)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-
-	return true, nil
+func (i *Idempotent) Delete(ctx context.Context, key string) (*IdempotencyKey, error) {
+	return i.repo.Delete(ctx, key)
 }
 
 type idempotentHandler[K, V any] func(ctx context.Context, key string, req K) (V, bool, error)
@@ -60,61 +63,59 @@ func (h idempotentHandler[K, V]) LoadOrCreate(ctx context.Context, key string, r
 
 func (i *Idempotent) Func[K, V any](fn fun[K, V]) idempotent[K, V] {
 	return idempotentHandler[K, V](func(ctx context.Context, key string, req K) (V, bool, error) {
-		c, err := i.db.RunInTx2(ctx, func(ctx context.Context) (*cached[V], error) {
-			row, loaded, err := i.loadOrStore(ctx, key)
+		var c *cached[V]
+		err := i.repo.RunInTx(ctx, func(ctx context.Context) error {
+			row, loaded, err := i.repo.LoadOrStore(ctx, key)
 			if err != nil {
-				return nil, err
+				return err
 			}
 
 			reqb, err := json.Marshal(req)
 			if err != nil {
-				return nil, err
+				return err
 			}
 
 			if loaded {
 				want, err := hashBytes(row.Request)
 				if err != nil {
-					return nil, err
+					return err
 				}
 				got, err := hashBytes(reqb)
 				if err != nil {
-					return nil, err
+					return err
 				}
 				if want != got {
-					return nil, ErrRequestConflict
+					return ErrRequestConflict
 				}
 				var v V
 				err = json.Unmarshal(row.Response, &v)
 				if err != nil {
-					return nil, err
+					return err
 				}
 
-				return &cached[V]{
+				c = &cached[V]{
 					Val: v,
 					Hit: true,
-				}, nil
+				}
+				return nil
 			}
 			res, err := fn(ctx, req)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			resb, err := json.Marshal(res)
 			if err != nil {
-				return nil, err
+				return err
 			}
 
-			q := postgres.New(i.db.DBTx(ctx))
-			err = q.Update(ctx, postgres.UpdateParams{
-				Request:  reqb,
-				Response: resb,
-				Key:      key,
-			})
+			err = i.repo.Update(ctx, key, reqb, resb)
 			if err != nil {
-				return nil, err
+				return err
 			}
-			return &cached[V]{
+			c = &cached[V]{
 				Val: res,
-			}, nil
+			}
+			return nil
 		})
 		var zero V
 		if err != nil {
@@ -123,21 +124,6 @@ func (i *Idempotent) Func[K, V any](fn fun[K, V]) idempotent[K, V] {
 
 		return c.Val, c.Hit, nil
 	})
-}
-
-const insertStmt = `insert into dbtx.idempotency_keys(key, request, response)
-values ($1, '{}', '{}')
-on conflict (key) do select
-returning key, request, response, created_at, (xmin::text = txid_current()::text) AS is_new`
-
-func (i *Idempotent) loadOrStore(ctx context.Context, key string) (*postgres.DbtxIdempotencyKey, bool, error) {
-	var row postgres.DbtxIdempotencyKey
-	var stored bool
-	err := i.db.DBTx(ctx).QueryRowContext(ctx, insertStmt, key).Scan(&row.Key, &row.Request, &row.Response, &row.CreatedAt, &stored)
-	if err != nil {
-		return nil, false, err
-	}
-	return &row, !stored, nil
 }
 
 func hashBytes(b []byte) (uint64, error) {

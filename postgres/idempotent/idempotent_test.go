@@ -1,14 +1,13 @@
 package idempotent_test
 
 import (
-	"sync"
-	"sync/atomic"
-
 	_ "github.com/lib/pq"
 
 	"context"
 	"database/sql"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/alextanhongpin/dbtx/postgres/idempotent"
@@ -104,7 +103,7 @@ type Response struct {
 func sut(t *testing.T, key string, req Request) (*Response, bool, error) {
 	t.Helper()
 	ctx := t.Context()
-	idb := idempotent.New(dbtest.DB(t))
+	idb := idempotent.New(idempotent.NewRepository(dbtest.DB(t)))
 	idp := idb.Func(func(ctx context.Context, req Request) (*Response, error) {
 		return &Response{
 			Msg: fmt.Sprintf("hi, %s", req.Name),
