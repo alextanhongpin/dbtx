@@ -7,14 +7,16 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
-	"time"
 )
 
 const create = `-- name: Create :one
 insert into dbtx.outbox(aggregate_id, aggregate_type, type, payload,
                         max_retry, visible_at)
-     values ($1, $2, $3, $4, $5, $6)
+     values ($1, $2, $3,
+             $4, $5,
+             coalesce($6::timestamptz, clock_timestamp()))
   returning id, aggregate_id, aggregate_type, type, payload, created_at, updated_at, last_error, max_retry, retry_count, visible_at
 `
 
@@ -24,7 +26,7 @@ type CreateParams struct {
 	Type          string
 	Payload       json.RawMessage
 	MaxRetry      int32
-	VisibleAt     time.Time
+	VisibleAt     sql.NullTime
 }
 
 func (q *Queries) Create(ctx context.Context, arg CreateParams) (*DbtxOutbox, error) {

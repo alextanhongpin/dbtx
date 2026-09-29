@@ -11,6 +11,17 @@ import (
 	"uuid"
 )
 
+const exists = `-- name: Exists :one
+select exists(select 1 from dbtx.outbox o where o.id = $1)
+`
+
+func (q *Queries) Exists(ctx context.Context, id uuid.UUID) (bool, error) {
+	row := q.db.QueryRowContext(ctx, exists, id)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const find = `-- name: Find :one
 select id, aggregate_id, aggregate_type, type, payload, created_at, updated_at, last_error, max_retry, retry_count, visible_at from dbtx.outbox o where o.id = $1 for update SKIP LOCKED
 `

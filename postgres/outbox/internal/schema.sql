@@ -17,4 +17,14 @@ create table if not exists dbtx.outbox
   primary key (id)
 );
 
-create index if not exists dbtx_outbox_visible_at on dbtx.outbox(visible_at);
+-- Superseded by dbtx_outbox_pending.
+drop index if exists dbtx.dbtx_outbox_visible_at;
+
+-- Only retryable messages are indexed, so dead messages do not slow down Load.
+create index if not exists dbtx_outbox_pending
+    on dbtx.outbox(visible_at, id)
+ where max_retry = 0 or retry_count < max_retry;
+
+create index if not exists dbtx_outbox_dead
+    on dbtx.outbox(updated_at)
+ where not (max_retry = 0 or retry_count < max_retry);

@@ -2,43 +2,24 @@
 
 A PostgreSQL-backed outbox implementation for reliable, transactional event publishing built on [dbtx](https://github.com/alextanhongpin/dbtx).
 
-The outbox pattern lets you write business data and domain events in the same database transaction. Events are stored in `dbtx.outbox` and later dispatched by workers. The package handles visibility, retries, and a dead-letter emulation without external dependencies.
+The outbox pattern lets you write business data and domain events in the same database transaction. Events are stored in `dbtx.outbox` and later dispatched by workers. The package handles visibility, retries with backoff, and a dead-letter emulation without external dependencies.
 
 ## Use cases
 
 * **Transactional outbox** – enqueue domain events inside the same transaction as your aggregate writes. If the transaction rolls back, no event is emitted.
-* **At-least-once delivery** – workers `Dequeue` visible messages, process them, and acknowledge. Failures are automatically requeued with a backoff.
-* **Retry with limits** – configure `max_retry` per message. Once the retry count is exceeded the message is no longer returned by `Count`/`Dequeue`.
+* **At-least-once delivery** – workers `Dequeue` visible messages, process them, and acknowledge by returning `nil`. Failures are requeued with a backoff.
+* **Retry with limits** – configure `MaxRetry` per message. Once the retry count reaches it, the message is dead and no longer returned by `Count`/`Dequeue`.
 * **Delayed visibility** – set `VisibleAt` to schedule future processing.
-* **Dead-letter queue emulation** – return `outbox.Nack(err)` with `Skip` set to `true` to stop further retries by setting `max_retry = -1`.
+* **Dead-letter queue emulation** – return `outbox.Nack(err)` with `Skip` set to `true` to stop further retries. Inspect, requeue and purge dead messages with `DeadLetters`, `Requeue` and `PurgeDead`.
 * **Idempotent processing** – use `AggregateID` / `AggregateType` to correlate events and avoid duplicates in your consumer.
 
 ## Schema
 
-```sql
-create schema if not exists dbtx;
+The schema lives in [`internal/schema.sql`](internal/schema.sql) and is exported as `outbox.Schema`.
 
-create table if not exists dbtx.outbox
- (
-  id             uuid not null default uuidv7(),
-  aggregate_id   text not null check (aggregate_id <> ''),
-  aggregate_type text not null check (aggregate_type <> ''),
-  type           text not null check (type <> ''),
-  payload        jsonb not null default '{}',
-  created_at     timestamptz not null default now(),
-  updated_at     timestamptz not null default now(),
-  last_error     text not null default '',
-  max_retry      int not null default 0,
-  retry_count    int not null default 0 check (retry_count >= 0),
-  visible_at     timestamptz not null default now(),
+`max_retry = 0` means unlimited retries. A message is visible only when `visible_at <= now()` and `retry_count < max_retry` (or unlimited). A message with `max_retry = -1`, or with `retry_count >= max_retry > 0`, is dead.
 
-  primary key (id)
-);
-
-create index if not exists dbtx_outbox_visible_at on dbtx.outbox(visible_at);
-```
-
-`max_retry = 0` means unlimited retries. A message is visible only when `visible_at <= now()` and `retry_count < max_retry` (or unlimited).
+The package expects PostgreSQL with `uuidv7()` support (18+).
 
 ## Install
 
@@ -48,16 +29,11 @@ go get github.com/alextanhongpin/dbtx/postgres/outbox
 
 ## Migration
 
-The schema is embedded in the package. Run it once at startup:
+The schema is idempotent. Run it once at startup, or copy it into your migrations:
 
 ```go
-import "github.com/alextanhongpin/dbtx/postgres/outbox"
-
-o := outbox.New(db)
-err := o.Migrate(ctx)
+_, err := db.ExecContext(ctx, outbox.Schema)
 ```
-
-`Migrate` executes the embedded `internal/schema.sql`.
 
 ## Quick start
 
@@ -65,15 +41,17 @@ err := o.Migrate(ctx)
 import (
     "context"
     "encoding/json"
-    "time"
+
+    "github.com/alextanhongpin/dbtx"
     "github.com/alextanhongpin/dbtx/postgres/outbox"
 )
 
-o := outbox.New(db)
+repo := outbox.NewRepository(db) // db is a *sql.DB
+o := outbox.New(repo)
 
-// Enqueue inside the same transaction as your business write
-err := o.RunInTx(ctx, func(ctx context.Context) error {
-    // ... write aggregates ...
+// Enqueue inside the same transaction as your business write.
+err := repo.RunInTx(ctx, func(ctx context.Context) error {
+    // ... write aggregates using the tx in ctx, e.g. via dbtx.New(db).DBTx(ctx) ...
 
     _, err := o.Enqueue(ctx, outbox.EnqueueParams{
         AggregateID:   "order-123",
@@ -81,11 +59,13 @@ err := o.RunInTx(ctx, func(ctx context.Context) error {
         Type:          "OrderCreated",
         Payload:       json.RawMessage(`{"id":"order-123"}`),
         MaxRetry:      5,
-        // VisibleAt: time.Now().Add(1 * time.Minute), // optional delay
+        // VisibleAt: new(time.Now().Add(time.Minute)), // optional delay
     })
     return err
 })
 ```
+
+Enqueue joins the transaction in `ctx` when it was started by a `dbtx.DB` with the same ID as the repository. Both default to `dbtx.ID`, so any `dbtx.New(db).RunInTx` works. If you changed the ID with `SetID`, set the same ID on the repository. Called without a transaction, Enqueue commits the message on its own, which loses the outbox guarantee.
 
 ### Dequeue worker
 
@@ -93,11 +73,15 @@ err := o.RunInTx(ctx, func(ctx context.Context) error {
 go func() {
     for {
         err := o.Dequeue(ctx, func(ctx context.Context, msg outbox.Message) error {
-            // ctx is a dbtx transaction context
+            // ctx carries the transaction holding the message lock.
             return publish(msg)
         })
-        if err == outbox.ErrEOQ {
+        if errors.Is(err, outbox.ErrEOQ) {
             time.Sleep(100 * time.Millisecond)
+            continue
+        }
+        if nack, ok := errors.AsType[*outbox.NackError](err); ok {
+            log.Printf("handler failed, will retry: %v", nack)
             continue
         }
         if err != nil {
@@ -107,43 +91,46 @@ go func() {
 }()
 ```
 
+The handler runs inside a transaction that holds a row lock on the message for the whole call, so several workers can run concurrently (`FOR UPDATE SKIP LOCKED`). Keep handlers short: a slow broker means a long-running transaction and a held connection.
+
 ### Handling a specific message
 
 ```go
 err := o.Handle(ctx, id, func(ctx context.Context, msg outbox.Message) error {
-    if err := process(msg); err != nil {
-        nack := outbox.Nack(err)
-        nack.Timeout = 2 * time.Second // backoff
-        return nack
-    }
-    return nil // delete on success
+    return process(msg)
 })
 ```
 
-### Nack semantics
+`Handle` ignores visibility and retry limits, so it can replay dead messages. It returns `ErrNotFound` if the message does not exist, and `ErrLocked` if another worker is processing it.
+
+### Failure semantics
 
 Return `nil` to acknowledge and delete the message.
 
-Return an error wrapped with `outbox.Nack(err)` to requeue:
+Return any error to fail it. Writes the handler made through `ctx` are rolled back (it runs in a savepoint), while the failure is still recorded: `retry_count + 1`, `last_error`, and `visible_at = now() + backoff`. The time is computed by the database, so app and database clock skew does not matter.
+
+By default the backoff doubles on each retry from 1s up to 1h, with jitter. Override it with `o.Backoff`. For per-message control, wrap the error with `outbox.Nack`:
 
 ```go
 nack := outbox.Nack(err)
-nack.Skip = true          // set max_retry = -1, emulate DLQ
-nack.Timeout = 2 * time.Second // time until next visibility
+nack.Timeout = 2 * time.Second // time until next visibility, instead of o.Backoff
+nack.Skip = true               // stop retrying: set max_retry = -1, emulating a DLQ
 return nack
 ```
 
-`NackError` implements `error` and carries the original cause:
+Handler errors are returned from `Dequeue`/`Handle` as a `*NackError`, and `errors.Is` still matches the cause. Any other error means the message was left untouched.
+
+A panic in the handler rolls back the transaction and propagates, without recording a retry.
+
+### Dead letters
 
 ```go
-type NackError struct {
-    Cause   error
-    Skip    bool
-    Timeout time.Duration
-}
+dead, err := o.DeadLetters(ctx, 100)                  // oldest first
+msg, err := o.Requeue(ctx, id, 5)                     // reset retries, visible now
+n, err := o.PurgeDead(ctx, time.Now().Add(-7*24*time.Hour)) // delete old dead messages
 ```
 
-The message is updated with `retry_count + 1`, `last_error`, and `visible_at = now() + Timeout`. If `Skip` is true, `max_retry` is set to `-1` so the message will never become visible again.
+Dead messages stay in the table until purged. Call `PurgeDead` periodically.
 
 ### Inspection
 
@@ -153,41 +140,22 @@ n, err := o.Count(ctx) // visible, retryable messages
 
 ## API highlights
 
-* `New(db *sql.DB) *Outbox` – create a wrapper around a `*sql.DB`.
-* `Migrate(ctx)` – create `dbtx.outbox`.
-* `Enqueue(ctx, EnqueueParams) (uuid.UUID, error)` – insert a new event. Must run in a transaction.
-* `Dequeue(ctx, fn func(context.Context, Message) error)` – atomically peek the next visible message with `FOR UPDATE SKIP LOCKED`, increment `retry_count`, and hand it to `fn`. If `fn` returns an error wrapped with `Nack`, the row is requeued.
+* `NewRepository(db *sql.DB) *PostgresRepository` – the PostgreSQL `Repository`. It embeds `*dbtx.DB`, so it has `RunInTx`.
+* `New(repo Repository) *Outbox` – create the outbox.
+* `Enqueue(ctx, EnqueueParams) (uuid.UUID, error)` – insert a new message.
+* `Dequeue(ctx, fn)` – lock the next visible message and hand it to `fn`.
 * `Handle(ctx, id, fn)` – same as `Dequeue` but for a known message id.
 * `Count(ctx) (int64, error)` – number of visible, retryable messages.
-
-Messages are returned as `outbox.Message`, which mirrors `postgres.DbtxOutbox`:
-
-```go
-type Message struct {
-    ID            uuid.UUID
-    AggregateID   string
-    AggregateType string
-    Type          string
-    Payload       json.RawMessage
-    CreatedAt     time.Time
-    UpdatedAt     time.Time
-    LastError     string
-    MaxRetry      int32
-    RetryCount    int32
-    VisibleAt     time.Time
-}
-```
+* `DeadLetters`, `Requeue`, `PurgeDead` – manage dead messages.
 
 Errors:
 
-* `outbox.ErrNotFound` – message not found in `Handle`.
 * `outbox.ErrEOQ` – end of queue, no visible messages in `Dequeue`.
-
-All methods use `dbtx` transaction helpers, so they can be composed with `RunInTx`/`RunInTx2`. The `Peek` and `Find` queries use `FOR UPDATE SKIP LOCKED` for safe concurrent workers.
+* `outbox.ErrNotFound` – message not found in `Handle` or `Requeue`.
+* `outbox.ErrLocked` – message is being processed by another worker in `Handle`.
 
 ## Notes
 
-* Keep processing idempotent – the same message may be redelivered if a worker crashes after processing but before commit.
-* `max_retry = 0` means infinite retries; set a positive value to bound attempts.
-* Delayed publishing is achieved by setting `VisibleAt` in `EnqueueParams`.
-* The package expects PostgreSQL with `uuidv7()` support.
+* Keep processing idempotent – the same message may be redelivered if a worker crashes after publishing but before commit.
+* `MaxRetry = 0` means infinite retries; set a positive value to bound attempts.
+* Messages are dequeued in `visible_at` order, so retried messages go behind fresh ones.

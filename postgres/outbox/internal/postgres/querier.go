@@ -6,6 +6,7 @@ package postgres
 
 import (
 	"context"
+	"time"
 
 	"uuid"
 )
@@ -14,9 +15,13 @@ type Querier interface {
 	Count(ctx context.Context) (int64, error)
 	Create(ctx context.Context, arg CreateParams) (*DbtxOutbox, error)
 	Delete(ctx context.Context, id uuid.UUID) (*DbtxOutbox, error)
+	Exists(ctx context.Context, id uuid.UUID) (bool, error)
 	Find(ctx context.Context, id uuid.UUID) (*DbtxOutbox, error)
+	ListDead(ctx context.Context, maxRows int32) ([]*DbtxOutbox, error)
 	Load(ctx context.Context) (*DbtxOutbox, error)
-	Update(ctx context.Context, arg UpdateParams) (*DbtxOutbox, error)
+	Nack(ctx context.Context, arg NackParams) (*DbtxOutbox, error)
+	PurgeDead(ctx context.Context, before time.Time) (int64, error)
+	Requeue(ctx context.Context, arg RequeueParams) (*DbtxOutbox, error)
 }
 
 var _ Querier = (*Queries)(nil)
