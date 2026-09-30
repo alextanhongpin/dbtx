@@ -9,48 +9,39 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+
+	"uuid"
 )
 
 const create = `-- name: Create :one
-insert into dbtx.outbox(aggregate_id, aggregate_type, type, payload,
-                        max_retry, visible_at)
-     values ($1, $2, $3,
-             $4, $5,
-             coalesce($6::timestamptz, clock_timestamp()))
-  returning id, aggregate_id, aggregate_type, type, payload, created_at, updated_at, last_error, max_retry, retry_count, visible_at
+insert into dbtx.outbox(aggregate_id, aggregate_type, event_type, payload,
+                        max_attempts, available_at)
+     values ($1, $2,
+             $3, $4,
+             coalesce($5::int, 10),
+             coalesce($6::timestamptz, now()))
+  returning id
 `
 
 type CreateParams struct {
 	AggregateID   string
 	AggregateType string
-	Type          string
+	EventType     string
 	Payload       json.RawMessage
-	MaxRetry      int32
-	VisibleAt     sql.NullTime
+	MaxAttempts   sql.NullInt32
+	AvailableAt   sql.NullTime
 }
 
-func (q *Queries) Create(ctx context.Context, arg CreateParams) (*DbtxOutbox, error) {
+func (q *Queries) Create(ctx context.Context, arg CreateParams) (uuid.UUID, error) {
 	row := q.db.QueryRowContext(ctx, create,
 		arg.AggregateID,
 		arg.AggregateType,
-		arg.Type,
+		arg.EventType,
 		arg.Payload,
-		arg.MaxRetry,
-		arg.VisibleAt,
+		arg.MaxAttempts,
+		arg.AvailableAt,
 	)
-	var i DbtxOutbox
-	err := row.Scan(
-		&i.ID,
-		&i.AggregateID,
-		&i.AggregateType,
-		&i.Type,
-		&i.Payload,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.LastError,
-		&i.MaxRetry,
-		&i.RetryCount,
-		&i.VisibleAt,
-	)
-	return &i, err
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
 }

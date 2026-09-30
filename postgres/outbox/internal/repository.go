@@ -3,7 +3,7 @@ package internal
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
+	"encoding/json/jsontext"
 	"errors"
 	"time"
 	"uuid"
@@ -13,9 +13,9 @@ import (
 )
 
 var (
-	ErrNotFound = errors.New("outbox: not found")
-	ErrLocked   = errors.New("outbox: locked")
-	ErrEOQ      = errors.New("outbox: end of queue")
+	ErrNotFound     = errors.New("outbox: not found")
+	ErrEOQ          = errors.New("outbox: end of queue")
+	ErrLeaseExpired = errors.New("outbox: lease expired")
 )
 
 type Repository struct {
@@ -28,27 +28,42 @@ func NewRepository(db *sql.DB) *Repository {
 	}
 }
 
-type Message = postgres.DbtxOutbox
+type Message struct {
+	ID            uuid.UUID
+	AggregateType string
+	AggregateID   string
+	EventType     string
+	Payload       jsontext.Value
+	Status        string
+	Attempts      int32
+	MaxAttempts   int32
+	LastError     string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
 
 type CreateParams struct {
 	AggregateID   string
 	AggregateType string
-	Type          string
-	Payload       json.RawMessage
-	// MaxRetry is the number of attempts before the message is dead. Zero
-	// means unlimited.
-	MaxRetry int32
-	// VisibleAt delays the message until the given time. Nil means now.
-	VisibleAt *time.Time
+	EventType     string
+	Payload       jsontext.Value
+
+	// MaxAttempts is the number of deliveries before the message is dead.
+	// Zero means the default of 10.
+	MaxAttempts int32
+
+	// AvailableAt delays the first delivery. Zero means now.
+	AvailableAt time.Time
 }
 
-type NackParams struct {
-	ID        uuid.UUID
-	LastError string
-	// Delay is how long until the message is visible again.
-	Delay time.Duration
-	// Dead stops the message from being retried.
-	Dead bool
+// Ack marks a leased message as done. It returns ErrLeaseExpired if the
+// message is no longer leased by lockedBy.
+func (r *Repository) Ack(ctx context.Context, id uuid.UUID, lockedBy string) error {
+	n, err := r.db(ctx).Ack(ctx, postgres.AckParams{
+		ID:       id,
+		LockedBy: newNullString(lockedBy),
+	})
+	return leased(n, err)
 }
 
 // Count returns the number of visible messages.
@@ -56,99 +71,139 @@ func (r *Repository) Count(ctx context.Context) (int64, error) {
 	return r.db(ctx).Count(ctx)
 }
 
-func (r *Repository) Create(ctx context.Context, params CreateParams) (*Message, error) {
-	var visibleAt sql.NullTime
-	if params.VisibleAt != nil {
-		visibleAt = sql.NullTime{Time: *params.VisibleAt, Valid: true}
-	}
+func (r *Repository) Create(ctx context.Context, params CreateParams) (uuid.UUID, error) {
 	return r.db(ctx).Create(ctx, postgres.CreateParams{
 		AggregateID:   params.AggregateID,
 		AggregateType: params.AggregateType,
-		Type:          params.Type,
-		Payload:       params.Payload,
-		MaxRetry:      params.MaxRetry,
-		VisibleAt:     visibleAt,
+		EventType:     params.EventType,
+		Payload:       []byte(params.Payload),
+		MaxAttempts: sql.NullInt32{
+			Int32: params.MaxAttempts,
+			Valid: params.MaxAttempts != 0,
+		},
+		AvailableAt: sql.NullTime{
+			Time:  params.AvailableAt,
+			Valid: !params.AvailableAt.IsZero(),
+		},
 	})
 }
 
-func (r *Repository) Delete(ctx context.Context, id uuid.UUID) (*Message, error) {
-	return notFound(r.db(ctx).Delete(ctx, id))
+// Dead marks messages whose lease expired on their final attempt as dead, and
+// returns the number of messages marked.
+func (r *Repository) Dead(ctx context.Context) (int64, error) {
+	return r.db(ctx).Dead(ctx)
 }
 
-// Find locks the message with the given id. It returns ErrLocked if another
-// transaction holds the lock, and ErrNotFound if the message does not exist.
 func (r *Repository) Find(ctx context.Context, id uuid.UUID) (*Message, error) {
-	q := r.db(ctx)
-	row, err := q.Find(ctx, id)
+	row, err := r.db(ctx).Find(ctx, id)
 	if errors.Is(err, sql.ErrNoRows) {
-		// SKIP LOCKED returns no rows for locked messages too, so check
-		// whether the message exists at all.
-		ok, err := q.Exists(ctx, id)
-		if err != nil {
-			return nil, err
-		}
-		if ok {
-			return nil, ErrLocked
-		}
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	return row, nil
+
+	return newMessage(row), nil
 }
 
-func (r *Repository) Load(ctx context.Context) (*Message, error) {
-	row, err := r.db(ctx).Load(ctx)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrEOQ
-	}
+func (r *Repository) ListDead(ctx context.Context, limit int32) ([]*Message, error) {
+	rows, err := r.db(ctx).ListDead(ctx, limit)
 	if err != nil {
 		return nil, err
 	}
-	return row, nil
+	return newMessages(rows), nil
 }
 
-func (r *Repository) Nack(ctx context.Context, params NackParams) (*Message, error) {
-	return notFound(r.db(ctx).Nack(ctx, postgres.NackParams{
-		ID:        params.ID,
-		LastError: params.LastError,
-		DelayUs:   params.Delay.Microseconds(),
-		Dead:      params.Dead,
-	}))
+// Nack releases a leased message, and hides it for delay. If dead is true, the
+// message is not retried. It returns ErrLeaseExpired if the message is no
+// longer leased by lockedBy.
+func (r *Repository) Nack(ctx context.Context, id uuid.UUID, lockedBy string, dead bool, lastError string, delay time.Duration) error {
+	n, err := r.db(ctx).Nack(ctx, postgres.NackParams{
+		ID:           id,
+		LockedBy:     newNullString(lockedBy),
+		Dead:         dead,
+		LastError:    newNullString(lastError),
+		DelaySeconds: delay.Seconds(),
+	})
+	return leased(n, err)
 }
 
-// ListDead returns up to limit messages that are no longer retryable, oldest
-// first.
-func (r *Repository) ListDead(ctx context.Context, limit int32) ([]*Message, error) {
-	return r.db(ctx).ListDead(ctx, limit)
+// Poll leases up to limit visible messages to lockedBy for the lease duration.
+// It returns ErrEOQ if there are no visible messages.
+func (r *Repository) Poll(ctx context.Context, lockedBy string, limit int32, lease time.Duration) ([]*Message, error) {
+	rows, err := r.db(ctx).Poll(ctx, postgres.PollParams{
+		LockedBy:     newNullString(lockedBy),
+		LeaseSeconds: lease.Seconds(),
+		BatchSize:    limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, ErrEOQ
+	}
+	return newMessages(rows), nil
 }
 
-// Requeue makes a dead message visible again with a fresh retry budget. It
-// returns ErrNotFound if the message does not exist or is not dead.
-func (r *Repository) Requeue(ctx context.Context, id uuid.UUID, maxRetry int32) (*Message, error) {
-	return notFound(r.db(ctx).Requeue(ctx, postgres.RequeueParams{
-		ID:       id,
-		MaxRetry: maxRetry,
-	}))
+func (r *Repository) Purge(ctx context.Context, status string, before time.Time) (int64, error) {
+	return r.db(ctx).Purge(ctx, postgres.PurgeParams{
+		Status:    status,
+		UpdatedAt: before,
+	})
 }
 
-// PurgeDead deletes dead messages last updated before t, and returns the
-// number of messages deleted.
-func (r *Repository) PurgeDead(ctx context.Context, before time.Time) (int64, error) {
-	return r.db(ctx).PurgeDead(ctx, before)
+func (r *Repository) Requeue(ctx context.Context, id uuid.UUID) error {
+	n, err := r.db(ctx).Requeue(ctx, id)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (r *Repository) db(ctx context.Context) postgres.Querier {
 	return postgres.New(r.DBTx(ctx))
 }
 
-func notFound(row *Message, err error) (*Message, error) {
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
-	}
+func leased(n int64, err error) error {
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return row, nil
+	if n == 0 {
+		return ErrLeaseExpired
+	}
+	return nil
+}
+
+func newNullString(s string) sql.NullString {
+	return sql.NullString{
+		String: s,
+		Valid:  s != "",
+	}
+}
+
+func newMessages(rows []*postgres.DbtxOutbox) []*Message {
+	res := make([]*Message, len(rows))
+	for i, row := range rows {
+		res[i] = newMessage(row)
+	}
+	return res
+}
+
+func newMessage(row *postgres.DbtxOutbox) *Message {
+	return &Message{
+		ID:            row.ID,
+		AggregateType: row.AggregateType,
+		AggregateID:   row.AggregateID,
+		EventType:     row.EventType,
+		Payload:       jsontext.Value(row.Payload),
+		Status:        row.Status,
+		Attempts:      row.Attempts,
+		MaxAttempts:   row.MaxAttempts,
+		LastError:     row.LastError.String,
+		CreatedAt:     row.CreatedAt,
+		UpdatedAt:     row.UpdatedAt,
+	}
 }

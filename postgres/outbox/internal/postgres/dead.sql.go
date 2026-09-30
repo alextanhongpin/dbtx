@@ -7,99 +7,25 @@ package postgres
 
 import (
 	"context"
-	"time"
-
-	"uuid"
 )
 
-const listDead = `-- name: ListDead :many
-  select id, aggregate_id, aggregate_type, type, payload, created_at, updated_at, last_error, max_retry, retry_count, visible_at
-    from dbtx.outbox
-   where not (max_retry = 0 or retry_count < max_retry)
-order by updated_at, id
-   limit $1
+const dead = `-- name: Dead :execrows
+update dbtx.outbox
+   set status = 'dead',
+       locked_by = null,
+       last_error = 'lease expired on final attempt',
+       updated_at = now()
+ where status = 'processing'
+   and available_at <= now()
+   and attempts >= max_attempts
 `
 
-func (q *Queries) ListDead(ctx context.Context, maxRows int32) ([]*DbtxOutbox, error) {
-	rows, err := q.db.QueryContext(ctx, listDead, maxRows)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []*DbtxOutbox{}
-	for rows.Next() {
-		var i DbtxOutbox
-		if err := rows.Scan(
-			&i.ID,
-			&i.AggregateID,
-			&i.AggregateType,
-			&i.Type,
-			&i.Payload,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-			&i.LastError,
-			&i.MaxRetry,
-			&i.RetryCount,
-			&i.VisibleAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, &i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const purgeDead = `-- name: PurgeDead :execrows
-delete from dbtx.outbox
- where not (max_retry = 0 or retry_count < max_retry)
-   and updated_at < $1
-`
-
-func (q *Queries) PurgeDead(ctx context.Context, before time.Time) (int64, error) {
-	result, err := q.db.ExecContext(ctx, purgeDead, before)
+// Dead marks messages whose lease expired on their final attempt, for
+// example because the worker crashed, as dead.
+func (q *Queries) Dead(ctx context.Context) (int64, error) {
+	result, err := q.db.ExecContext(ctx, dead)
 	if err != nil {
 		return 0, err
 	}
 	return result.RowsAffected()
-}
-
-const requeue = `-- name: Requeue :one
-   update dbtx.outbox
-      set retry_count = 0,
-          max_retry = $1,
-          visible_at = clock_timestamp(),
-          updated_at = clock_timestamp()
-    where id = $2
-      and not (max_retry = 0 or retry_count < max_retry)
-returning id, aggregate_id, aggregate_type, type, payload, created_at, updated_at, last_error, max_retry, retry_count, visible_at
-`
-
-type RequeueParams struct {
-	MaxRetry int32
-	ID       uuid.UUID
-}
-
-func (q *Queries) Requeue(ctx context.Context, arg RequeueParams) (*DbtxOutbox, error) {
-	row := q.db.QueryRowContext(ctx, requeue, arg.MaxRetry, arg.ID)
-	var i DbtxOutbox
-	err := row.Scan(
-		&i.ID,
-		&i.AggregateID,
-		&i.AggregateType,
-		&i.Type,
-		&i.Payload,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.LastError,
-		&i.MaxRetry,
-		&i.RetryCount,
-		&i.VisibleAt,
-	)
-	return &i, err
 }

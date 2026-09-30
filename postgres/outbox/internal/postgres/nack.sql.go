@@ -7,49 +7,42 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 
 	"uuid"
 )
 
-const nack = `-- name: Nack :one
-   update dbtx.outbox
-      set last_error = $1,
-          retry_count = retry_count + 1,
-          -- Emulate DLQ by setting max retry to -1 (no longer retryable).
-          max_retry = case when $2::boolean then -1 else max_retry end,
-          visible_at = clock_timestamp() + $3::bigint * interval '1 microsecond',
-          updated_at = clock_timestamp()
-    where id = $4
-returning id, aggregate_id, aggregate_type, type, payload, created_at, updated_at, last_error, max_retry, retry_count, visible_at
+const nack = `-- name: Nack :execrows
+update dbtx.outbox
+   set status = case when $1::bool then 'dead' else 'pending' end,
+       available_at = now()
+     + interval '1 second' * $2::float8,
+       locked_by = null,
+       last_error = $3,
+       updated_at = now()
+ where id = $4
+   and locked_by = $5
+   and status = 'processing'
 `
 
 type NackParams struct {
-	LastError string
-	Dead      bool
-	DelayUs   int64
-	ID        uuid.UUID
+	Dead         bool
+	DelaySeconds float64
+	LastError    sql.NullString
+	ID           uuid.UUID
+	LockedBy     sql.NullString
 }
 
-func (q *Queries) Nack(ctx context.Context, arg NackParams) (*DbtxOutbox, error) {
-	row := q.db.QueryRowContext(ctx, nack,
-		arg.LastError,
+func (q *Queries) Nack(ctx context.Context, arg NackParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, nack,
 		arg.Dead,
-		arg.DelayUs,
+		arg.DelaySeconds,
+		arg.LastError,
 		arg.ID,
+		arg.LockedBy,
 	)
-	var i DbtxOutbox
-	err := row.Scan(
-		&i.ID,
-		&i.AggregateID,
-		&i.AggregateType,
-		&i.Type,
-		&i.Payload,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.LastError,
-		&i.MaxRetry,
-		&i.RetryCount,
-		&i.VisibleAt,
-	)
-	return &i, err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }

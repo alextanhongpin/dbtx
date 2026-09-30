@@ -11,19 +11,8 @@ import (
 	"uuid"
 )
 
-const exists = `-- name: Exists :one
-select exists(select 1 from dbtx.outbox o where o.id = $1)
-`
-
-func (q *Queries) Exists(ctx context.Context, id uuid.UUID) (bool, error) {
-	row := q.db.QueryRowContext(ctx, exists, id)
-	var exists bool
-	err := row.Scan(&exists)
-	return exists, err
-}
-
 const find = `-- name: Find :one
-select id, aggregate_id, aggregate_type, type, payload, created_at, updated_at, last_error, max_retry, retry_count, visible_at from dbtx.outbox o where o.id = $1 for update SKIP LOCKED
+select id, aggregate_type, aggregate_id, event_type, payload, status, attempts, max_attempts, available_at, locked_by, last_error, created_at, updated_at, processed_at from dbtx.outbox where id = $1
 `
 
 func (q *Queries) Find(ctx context.Context, id uuid.UUID) (*DbtxOutbox, error) {
@@ -31,16 +20,19 @@ func (q *Queries) Find(ctx context.Context, id uuid.UUID) (*DbtxOutbox, error) {
 	var i DbtxOutbox
 	err := row.Scan(
 		&i.ID,
-		&i.AggregateID,
 		&i.AggregateType,
-		&i.Type,
+		&i.AggregateID,
+		&i.EventType,
 		&i.Payload,
+		&i.Status,
+		&i.Attempts,
+		&i.MaxAttempts,
+		&i.AvailableAt,
+		&i.LockedBy,
+		&i.LastError,
 		&i.CreatedAt,
 		&i.UpdatedAt,
-		&i.LastError,
-		&i.MaxRetry,
-		&i.RetryCount,
-		&i.VisibleAt,
+		&i.ProcessedAt,
 	)
 	return &i, err
 }

@@ -6,22 +6,23 @@ package postgres
 
 import (
 	"context"
-	"time"
 
 	"uuid"
 )
 
 type Querier interface {
+	Ack(ctx context.Context, arg AckParams) (int64, error)
 	Count(ctx context.Context) (int64, error)
-	Create(ctx context.Context, arg CreateParams) (*DbtxOutbox, error)
-	Delete(ctx context.Context, id uuid.UUID) (*DbtxOutbox, error)
-	Exists(ctx context.Context, id uuid.UUID) (bool, error)
+	Create(ctx context.Context, arg CreateParams) (uuid.UUID, error)
+	// Dead marks messages whose lease expired on their final attempt, for
+	// example because the worker crashed, as dead.
+	Dead(ctx context.Context) (int64, error)
 	Find(ctx context.Context, id uuid.UUID) (*DbtxOutbox, error)
-	ListDead(ctx context.Context, maxRows int32) ([]*DbtxOutbox, error)
-	Load(ctx context.Context) (*DbtxOutbox, error)
-	Nack(ctx context.Context, arg NackParams) (*DbtxOutbox, error)
-	PurgeDead(ctx context.Context, before time.Time) (int64, error)
-	Requeue(ctx context.Context, arg RequeueParams) (*DbtxOutbox, error)
+	ListDead(ctx context.Context, limit int32) ([]*DbtxOutbox, error)
+	Nack(ctx context.Context, arg NackParams) (int64, error)
+	Poll(ctx context.Context, arg PollParams) ([]*DbtxOutbox, error)
+	Purge(ctx context.Context, arg PurgeParams) (int64, error)
+	Requeue(ctx context.Context, id uuid.UUID) (int64, error)
 }
 
 var _ Querier = (*Queries)(nil)

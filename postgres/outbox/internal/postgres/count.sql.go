@@ -12,8 +12,9 @@ import (
 const count = `-- name: Count :one
 select count(*)
   from dbtx.outbox
- where (max_retry = 0 or retry_count < max_retry)
-   and visible_at <= clock_timestamp()
+ where status in ('pending', 'processing')
+   and available_at <= now()
+   and attempts < max_attempts
 `
 
 func (q *Queries) Count(ctx context.Context) (int64, error) {
