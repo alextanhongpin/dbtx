@@ -10,7 +10,7 @@ with next as (
        for update skip locked
 )
    update dbtx.outbox o
-      set status = 'processing',
+      set status = 'processing'::dbtx.outbox_status,
           locked_by = sqlc.arg(locked_by),
           updated_at = now(),
           available_at = now()

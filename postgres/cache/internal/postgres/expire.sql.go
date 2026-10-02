@@ -11,21 +11,30 @@ import (
 )
 
 const expire = `-- name: Expire :one
-update dbtx.live_cache set expires_at = $1 where key = $2 returning key, value, digest, created_at, updated_at, expires_at
+with expired as (
+  delete from dbtx.cache where key = $1 and expires_at <= statement_timestamp() returning key
+)
+   update dbtx.cache
+      set expires_at = statement_timestamp() + $2::bigint * interval '1 microsecond',
+          updated_at = statement_timestamp()
+    where dbtx.cache.key = $1
+      and lease is null
+      and not exists (select 1 from expired)
+returning key, value, lease, created_at, updated_at, expires_at
 `
 
 type ExpireParams struct {
-	ExpiresAt sql.NullTime
-	Key       string
+	Key string
+	Ttl sql.NullInt64
 }
 
-func (q *Queries) Expire(ctx context.Context, arg ExpireParams) (*DbtxLiveCache, error) {
-	row := q.db.QueryRowContext(ctx, expire, arg.ExpiresAt, arg.Key)
-	var i DbtxLiveCache
+func (q *Queries) Expire(ctx context.Context, arg ExpireParams) (*DbtxCache, error) {
+	row := q.db.QueryRowContext(ctx, expire, arg.Key, arg.Ttl)
+	var i DbtxCache
 	err := row.Scan(
 		&i.Key,
 		&i.Value,
-		&i.Digest,
+		&i.Lease,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ExpiresAt,

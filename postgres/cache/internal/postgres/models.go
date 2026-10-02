@@ -6,14 +6,15 @@ package postgres
 
 import (
 	"database/sql"
-	"encoding/json"
 	"time"
+
+	"encoding/json/jsontext"
 )
 
 type DbtxCache struct {
 	Key       string
-	Value     json.RawMessage
-	Digest    string
+	Value     jsontext.Value
+	Lease     sql.NullString
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	ExpiresAt sql.NullTime
@@ -21,8 +22,7 @@ type DbtxCache struct {
 
 type DbtxLiveCache struct {
 	Key       string
-	Value     json.RawMessage
-	Digest    string
+	Value     jsontext.Value
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	ExpiresAt sql.NullTime

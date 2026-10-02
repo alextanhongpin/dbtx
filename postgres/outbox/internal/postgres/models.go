@@ -6,19 +6,85 @@ package postgres
 
 import (
 	"database/sql"
-	"encoding/json"
+	"database/sql/driver"
+	"fmt"
 	"time"
 
+	"encoding/json/jsontext"
 	"uuid"
 )
+
+type DbtxOutboxStatus string
+
+const (
+	DbtxOutboxStatusPending    DbtxOutboxStatus = "pending"
+	DbtxOutboxStatusProcessing DbtxOutboxStatus = "processing"
+	DbtxOutboxStatusDone       DbtxOutboxStatus = "done"
+	DbtxOutboxStatusDead       DbtxOutboxStatus = "dead"
+)
+
+func (e *DbtxOutboxStatus) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = DbtxOutboxStatus(s)
+	case string:
+		*e = DbtxOutboxStatus(s)
+	default:
+		return fmt.Errorf("unsupported scan type for DbtxOutboxStatus: %T", src)
+	}
+	return nil
+}
+
+type NullDbtxOutboxStatus struct {
+	DbtxOutboxStatus DbtxOutboxStatus
+	Valid            bool // Valid is true if DbtxOutboxStatus is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullDbtxOutboxStatus) Scan(value interface{}) error {
+	if value == nil {
+		ns.DbtxOutboxStatus, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.DbtxOutboxStatus.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullDbtxOutboxStatus) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.DbtxOutboxStatus), nil
+}
+
+func (e DbtxOutboxStatus) Valid() bool {
+	switch e {
+	case DbtxOutboxStatusPending,
+		DbtxOutboxStatusProcessing,
+		DbtxOutboxStatusDone,
+		DbtxOutboxStatusDead:
+		return true
+	}
+	return false
+}
+
+func AllDbtxOutboxStatusValues() []DbtxOutboxStatus {
+	return []DbtxOutboxStatus{
+		DbtxOutboxStatusPending,
+		DbtxOutboxStatusProcessing,
+		DbtxOutboxStatusDone,
+		DbtxOutboxStatusDead,
+	}
+}
 
 type DbtxOutbox struct {
 	ID            uuid.UUID
 	AggregateType string
 	AggregateID   string
 	EventType     string
-	Payload       json.RawMessage
-	Status        string
+	Payload       jsontext.Value
+	Status        DbtxOutboxStatus
 	Attempts      int32
 	MaxAttempts   int32
 	AvailableAt   time.Time

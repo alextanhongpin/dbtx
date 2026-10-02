@@ -8,8 +8,8 @@ package postgres
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 
+	"encoding/json/jsontext"
 	"uuid"
 )
 
@@ -27,7 +27,7 @@ type CreateParams struct {
 	AggregateID   string
 	AggregateType string
 	EventType     string
-	Payload       json.RawMessage
+	Payload       jsontext.Value
 	MaxAttempts   sql.NullInt32
 	AvailableAt   sql.NullTime
 }

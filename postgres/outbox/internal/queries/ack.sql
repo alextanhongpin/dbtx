@@ -1,6 +1,6 @@
 -- name: Ack :execrows
 update dbtx.outbox
-   set status = 'done',
+   set status = 'done'::dbtx.outbox_status,
        processed_at = now(),
        locked_by = null,
        last_error = null,

@@ -10,16 +10,25 @@ import (
 )
 
 const delete = `-- name: Delete :one
-delete from dbtx.live_cache where key = $1 returning key, value, digest, created_at, updated_at, expires_at
+with expired as (
+  delete from dbtx.cache where key = $1 and expires_at <= statement_timestamp() returning key
+)
+   delete
+     from dbtx.cache
+    where dbtx.cache.key = $1
+      and not exists (select 1 from expired)
+returning key, value, lease, created_at, updated_at, expires_at
 `
 
-func (q *Queries) Delete(ctx context.Context, key string) (*DbtxLiveCache, error) {
+// Deletes leased rows too, so that invalidating a key also discards any
+// value that is being computed for it.
+func (q *Queries) Delete(ctx context.Context, key string) (*DbtxCache, error) {
 	row := q.db.QueryRowContext(ctx, delete, key)
-	var i DbtxLiveCache
+	var i DbtxCache
 	err := row.Scan(
 		&i.Key,
 		&i.Value,
-		&i.Digest,
+		&i.Lease,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ExpiresAt,

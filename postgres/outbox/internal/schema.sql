@@ -1,5 +1,7 @@
 create schema if not exists dbtx;
 
+create TYPE dbtx.outbox_status as ENUM('pending', 'processing', 'done', 'dead');
+
 create table if not exists dbtx.outbox
  (
   id             uuid not null default uuidv7(),
@@ -7,7 +9,7 @@ create table if not exists dbtx.outbox
   aggregate_id   text not null,
   event_type     text not null,
   payload        jsonb not null,
-  status         text not null default 'pending',
+  status         dbtx.outbox_status not null default 'pending',
   attempts       int not null default 0,
   max_attempts   int not null default 10,
   available_at   timestamptz not null default now(),
@@ -18,7 +20,6 @@ create table if not exists dbtx.outbox
   processed_at   timestamptz,
 
   primary key (id),
-  check (status in ('pending', 'processing', 'done', 'dead')),
   check (max_attempts > 0)
 );
 

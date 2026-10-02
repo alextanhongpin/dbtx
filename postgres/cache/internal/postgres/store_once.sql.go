@@ -8,42 +8,37 @@ package postgres
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
+
+	"encoding/json/jsontext"
 )
 
-const storeOnce = `-- name: StoreOnce :one
-insert into dbtx.live_cache(key, value, digest, expires_at)
-     values ($1, $2, $3, $4)
+const storeOnce = `-- name: StoreOnce :execrows
+insert into dbtx.cache as c(key, value, expires_at)
+     values ($1, $2, statement_timestamp() + $3::bigint * interval '1 microsecond')
 on conflict (key) do
      update
-        set value = $2, digest = $3, expires_at = $4
-      where dbtx.live_cache.expires_at is not null
-        and dbtx.live_cache.expires_at < clock_timestamp()
-  returning key, value, digest, created_at, updated_at, expires_at
+        set value = excluded.value,
+            lease = null,
+            expires_at = excluded.expires_at,
+            created_at = statement_timestamp(),
+            updated_at = statement_timestamp()
+      where c.expires_at is not null
+        and c.expires_at <= statement_timestamp()
 `
 
 type StoreOnceParams struct {
-	Key       string
-	Value     json.RawMessage
-	Digest    string
-	ExpiresAt sql.NullTime
+	Key   string
+	Value jsontext.Value
+	Ttl   sql.NullInt64
 }
 
-func (q *Queries) StoreOnce(ctx context.Context, arg StoreOnceParams) (*DbtxLiveCache, error) {
-	row := q.db.QueryRowContext(ctx, storeOnce,
-		arg.Key,
-		arg.Value,
-		arg.Digest,
-		arg.ExpiresAt,
-	)
-	var i DbtxLiveCache
-	err := row.Scan(
-		&i.Key,
-		&i.Value,
-		&i.Digest,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.ExpiresAt,
-	)
-	return &i, err
+// Inserts the value unless a live row (including a lease placeholder) exists.
+// An expired row is overwritten in place, since a sibling CTE deleting it would
+// not be visible to the insert's conflict check.
+func (q *Queries) StoreOnce(ctx context.Context, arg StoreOnceParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, storeOnce, arg.Key, arg.Value, arg.Ttl)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }

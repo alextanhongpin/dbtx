@@ -9,14 +9,37 @@ import (
 )
 
 type Querier interface {
-	CompareAndDelete(ctx context.Context, arg CompareAndDeleteParams) (*DbtxLiveCache, error)
-	CompareAndSwap(ctx context.Context, arg CompareAndSwapParams) (*DbtxLiveCache, error)
-	Delete(ctx context.Context, key string) (*DbtxLiveCache, error)
-	Expire(ctx context.Context, arg ExpireParams) (*DbtxLiveCache, error)
-	Load(ctx context.Context, key string) (*DbtxLiveCache, error)
+	CompareAndDelete(ctx context.Context, arg CompareAndDeleteParams) (*CompareAndDeleteRow, error)
+	CompareAndSwap(ctx context.Context, arg CompareAndSwapParams) (*CompareAndSwapRow, error)
+	// Deletes leased rows too, so that invalidating a key also discards any
+	// value that is being computed for it.
+	Delete(ctx context.Context, key string) (*DbtxCache, error)
+	Exists(ctx context.Context, key string) (bool, error)
+	Expire(ctx context.Context, arg ExpireParams) (*DbtxCache, error)
+	// Replaces the lease placeholder with the computed value. Affects no rows if
+	// the lease expired, was taken over, or the key was deleted or overwritten.
+	FulfillLease(ctx context.Context, arg FulfillLeaseParams) (int64, error)
+	Load(ctx context.Context, key string) (*DbtxCache, error)
+	// Stores the value (or a lease placeholder) unless a live row exists, in which
+	// case the live row is returned with loaded = true. The caller must check the
+	// returned lease to tell a computed value from an in-flight placeholder.
+	//
+	// Returns no rows when a concurrent transaction inserted the key after this
+	// statement's snapshot was taken; the caller should retry.
+	LoadOrStore(ctx context.Context, arg LoadOrStoreParams) (*LoadOrStoreRow, error)
 	Purge(ctx context.Context) (int64, error)
-	Store(ctx context.Context, arg StoreParams) (*DbtxLiveCache, error)
-	StoreOnce(ctx context.Context, arg StoreOnceParams) (*DbtxLiveCache, error)
+	ReleaseLease(ctx context.Context, arg ReleaseLeaseParams) (int64, error)
+	RenewLease(ctx context.Context, arg RenewLeaseParams) (int64, error)
+	// Overwrites any existing row, including a lease placeholder. The lease
+	// holder then fails to fulfill its lease and does not clobber this value.
+	Store(ctx context.Context, arg StoreParams) (*DbtxCache, error)
+	// Inserts the value unless a live row (including a lease placeholder) exists.
+	// An expired row is overwritten in place, since a sibling CTE deleting it would
+	// not be visible to the insert's conflict check.
+	StoreOnce(ctx context.Context, arg StoreOnceParams) (int64, error)
+	// Returns the remaining time to live in microseconds, or 0 if the key does not
+	// expire. A live key always reports at least 1 microsecond.
+	TTL(ctx context.Context, key string) (int64, error)
 }
 
 var _ Querier = (*Queries)(nil)

@@ -8,39 +8,37 @@ package postgres
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
+
+	"encoding/json/jsontext"
 )
 
 const store = `-- name: Store :one
-insert into dbtx.live_cache(key, value, digest, expires_at)
-     values ($1, $2, $3, $4)
+insert into dbtx.cache(key, value, expires_at)
+     values ($1, $2, statement_timestamp() + $3::bigint * interval '1 microsecond')
 on conflict (key) do
      update
-        set value = EXCLUDED.value,
-            digest = EXCLUDED.digest,
-            expires_at = EXCLUDED.expires_at
-  returning key, value, digest, created_at, updated_at, expires_at
+        set value = excluded.value,
+            lease = null,
+            expires_at = excluded.expires_at,
+            updated_at = statement_timestamp()
+  returning key, value, lease, created_at, updated_at, expires_at
 `
 
 type StoreParams struct {
-	Key       string
-	Value     json.RawMessage
-	Digest    string
-	ExpiresAt sql.NullTime
+	Key   string
+	Value jsontext.Value
+	Ttl   sql.NullInt64
 }
 
-func (q *Queries) Store(ctx context.Context, arg StoreParams) (*DbtxLiveCache, error) {
-	row := q.db.QueryRowContext(ctx, store,
-		arg.Key,
-		arg.Value,
-		arg.Digest,
-		arg.ExpiresAt,
-	)
-	var i DbtxLiveCache
+// Overwrites any existing row, including a lease placeholder. The lease
+// holder then fails to fulfill its lease and does not clobber this value.
+func (q *Queries) Store(ctx context.Context, arg StoreParams) (*DbtxCache, error) {
+	row := q.db.QueryRowContext(ctx, store, arg.Key, arg.Value, arg.Ttl)
+	var i DbtxCache
 	err := row.Scan(
 		&i.Key,
 		&i.Value,
-		&i.Digest,
+		&i.Lease,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ExpiresAt,

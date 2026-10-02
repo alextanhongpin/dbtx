@@ -11,7 +11,7 @@ import (
 
 const dead = `-- name: Dead :execrows
 update dbtx.outbox
-   set status = 'dead',
+   set status = 'dead'::dbtx.outbox_status,
        locked_by = null,
        last_error = 'lease expired on final attempt',
        updated_at = now()

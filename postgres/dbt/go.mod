@@ -6,6 +6,7 @@ require (
 	github.com/alextanhongpin/core/types v0.0.37
 	github.com/alextanhongpin/dbtx/testing/dbtest v0.0.1
 	github.com/lib/pq v1.10.9
+	github.com/pganalyze/pg_query_go/v6 v6.2.2
 )
 
 require (
@@ -39,7 +40,6 @@ require (
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/opencontainers/runc v1.3.0 // indirect
 	github.com/ory/dockertest/v3 v3.12.0 // indirect
-	github.com/pganalyze/pg_query_go/v6 v6.2.2 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/stretchr/testify v1.11.1 // indirect

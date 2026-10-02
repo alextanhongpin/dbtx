@@ -15,7 +15,7 @@ delete from dbtx.outbox where status = $1 and updated_at < $2
 `
 
 type PurgeParams struct {
-	Status    string
+	Status    DbtxOutboxStatus
 	UpdatedAt time.Time
 }
 

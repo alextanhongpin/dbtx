@@ -7,27 +7,46 @@ package postgres
 
 import (
 	"context"
+
+	"encoding/json/jsontext"
 )
 
 const compareAndDelete = `-- name: CompareAndDelete :one
-delete from dbtx.live_cache where key = $1 and digest = $2 returning key, value, digest, created_at, updated_at, expires_at
+with expired as (
+  delete from dbtx.cache where dbtx.cache.key = $1 and dbtx.cache.expires_at <= statement_timestamp() returning dbtx.cache.key
+),
+curr as (
+  select dbtx.cache.key
+    from dbtx.cache
+   where dbtx.cache.key = $1
+     and lease is null
+     and not exists (select 1 from expired)
+),
+deleted as (
+     delete
+       from dbtx.cache
+      where dbtx.cache.key = $1
+        and lease is null
+        and value = $2::jsonb
+        and not exists (select 1 from expired)
+  returning dbtx.cache.key
+)
+select exists (select 1 from curr) as found, exists (select 1 from deleted) as deleted
 `
 
 type CompareAndDeleteParams struct {
-	Key    string
-	Digest string
+	Key   string
+	Value jsontext.Value
 }
 
-func (q *Queries) CompareAndDelete(ctx context.Context, arg CompareAndDeleteParams) (*DbtxLiveCache, error) {
-	row := q.db.QueryRowContext(ctx, compareAndDelete, arg.Key, arg.Digest)
-	var i DbtxLiveCache
-	err := row.Scan(
-		&i.Key,
-		&i.Value,
-		&i.Digest,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.ExpiresAt,
-	)
+type CompareAndDeleteRow struct {
+	Found   bool
+	Deleted bool
+}
+
+func (q *Queries) CompareAndDelete(ctx context.Context, arg CompareAndDeleteParams) (*CompareAndDeleteRow, error) {
+	row := q.db.QueryRowContext(ctx, compareAndDelete, arg.Key, arg.Value)
+	var i CompareAndDeleteRow
+	err := row.Scan(&i.Found, &i.Deleted)
 	return &i, err
 }

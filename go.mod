@@ -3,11 +3,9 @@ module github.com/alextanhongpin/dbtx
 go 1.27.0
 
 require (
-	github.com/alextanhongpin/core/types v0.0.39
 	github.com/alextanhongpin/dbtx/testing/dbtest v0.0.1
 	github.com/lib/pq v1.12.3
 	github.com/stretchr/testify v1.12.1
-	github.com/zeebo/xxh3 v1.1.0
 )
 
 require (
@@ -50,7 +48,6 @@ require (
 	github.com/jackc/pgx/v5 v5.11.0 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/jinzhu/inflection v1.0.0 // indirect
-	github.com/klauspost/cpuid/v2 v2.2.10 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
 	github.com/moby/sys/user v0.4.0 // indirect
 	github.com/moby/term v0.5.2 // indirect

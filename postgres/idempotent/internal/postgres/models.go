@@ -5,14 +5,93 @@
 package postgres
 
 import (
-	"encoding/json"
+	"database/sql"
+	"database/sql/driver"
+	"fmt"
 	"time"
+
+	"encoding/json/jsontext"
 )
 
+type DbtxIdempotencyKeyStatus string
+
+const (
+	DbtxIdempotencyKeyStatusInProgress DbtxIdempotencyKeyStatus = "in_progress"
+	DbtxIdempotencyKeyStatusRetryable  DbtxIdempotencyKeyStatus = "retryable"
+	DbtxIdempotencyKeyStatusCompleted  DbtxIdempotencyKeyStatus = "completed"
+	DbtxIdempotencyKeyStatusFailed     DbtxIdempotencyKeyStatus = "failed"
+)
+
+func (e *DbtxIdempotencyKeyStatus) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = DbtxIdempotencyKeyStatus(s)
+	case string:
+		*e = DbtxIdempotencyKeyStatus(s)
+	default:
+		return fmt.Errorf("unsupported scan type for DbtxIdempotencyKeyStatus: %T", src)
+	}
+	return nil
+}
+
+type NullDbtxIdempotencyKeyStatus struct {
+	DbtxIdempotencyKeyStatus DbtxIdempotencyKeyStatus
+	Valid                    bool // Valid is true if DbtxIdempotencyKeyStatus is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullDbtxIdempotencyKeyStatus) Scan(value interface{}) error {
+	if value == nil {
+		ns.DbtxIdempotencyKeyStatus, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.DbtxIdempotencyKeyStatus.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullDbtxIdempotencyKeyStatus) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.DbtxIdempotencyKeyStatus), nil
+}
+
+func (e DbtxIdempotencyKeyStatus) Valid() bool {
+	switch e {
+	case DbtxIdempotencyKeyStatusInProgress,
+		DbtxIdempotencyKeyStatusRetryable,
+		DbtxIdempotencyKeyStatusCompleted,
+		DbtxIdempotencyKeyStatusFailed:
+		return true
+	}
+	return false
+}
+
+func AllDbtxIdempotencyKeyStatusValues() []DbtxIdempotencyKeyStatus {
+	return []DbtxIdempotencyKeyStatus{
+		DbtxIdempotencyKeyStatusInProgress,
+		DbtxIdempotencyKeyStatusRetryable,
+		DbtxIdempotencyKeyStatusCompleted,
+		DbtxIdempotencyKeyStatusFailed,
+	}
+}
+
 type DbtxIdempotencyKey struct {
-	Scope     string
-	Key       string
-	Request   json.RawMessage
-	Response  json.RawMessage
-	CreatedAt time.Time
+	IdempotencyKey string
+	Request        jsontext.Value
+	Status         DbtxIdempotencyKeyStatus
+	FencingToken   int64
+	LeaseOwner     sql.NullString
+	LeaseExpiresAt sql.NullTime
+	Attempts       int32
+	Checkpoint     string
+	CheckpointData jsontext.Value
+	CheckpointLogs jsontext.Value
+	Response       jsontext.Value
+	Error          sql.NullString
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	CompletedAt    sql.NullTime
+	ExpiresAt      time.Time
 }

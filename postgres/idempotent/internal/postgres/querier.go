@@ -6,13 +6,24 @@ package postgres
 
 import (
 	"context"
-	"time"
 )
 
 type Querier interface {
-	Delete(ctx context.Context, arg DeleteParams) (*DbtxIdempotencyKey, error)
-	DeleteBefore(ctx context.Context, createdAt time.Time) (int64, error)
-	Update(ctx context.Context, arg UpdateParams) error
+	Ack(ctx context.Context, arg AckParams) (*DbtxIdempotencyKey, error)
+	// Extends the lease on commit, so a Claim blocked on the row lock does not
+	// take over between steps. The previous checkpoint is appended to
+	// checkpoint_logs.
+	Checkpoint(ctx context.Context, arg CheckpointParams) (string, error)
+	Claim(ctx context.Context, arg ClaimParams) (*ClaimRow, error)
+	Fail(ctx context.Context, arg FailParams) (*DbtxIdempotencyKey, error)
+	// Called only when Claim returned no rows.
+	Inspect(ctx context.Context, arg InspectParams) (*InspectRow, error)
+	// Locks the row for the duration of the step transaction and extends the
+	// lease. While the row is locked, a concurrent Claim blocks until commit, so
+	// no separate heartbeat is needed.
+	Lock(ctx context.Context, arg LockParams) (int64, error)
+	Nack(ctx context.Context, arg NackParams) (*DbtxIdempotencyKey, error)
+	Purge(ctx context.Context) (int64, error)
 }
 
 var _ Querier = (*Queries)(nil)

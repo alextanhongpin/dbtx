@@ -14,7 +14,7 @@ import (
 
 const nack = `-- name: Nack :execrows
 update dbtx.outbox
-   set status = case when $1::bool then 'dead' else 'pending' end,
+   set status = (case when $1::bool then 'dead' else 'pending' end)::dbtx.outbox_status,
        available_at = now()
      + interval '1 second' * $2::float8,
        locked_by = null,

@@ -6,11 +6,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"uuid"
 
 	"github.com/alextanhongpin/dbtx/postgres/idempotent"
 	"github.com/alextanhongpin/dbtx/testing/dbtest"
@@ -38,153 +38,233 @@ func TestMain(m *testing.M) {
 	m.Run()
 }
 
-type Request struct {
-	Name string
-	ID   int64
-	Tags map[string]string
+var keys sync.Map
+
+// keyOf returns a key unique to this test run, so that repeated runs with
+// -count do not see keys from earlier runs.
+func keyOf(t *testing.T) string {
+	k, _ := keys.LoadOrStore(t, t.Name()+"/"+uuid.NewV7().String())
+	return k.(string)
 }
 
-type Response struct {
-	Msg string
+var req = idempotent.Request{Data: []byte(`{"name": "foo"}`)}
+
+func completed(data string) *idempotent.Result {
+	return &idempotent.Result{
+		Response: &idempotent.Response{
+			Status: string(idempotent.StatusCompleted),
+			Data:   []byte(data),
+		},
+	}
 }
 
-func greet(ctx context.Context, req Request) (*Response, error) {
-	return &Response{
-		Msg: fmt.Sprintf("hi, %s", req.Name),
-	}, nil
+func greet(ctx context.Context, p idempotent.Params) (*idempotent.Result, error) {
+	return completed(`{"msg": "hi, foo"}`), nil
+}
+
+func newRepository(t *testing.T) *idempotent.PostgresRepository {
+	t.Helper()
+	return idempotent.NewRepository(dbtest.DB(t))
 }
 
 func newIdempotent(t *testing.T) *idempotent.Idempotent {
 	t.Helper()
-	return idempotent.New(idempotent.NewRepository(dbtest.DB(t)))
+	return idempotent.New(newRepository(t))
 }
 
-func TestLoadOrCreate(t *testing.T) {
-	t.Run("created", func(t *testing.T) {
-		h := newIdempotent(t).Func("greet", greet)
-		res, loaded, err := h.LoadOrCreate(t.Context(), t.Name(), Request{Name: "foo"})
+func TestDo(t *testing.T) {
+	t.Run("completed", func(t *testing.T) {
+		res, err := newIdempotent(t).Do(t.Context(), keyOf(t), greet, req)
 		is := assert.New(t)
 		is.NoError(err)
-		is.False(loaded)
-		is.Equal("hi, foo", res.Msg)
+		is.Equal(string(idempotent.StatusCompleted), res.Status)
+		is.JSONEq(`{"msg": "hi, foo"}`, string(res.Data))
 	})
 
-	t.Run("loaded", func(t *testing.T) {
+	t.Run("cached", func(t *testing.T) {
 		var calls atomic.Int64
-		h := newIdempotent(t).Func("greet", func(ctx context.Context, req Request) (*Response, error) {
+		fn := func(ctx context.Context, p idempotent.Params) (*idempotent.Result, error) {
 			calls.Add(1)
-			return greet(ctx, req)
-		})
-		req := Request{Name: "foo"}
-		_, _, err := h.LoadOrCreate(t.Context(), t.Name(), req)
+			return greet(ctx, p)
+		}
+		idp := newIdempotent(t)
+		_, err := idp.Do(t.Context(), keyOf(t), fn, req)
 		is := assert.New(t)
 		is.NoError(err)
 
-		res, loaded, err := h.LoadOrCreate(t.Context(), t.Name(), req)
+		// Key order and whitespace do not matter.
+		res, err := idp.Do(t.Context(), keyOf(t), fn, idempotent.Request{Data: []byte(`{ "name":"foo" }`)})
 		is.NoError(err)
-		is.True(loaded)
-		is.Equal("hi, foo", res.Msg)
+		is.Equal(string(idempotent.StatusCompleted), res.Status)
+		is.JSONEq(`{"msg": "hi, foo"}`, string(res.Data))
 		is.Equal(int64(1), calls.Load())
 	})
 
-	t.Run("loaded ignores map order", func(t *testing.T) {
-		h := newIdempotent(t).Func("greet", greet)
-		tags := make(map[string]string)
-		for i := range 20 {
-			tags[fmt.Sprint(i)] = fmt.Sprint(i)
+	t.Run("failed is cached", func(t *testing.T) {
+		var calls atomic.Int64
+		fn := func(ctx context.Context, p idempotent.Params) (*idempotent.Result, error) {
+			calls.Add(1)
+			return &idempotent.Result{
+				Response: &idempotent.Response{
+					Status: string(idempotent.StatusFailed),
+					Data:   []byte(`{"reason": "insufficient funds"}`),
+					Error:  "insufficient funds",
+				},
+			}, nil
 		}
-		req := Request{Name: "foo", Tags: tags}
-		_, _, err := h.LoadOrCreate(t.Context(), t.Name(), req)
+		idp := newIdempotent(t)
+		res, err := idp.Do(t.Context(), keyOf(t), fn, req)
+		is := assert.New(t)
+		is.NoError(err)
+		is.Equal(string(idempotent.StatusFailed), res.Status)
+
+		res, err = idp.Do(t.Context(), keyOf(t), fn, req)
+		is.NoError(err)
+		is.Equal(string(idempotent.StatusFailed), res.Status)
+		is.JSONEq(`{"reason": "insufficient funds"}`, string(res.Data))
+		is.Equal(int64(1), calls.Load())
+	})
+
+	t.Run("request mismatch", func(t *testing.T) {
+		idp := newIdempotent(t)
+		_, err := idp.Do(t.Context(), keyOf(t), greet, req)
 		is := assert.New(t)
 		is.NoError(err)
 
-		for range 10 {
-			_, loaded, err := h.LoadOrCreate(t.Context(), t.Name(), req)
-			is.NoError(err)
-			is.True(loaded)
-		}
+		_, err = idp.Do(t.Context(), keyOf(t), greet, idempotent.Request{Data: []byte(`{"name": "bar"}`)})
+		is.ErrorIs(err, idempotent.ErrRequestMismatch)
 	})
 
-	t.Run("conflict", func(t *testing.T) {
-		h := newIdempotent(t).Func("greet", greet)
-		_, _, err := h.LoadOrCreate(t.Context(), t.Name(), Request{Name: "foo"})
-		is := assert.New(t)
-		is.NoError(err)
-
-		res, loaded, err := h.LoadOrCreate(t.Context(), t.Name(), Request{Name: "bar"})
-		is.ErrorIs(err, idempotent.ErrRequestConflict)
-		is.False(loaded)
-		is.Nil(res)
-	})
-
-	t.Run("conflict on large integers", func(t *testing.T) {
-		// Both values map to the same float64.
-		h := newIdempotent(t).Func("greet", greet)
-		_, _, err := h.LoadOrCreate(t.Context(), t.Name(), Request{ID: 9007199254740993})
-		is := assert.New(t)
-		is.NoError(err)
-
-		_, _, err = h.LoadOrCreate(t.Context(), t.Name(), Request{ID: 9007199254740992})
-		is.ErrorIs(err, idempotent.ErrRequestConflict)
-	})
-
-	t.Run("error is not stored", func(t *testing.T) {
+	t.Run("handler error is returned and retried", func(t *testing.T) {
 		wantErr := errors.New("bad request")
 		var calls atomic.Int64
-		h := newIdempotent(t).Func("greet", func(ctx context.Context, req Request) (*Response, error) {
+		fn := func(ctx context.Context, p idempotent.Params) (*idempotent.Result, error) {
 			if calls.Add(1) == 1 {
 				return nil, wantErr
 			}
-			return greet(ctx, req)
-		})
-		req := Request{Name: "foo"}
-		_, _, err := h.LoadOrCreate(t.Context(), t.Name(), req)
+			return greet(ctx, p)
+		}
+		idp := newIdempotent(t)
+		res, err := idp.Do(t.Context(), keyOf(t), fn, req)
 		is := assert.New(t)
 		is.ErrorIs(err, wantErr)
+		is.Nil(res)
 
-		res, loaded, err := h.LoadOrCreate(t.Context(), t.Name(), req)
+		res, err = idp.Do(t.Context(), keyOf(t), fn, req)
 		is.NoError(err)
-		is.False(loaded)
-		is.Equal("hi, foo", res.Msg)
+		is.Equal(string(idempotent.StatusCompleted), res.Status)
 		is.Equal(int64(2), calls.Load())
 	})
 
-	t.Run("nil response", func(t *testing.T) {
-		h := newIdempotent(t).Func("greet", func(ctx context.Context, req Request) (*Response, error) {
-			return nil, nil
+	t.Run("invalid result", func(t *testing.T) {
+		results := map[string]*idempotent.Result{
+			"nil":   nil,
+			"empty": {},
+			"both": {
+				Checkpoint: &idempotent.Checkpoint{Name: "step", Data: []byte(`null`)},
+				Response:   completed(`null`).Response,
+			},
+		}
+		for name, result := range results {
+			t.Run(name, func(t *testing.T) {
+				fn := func(ctx context.Context, p idempotent.Params) (*idempotent.Result, error) {
+					return result, nil
+				}
+				idp := newIdempotent(t)
+				_, err := idp.Do(t.Context(), keyOf(t), fn, req)
+				is := assert.New(t)
+				is.ErrorIs(err, idempotent.ErrInvalidResult)
+
+				// The key is released, not left in progress.
+				res, err := idp.Do(t.Context(), keyOf(t), greet, req)
+				is.NoError(err)
+				is.Equal(string(idempotent.StatusCompleted), res.Status)
+			})
+		}
+	})
+
+	t.Run("max attempts", func(t *testing.T) {
+		wantErr := errors.New("bad request")
+		var calls atomic.Int64
+		fn := func(ctx context.Context, p idempotent.Params) (*idempotent.Result, error) {
+			calls.Add(1)
+			return nil, wantErr
+		}
+		idp := newIdempotent(t)
+		idp.MaxAttempts = 2
+		is := assert.New(t)
+		for range 2 {
+			_, err := idp.Do(t.Context(), keyOf(t), fn, req)
+			is.ErrorIs(err, wantErr)
+		}
+
+		_, err := idp.Do(t.Context(), keyOf(t), fn, req)
+		is.ErrorIs(err, idempotent.ErrMaxAttempts)
+		is.ErrorContains(err, wantErr.Error())
+		is.Equal(int64(2), calls.Load())
+	})
+
+	t.Run("max attempts after expired lease", func(t *testing.T) {
+		repo := newRepository(t)
+		_, err := repo.Claim(t.Context(), idempotent.ClaimParams{
+			IdempotencyKey: keyOf(t),
+			LeaseOwner:     "crashed",
+			LeaseSeconds:   0.1,
+			MaxAttempts:    1,
+			Request:        req.Data,
 		})
-		req := Request{Name: "foo"}
-		_, _, err := h.LoadOrCreate(t.Context(), t.Name(), req)
+		is := assert.New(t)
+		is.NoError(err)
+		time.Sleep(200 * time.Millisecond)
+
+		idp := idempotent.New(repo)
+		idp.MaxAttempts = 1
+		_, err = idp.Do(t.Context(), keyOf(t), greet, req)
+		is.ErrorIs(err, idempotent.ErrMaxAttempts)
+	})
+
+	t.Run("in flight", func(t *testing.T) {
+		repo := newRepository(t)
+		_, err := repo.Claim(t.Context(), idempotent.ClaimParams{
+			IdempotencyKey: keyOf(t),
+			LeaseOwner:     "other",
+			LeaseSeconds:   60,
+			MaxAttempts:    idempotent.DefaultMaxAttempts,
+			Request:        req.Data,
+		})
 		is := assert.New(t)
 		is.NoError(err)
 
-		res, loaded, err := h.LoadOrCreate(t.Context(), t.Name(), req)
-		is.NoError(err)
-		is.True(loaded)
-		is.Nil(res)
+		_, err = idempotent.New(repo).Do(t.Context(), keyOf(t), greet, req)
+		is.ErrorIs(err, idempotent.ErrRequestInFlight)
 	})
 
 	t.Run("concurrent", func(t *testing.T) {
-		h := newIdempotent(t).Func("greet", greet)
-		key := t.Name()
+		var calls atomic.Int64
+		fn := func(ctx context.Context, p idempotent.Params) (*idempotent.Result, error) {
+			calls.Add(1)
+			time.Sleep(50 * time.Millisecond)
+			return greet(ctx, p)
+		}
+		idp := newIdempotent(t)
+		key := keyOf(t)
 
 		n := 10
 		var wg sync.WaitGroup
-		var load, store atomic.Int64
+		var done, inFlight atomic.Int64
 		errs := make(chan error, n)
 		start := make(chan struct{})
 		for range n {
 			wg.Go(func() {
 				<-start
-				_, loaded, err := h.LoadOrCreate(t.Context(), key, Request{Name: "foo"})
-				if err != nil {
+				_, err := idp.Do(t.Context(), key, fn, req)
+				switch {
+				case err == nil:
+					done.Add(1)
+				case errors.Is(err, idempotent.ErrRequestInFlight):
+					inFlight.Add(1)
+				default:
 					errs <- err
-					return
-				}
-				if loaded {
-					load.Add(1)
-				} else {
-					store.Add(1)
 				}
 			})
 		}
@@ -196,124 +276,152 @@ func TestLoadOrCreate(t *testing.T) {
 		for err := range errs {
 			is.NoError(err)
 		}
-		is.Equal(int64(n-1), load.Load())
-		is.Equal(int64(1), store.Load())
+		is.Equal(int64(n), done.Load()+inFlight.Load())
+		is.Equal(int64(1), calls.Load())
 	})
+}
 
-	t.Run("concurrent retry after failure", func(t *testing.T) {
-		wantErr := errors.New("bad request")
-		var calls atomic.Int64
-		inFn := make(chan struct{})
-		release := make(chan struct{})
-		h := newIdempotent(t).Func("greet", func(ctx context.Context, req Request) (*Response, error) {
+func TestCheckpoint(t *testing.T) {
+	wantErr := errors.New("step 2 failed")
+	var steps []string
+	var calls atomic.Int64
+	fn := func(ctx context.Context, p idempotent.Params) (*idempotent.Result, error) {
+		steps = append(steps, p.Checkpoint.Name)
+		switch p.Checkpoint.Name {
+		case "started":
+			return &idempotent.Result{
+				Checkpoint: &idempotent.Checkpoint{Name: "step1", Data: []byte(`{"n": 1}`)},
+			}, nil
+		case "step1":
+			return &idempotent.Result{
+				Checkpoint: &idempotent.Checkpoint{Name: "step2", Data: []byte(`{"n": 2}`)},
+			}, nil
+		case "step2":
 			if calls.Add(1) == 1 {
-				close(inFn)
-				<-release
 				return nil, wantErr
 			}
-			return greet(ctx, req)
-		})
-		key := t.Name()
-		req := Request{Name: "foo"}
+			return completed(string(p.Checkpoint.Data)), nil
+		default:
+			return nil, errors.New("unexpected checkpoint")
+		}
+	}
 
-		var wg sync.WaitGroup
-		var firstErr error
-		wg.Go(func() {
-			_, _, firstErr = h.LoadOrCreate(t.Context(), key, req)
-		})
+	idp := newIdempotent(t)
+	_, err := idp.Do(t.Context(), keyOf(t), fn, req)
+	is := assert.New(t)
+	is.ErrorIs(err, wantErr)
 
-		// Wait for the first call to hold the key, then start a second call
-		// that blocks on it.
-		<-inFn
-		var res *Response
-		var loaded bool
-		var secondErr error
-		wg.Go(func() {
-			res, loaded, secondErr = h.LoadOrCreate(t.Context(), key, req)
-		})
-		time.Sleep(100 * time.Millisecond)
-		close(release)
-		wg.Wait()
+	// The retry resumes from the saved checkpoint.
+	res, err := idp.Do(t.Context(), keyOf(t), fn, req)
+	is.NoError(err)
+	is.JSONEq(`{"n": 2}`, string(res.Data))
+	is.Equal([]string{"started", "step1", "step2", "step2"}, steps)
 
-		is := assert.New(t)
-		is.ErrorIs(firstErr, wantErr)
-		is.NoError(secondErr)
-		is.False(loaded)
-		is.Equal("hi, foo", res.Msg)
-		is.Equal(int64(2), calls.Load())
-	})
+	// Each checkpoint appends the one it replaced to the logs.
+	var logs string
+	err = dbtest.DB(t).QueryRowContext(t.Context(),
+		`select checkpoint_logs from dbtx.idempotency_keys where idempotency_key = $1`,
+		keyOf(t)).Scan(&logs)
+	is.NoError(err)
+	is.JSONEq(`[
+		{"name": "started", "data": null},
+		{"name": "step1", "data": {"n": 1}}
+	]`, logs)
 }
 
-func TestDelete(t *testing.T) {
-	idb := newIdempotent(t)
-	h := idb.Func("greet", greet)
-	key := t.Name()
-	_, _, err := h.LoadOrCreate(t.Context(), key, Request{Name: "foo"})
+func TestTakeover(t *testing.T) {
+	repo := newRepository(t)
+	key := keyOf(t)
+
+	// A worker claims the key and crashes.
+	stale, err := repo.Claim(t.Context(), idempotent.ClaimParams{
+		IdempotencyKey: key,
+		LeaseOwner:     "crashed",
+		LeaseSeconds:   0.1,
+		MaxAttempts:    idempotent.DefaultMaxAttempts,
+		Request:        req.Data,
+	})
+	is := assert.New(t)
+	is.NoError(err)
+	is.True(stale.IsNew)
+	time.Sleep(200 * time.Millisecond)
+
+	// Another worker takes over once the lease expires.
+	res, err := idempotent.New(repo).Do(t.Context(), key, greet, req)
+	is.NoError(err)
+	is.Equal(string(idempotent.StatusCompleted), res.Status)
+
+	// The crashed worker's fencing token is rejected.
+	err = repo.Ack(t.Context(), idempotent.AckParams{
+		IdempotencyKey: key,
+		FencingToken:   stale.FencingToken,
+		Response:       []byte(`{"msg": "stale"}`),
+	})
+	is.ErrorIs(err, idempotent.ErrClaimed)
+}
+
+func TestLongRunningStep(t *testing.T) {
+	// fn runs longer than the lease. The row lock held by the step
+	// transaction blocks a concurrent Claim until the step commits, so the key
+	// is neither taken over nor reported as lost.
+	var calls atomic.Int64
+	inFn := make(chan struct{})
+	fn := func(ctx context.Context, p idempotent.Params) (*idempotent.Result, error) {
+		if calls.Add(1) == 1 {
+			close(inFn)
+		}
+		time.Sleep(time.Second)
+		return greet(ctx, p)
+	}
+	idp := newIdempotent(t)
+	idp.Lease = 200 * time.Millisecond
+	key := keyOf(t)
+
+	var wg sync.WaitGroup
+	var first, second *idempotent.Response
+	var firstErr, secondErr error
+	wg.Go(func() {
+		first, firstErr = idp.Do(t.Context(), key, fn, req)
+	})
+	<-inFn
+	time.Sleep(500 * time.Millisecond) // Let the lease expire.
+	wg.Go(func() {
+		second, secondErr = idp.Do(t.Context(), key, fn, req)
+	})
+	wg.Wait()
+
+	is := assert.New(t)
+	is.NoError(firstErr)
+	is.NoError(secondErr)
+	is.Equal(string(idempotent.StatusCompleted), first.Status)
+	is.Equal(string(idempotent.StatusCompleted), second.Status)
+	is.Equal(int64(1), calls.Load())
+}
+
+func TestPurge(t *testing.T) {
+	db := dbtest.DB(t)
+	idp := idempotent.New(idempotent.NewRepository(db))
+	key := keyOf(t)
+	_, err := idp.Do(t.Context(), key, greet, req)
 	is := assert.New(t)
 	is.NoError(err)
 
-	row, err := idb.Delete(t.Context(), "greet", key)
-	is.NoError(err)
-	is.Equal("greet", row.Scope)
-	is.Equal(key, row.Key)
-	is.JSONEq(`{"Msg": "hi, foo"}`, string(row.Response))
-
-	_, err = idb.Delete(t.Context(), "greet", key)
-	is.ErrorIs(err, idempotent.ErrNotFound)
-
-	// The key can be reused after it is deleted.
-	_, loaded, err := h.LoadOrCreate(t.Context(), key, Request{Name: "bar"})
-	is.NoError(err)
-	is.False(loaded)
-}
-
-func TestScope(t *testing.T) {
-	idb := newIdempotent(t)
-	greeter := idb.Func("greet", greet)
-	echoer := idb.Func("echo", func(ctx context.Context, req Request) (*Response, error) {
-		return &Response{Msg: req.Name}, nil
-	})
-	key := t.Name()
-
-	is := assert.New(t)
-	res, loaded, err := greeter.LoadOrCreate(t.Context(), key, Request{Name: "foo"})
-	is.NoError(err)
-	is.False(loaded)
-	is.Equal("hi, foo", res.Msg)
-
-	// Same key, different scope and request: no conflict.
-	res, loaded, err = echoer.LoadOrCreate(t.Context(), key, Request{Name: "bar"})
-	is.NoError(err)
-	is.False(loaded)
-	is.Equal("bar", res.Msg)
-
-	// Deleting in one scope does not affect the other.
-	_, err = idb.Delete(t.Context(), "echo", key)
-	is.NoError(err)
-	res, loaded, err = greeter.LoadOrCreate(t.Context(), key, Request{Name: "foo"})
-	is.NoError(err)
-	is.True(loaded)
-	is.Equal("hi, foo", res.Msg)
-}
-
-func TestEmptyScope(t *testing.T) {
-	assert.Panics(t, func() {
-		newIdempotent(t).Func("", greet)
-	})
-}
-
-func TestDeleteBefore(t *testing.T) {
-	idb := newIdempotent(t)
-	h := idb.Func("greet", greet)
-	key := t.Name()
-	_, _, err := h.LoadOrCreate(t.Context(), key, Request{Name: "foo"})
-	is := assert.New(t)
+	_, err = db.ExecContext(t.Context(), `
+		update dbtx.idempotency_keys
+		   set expires_at = now() - interval '1 second'
+		 where idempotency_key = $1`, key)
 	is.NoError(err)
 
-	n, err := idb.DeleteBefore(t.Context(), time.Now().Add(time.Hour))
+	n, err := idempotent.NewRepository(db).Purge(t.Context())
 	is.NoError(err)
 	is.GreaterOrEqual(n, int64(1))
 
-	_, err = idb.Delete(t.Context(), "greet", key)
-	is.ErrorIs(err, idempotent.ErrNotFound)
+	// The key can be reused after it is purged.
+	var calls atomic.Int64
+	_, err = idp.Do(t.Context(), key, func(ctx context.Context, p idempotent.Params) (*idempotent.Result, error) {
+		calls.Add(1)
+		return greet(ctx, p)
+	}, req)
+	is.NoError(err)
+	is.Equal(int64(1), calls.Load())
 }

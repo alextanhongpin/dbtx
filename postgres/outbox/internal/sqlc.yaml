@@ -20,5 +20,10 @@ sql:
             go_type:
               import: "uuid"
               type: "UUID"
+          - db_type: "jsonb"
+            nullable: false # If you need to set nullable true, create another instance of override.
+            go_type:
+              import: "encoding/json/jsontext"
+              type: "Value"
     rules:
       - sqlc/db-prepare

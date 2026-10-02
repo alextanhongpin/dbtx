@@ -1,9 +1,12 @@
 -- name: Store :one
-insert into dbtx.live_cache(key, value, digest, expires_at)
-     values ($1, $2, $3, $4)
+-- Overwrites any existing row, including a lease placeholder. The lease
+-- holder then fails to fulfill its lease and does not clobber this value.
+insert into dbtx.cache(key, value, expires_at)
+     values ($1, $2, statement_timestamp() + sqlc.narg(ttl)::bigint * interval '1 microsecond')
 on conflict (key) do
      update
-        set value = EXCLUDED.value,
-            digest = EXCLUDED.digest,
-            expires_at = EXCLUDED.expires_at
+        set value = excluded.value,
+            lease = null,
+            expires_at = excluded.expires_at,
+            updated_at = statement_timestamp()
   returning *;

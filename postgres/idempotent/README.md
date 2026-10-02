@@ -1,111 +1,186 @@
 # idempotent
 
-A lightweight PostgreSQL-backed idempotency helper for Go. Wrap any business function with `Idempotent.Func` to guarantee that the same request is executed only once, even under concurrent retries. Subsequent calls with the same key and request payload return the cached result; calls with a different payload for the same key return `ErrRequestConflict`. Keys are scoped per handler, so different handlers can reuse the same key.
+A PostgreSQL-backed idempotency helper for Go, built on [dbtx](https://github.com/alextanhongpin/dbtx). `Idempotent.Do` runs a function at most once to completion per idempotency key, even with concurrent retries and crashed workers. Later calls with the same key and request get the stored response. Calls with a different request for the same key return `ErrRequestMismatch`.
+
+Work is protected by a **lease** and a **fencing token**. Long tasks can be split into **checkpointed steps**, so a retry continues from the last finished step instead of starting over.
 
 ## Features
 
-- **PostgreSQL storage** via `dbtx` with a simple schema (`dbtx.idempotency_keys`, keyed by `(scope, key)`).
-- **Exact request comparison** using `jsonb` equality, which ignores key order and whitespace, and compares numbers without precision loss.
-- **Single round-trip** `LoadOrStore` using `INSERT ... ON CONFLICT DO SELECT`.
-- Generic `Func[K,V]` API that works with any request/response types.
-- Safe concurrent use – only one caller executes, others wait and load the result.
+- **Exactly-once completion** for work inside the database: each step's writes commit in the same transaction as the idempotency record.
+- **Leases with fencing tokens.** When a worker crashes, another worker takes over after the lease expires. Writes from the crashed worker are rejected.
+- **Checkpoints** for multi-step tasks, so a retry continues from the last finished step.
+- **Cached outcomes.** Both `completed` and `failed` responses are stored and returned to later callers.
+- **Bounded retries.** Handler errors release the key for retry, up to `MaxAttempts`.
+- **Exact request comparison** using `jsonb` equality, which ignores key order and whitespace.
 
-## Installation
+## Install
 
 ```bash
 go get github.com/alextanhongpin/dbtx/postgres/idempotent
 ```
 
-Requires Go 1.27+ and **PostgreSQL 19+** (for `ON CONFLICT DO SELECT`).
+Requires Go 1.27+ (for the standard library `uuid` and `encoding/json/jsontext` packages). Tests run against PostgreSQL 19.
 
-## Setup
+## Schema
 
-Run the bundled schema to create the table:
+The schema lives in [`internal/schema.sql`](internal/schema.sql) and is exported as `idempotent.Schema`:
 
 ```go
-import "github.com/alextanhongpin/dbtx/postgres/idempotent"
-
-// Schema is embedded in the package
-_, err := db.Exec(idempotent.Schema)
+_, err := db.ExecContext(ctx, idempotent.Schema)
 ```
 
-## Usage
+> **Note:** `create type` has no `if not exists`, so the schema cannot be run twice yet. Copy it into your migrations instead of running it at every startup.
+
+A key moves through these statuses:
+
+```
+  Claim
+    │
+    ▼
+in_progress ──Response{completed}──▶ completed
+  │     ▲   └─Response{failed}─────▶ failed
+  │     │
+  │     │ Claim (attempts left)
+  ▼     │
+retryable
+
+handler error or invalid result: in_progress ──▶ retryable
+worker crash, lease expired:     in_progress ──Claim──▶ in_progress (new fencing token)
+```
+
+`completed` and `failed` are final. A key stays until `expires_at` (24 hours after creation) and is then removed by `Purge`.
+
+## Quick start
 
 ```go
 import (
     "context"
     "database/sql"
     "errors"
-    "fmt"
 
     "github.com/alextanhongpin/dbtx/postgres/idempotent"
 )
 
-type Request struct { Name string }
-type Response struct { Msg string }
+db, _ := sql.Open("postgres", dsn)
+idp := idempotent.New(idempotent.NewRepository(db))
 
-func main() {
-    db, _ := sql.Open("postgres", dsn)
-    repo := idempotent.NewRepository(db)
-    idb  := idempotent.New(repo)
+fn := func(ctx context.Context, p idempotent.Params) (*idempotent.Result, error) {
+    // ctx carries the transaction. Writes made through dbtx with this ctx
+    // commit together with the idempotency key.
+    return &idempotent.Result{
+        Response: &idempotent.Response{
+            Status: string(idempotent.StatusCompleted),
+            Data:   []byte(`{"msg": "hi, alice"}`),
+        },
+    }, nil
+}
 
-    // Wrap your business logic
-    idp := idb.Func("greet", func(ctx context.Context, req Request) (*Response, error) {
-        // this runs only once per unique key+request
-        return &Response{Msg: fmt.Sprintf("hi, %s", req.Name)}, nil
-    })
+req := idempotent.Request{Data: []byte(`{"name": "alice"}`)}
+res, err := idp.Do(ctx, "my-op-123", fn, req)
+switch {
+case errors.Is(err, idempotent.ErrRequestMismatch):
+    // 422: key reused with a different request.
+case errors.Is(err, idempotent.ErrRequestInFlight):
+    // 409: another worker holds the key; retry later.
+case errors.Is(err, idempotent.ErrMaxAttempts):
+    // The key ran out of attempts.
+case err != nil:
+    // Handler or database error. The key is released for retry.
+}
 
-    ctx := context.Background()
-    key := "my-op-123"
-    req := Request{Name: "alice"}
+// A second call returns the stored response without running fn.
+res, err = idp.Do(ctx, "my-op-123", fn, req)
+```
 
-    res, loaded, err := idp.LoadOrCreate(ctx, key, req)
-    if errors.Is(err, idempotent.ErrRequestConflict) {
-        // same key with different request
+`Request.Data` and `Response.Data` must be valid JSON. They are stored as `jsonb`.
+
+## Checkpoints
+
+A handler returns **exactly one** of `Checkpoint` or `Response`:
+
+- **`Checkpoint`** saves progress and commits the step. `Do` calls the handler again with the new checkpoint.
+- **`Response`** ends the run, with `Status` set to `completed` or `failed`.
+
+The first call gets the checkpoint `started`. After a takeover or retry, the handler gets the last saved checkpoint:
+
+```go
+fn := func(ctx context.Context, p idempotent.Params) (*idempotent.Result, error) {
+    switch p.Checkpoint.Name {
+    case "started":
+        // Step 1: reserve stock.
+        return &idempotent.Result{
+            Checkpoint: &idempotent.Checkpoint{Name: "reserved", Data: []byte(`{"reservation": 42}`)},
+        }, nil
+    case "reserved":
+        // Step 2: create the order using p.Checkpoint.Data.
+        return &idempotent.Result{
+            Response: &idempotent.Response{
+                Status: string(idempotent.StatusCompleted),
+                Data:   []byte(`{"order": 7}`),
+            },
+        }, nil
     }
-    if err != nil {
-        panic(err)
-    }
-    fmt.Println(res.Msg, "loaded=", loaded) // hi, alice loaded=false on first call
-
-    // Second call returns cached result without re-executing the function
-    res2, loaded2, _ := idp.LoadOrCreate(ctx, key, req)
-    fmt.Println(res2.Msg, "loaded=", loaded2) // hi, alice loaded=true
+    return nil, fmt.Errorf("unknown checkpoint: %s", p.Checkpoint.Name)
 }
 ```
 
-### API
+A result with neither or both fields set returns `ErrInvalidResult` and releases the key.
 
-- `New(repo Repository) *Idempotent` – create an Idempotent client. `Repository` is an interface, so you can supply your own implementation.
-- `NewRepository(db *sql.DB) *PostgresRepository` – create the PostgreSQL repository backed by `dbtx`.
-- `Func[K,V](scope string, fn func(context.Context, K) (V, error)) Handler[K,V]` – returns a handler with `LoadOrCreate(ctx, key, req)`. Keys are unique per `scope`; panics if `scope` is empty.
-- `LoadOrCreate(ctx, key, req)` – returns `(V, loaded, error)`. `loaded=true` means the result was read from the DB.
-- `Delete(ctx, scope, key)` – removes a stored idempotency record. Returns `ErrNotFound` if the key does not exist.
-- `DeleteBefore(ctx, t)` – removes all records created before `t`. Run it periodically to expire old keys.
-- `ErrRequestConflict` – returned when the same key is used with a different request payload.
+Each saved checkpoint appends the one it replaces to the `checkpoint_logs` column, as `{"name", "data"}` objects with the oldest first. The column records the steps a key has passed through, which helps when debugging.
+
+## How it works
+
+1. **Claim.** A single `INSERT … ON CONFLICT DO UPDATE` either creates the key (fencing token 1), or takes over a key that is `retryable` or has an expired lease (fencing token + 1, attempts + 1). The request must match and attempts must be below `MaxAttempts`.
+2. **Inspect.** If the claim fails, `Do` reads the row and returns the stored response, `ErrRequestMismatch`, `ErrRequestInFlight` or `ErrMaxAttempts`.
+3. **Step.** Each handler call runs in its own transaction:
+   - `Lock` updates the row, which locks it for the transaction and extends the lease. The update checks the fencing token, so a worker that lost the key fails here.
+   - The handler runs with the transaction in `ctx`.
+   - `Checkpoint`, `Ack` (completed) or `Fail` (failed) writes the outcome, checking the fencing token again.
+4. **Release.** On any error, `Nack` marks the key `retryable` so it can be claimed again. If the worker was fenced out, `Nack` matches no row and nothing changes.
+
+While a step holds the row lock, a concurrent `Claim` waits until the step commits. It then sees either a fresh lease or a finished key, so a step that runs longer than the lease is never taken over. No heartbeat is needed. The lease only matters when a worker crashes: its transaction rolls back, the lock is released, and another worker can take over once the lease expires.
+
+## API
+
+- `New(repo Repository) *Idempotent` creates a client. `Repository` is an interface, so you can supply your own implementation.
+- `NewRepository(db *sql.DB) *PostgresRepository` creates the PostgreSQL repository backed by `dbtx`.
+- `Idempotent.Lease` is the lease length (default `DefaultLease`, 30s). Each step extends it.
+- `Idempotent.MaxAttempts` caps claims per key (default `DefaultMaxAttempts`, 10).
+- `Do(ctx, key, fn, req) (*Response, error)` runs `fn` or returns the stored response.
+- `PostgresRepository.Purge(ctx)` deletes up to 1000 expired keys and returns the number deleted. Keys whose lease is still live are never deleted. Run it periodically until it returns 0.
+
+Errors:
+
+| Error | Meaning |
+|---|---|
+| `ErrRequestMismatch` | The key was used with a different request. |
+| `ErrRequestInFlight` | Another worker holds a live lease on the key. |
+| `ErrMaxAttempts` | The key is out of attempts. The message includes the last error. |
+| `ErrInvalidResult` | The handler returned neither or both of `Checkpoint` and `Response`. |
+| `ErrClaimed` | The fencing token no longer matches; another worker owns the key. |
+| `ErrNotFound` | The key does not exist. |
 
 ## Behaviour
 
-- **Keys are scoped.** The primary key is `(scope, key)`, so `Func("greet", ...)` and `Func("charge", ...)` can both use key `123` without conflicting. Handlers sharing a scope share its keys, so give each operation its own scope, and don't rename a scope while keys are live.
-- **`fn` runs inside a transaction.** The `ctx` passed to `fn` carries the transaction, so database writes made through `dbtx` with that `ctx` commit or roll back together with the idempotency key.
-- **Concurrent calls block.** A call with a key that is being processed waits for the first call to finish, holding a database connection while it waits. Keep `fn` short.
-- **Errors are not cached.** If `fn` returns an error, the transaction is rolled back and the next call with the same key executes `fn` again.
-- **External side effects are not covered.** If `fn` calls an external service and the transaction then fails to commit, the call is not recorded and a retry executes it again. Pass the idempotency key to the external service when it supports one.
-- **Request types must be stable.** Adding or renaming a field changes the stored JSON, so in-flight retries across a deploy may return `ErrRequestConflict`.
+- **Keys are global.** There is no scope; prefix keys yourself (for example `charge:<id>`) if different operations can share a key.
+- **Handler errors are retried, failed responses are not.** Return an error for transient failures. Return `Response{Status: failed}` for permanent ones, which are stored and returned to later callers.
+- **External side effects are not covered.** If a step calls an external service and its transaction then fails to commit, a retry calls the service again. Pass the idempotency key, or the fencing token, to services that support it.
+- **Each step holds a connection and a row lock** for as long as the handler runs. Keep steps short, and split long work into checkpoints.
+- **Request encoding must be stable.** If the JSON for the same logical request changes (for example a renamed field after a deploy), retries return `ErrRequestMismatch`.
 
-## Project Structure
+## Project structure
 
-- `idempotent.go` – generic wrapper and transactional logic.
-- `idempotent_test.go` – integration tests using a test PostgreSQL container.
-- `internal/` – SQL schema, sqlc generated code and `Repository` implementation.
+- `idempotent.go`: `Do`, claim handling and the step transaction.
+- `idempotent_test.go`: integration tests against a PostgreSQL container.
+- `internal/`: schema, queries, sqlc-generated code and the `Repository` implementation.
 
-## Running Tests
+## Running tests
 
 ```bash
 go test ./...
 ```
 
-Tests spin up a Postgres container via `dbtest` and apply the embedded schema.
+Tests start a PostgreSQL container via `dbtest` and apply the embedded schema.
 
 ## Contributing
 

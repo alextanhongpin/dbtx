@@ -7,33 +7,56 @@ package postgres
 
 import (
 	"context"
-	"encoding/json"
+	"database/sql"
+
+	"encoding/json/jsontext"
 )
 
 const compareAndSwap = `-- name: CompareAndSwap :one
-   update dbtx.live_cache
-      set value = $1
-    where key = $2
-      and digest = $3
-returning key, value, digest, created_at, updated_at, expires_at
+with expired as (
+  delete from dbtx.cache where dbtx.cache.key = $1 and dbtx.cache.expires_at <= statement_timestamp() returning dbtx.cache.key
+),
+curr as (
+  select dbtx.cache.key
+    from dbtx.cache
+   where dbtx.cache.key = $1
+     and lease is null
+     and not exists (select 1 from expired)
+),
+swapped as (
+     update dbtx.cache
+        set value = $2::jsonb,
+            expires_at = statement_timestamp() + $3::bigint * interval '1 microsecond',
+            updated_at = statement_timestamp()
+      where dbtx.cache.key = $1
+        and lease is null
+        and value = $4::jsonb
+        and not exists (select 1 from expired)
+  returning dbtx.cache.key
+)
+select exists (select 1 from curr) as found, exists (select 1 from swapped) as swapped
 `
 
 type CompareAndSwapParams struct {
-	Value  json.RawMessage
-	Key    string
-	Digest string
+	Key      string
+	NewValue jsontext.Value
+	Ttl      sql.NullInt64
+	OldValue jsontext.Value
 }
 
-func (q *Queries) CompareAndSwap(ctx context.Context, arg CompareAndSwapParams) (*DbtxLiveCache, error) {
-	row := q.db.QueryRowContext(ctx, compareAndSwap, arg.Value, arg.Key, arg.Digest)
-	var i DbtxLiveCache
-	err := row.Scan(
-		&i.Key,
-		&i.Value,
-		&i.Digest,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.ExpiresAt,
+type CompareAndSwapRow struct {
+	Found   bool
+	Swapped bool
+}
+
+func (q *Queries) CompareAndSwap(ctx context.Context, arg CompareAndSwapParams) (*CompareAndSwapRow, error) {
+	row := q.db.QueryRowContext(ctx, compareAndSwap,
+		arg.Key,
+		arg.NewValue,
+		arg.Ttl,
+		arg.OldValue,
 	)
+	var i CompareAndSwapRow
+	err := row.Scan(&i.Found, &i.Swapped)
 	return &i, err
 }

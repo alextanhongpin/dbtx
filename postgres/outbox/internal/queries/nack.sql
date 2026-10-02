@@ -1,6 +1,6 @@
 -- name: Nack :execrows
 update dbtx.outbox
-   set status = case when sqlc.arg(dead)::bool then 'dead' else 'pending' end,
+   set status = (case when sqlc.arg(dead)::bool then 'dead' else 'pending' end)::dbtx.outbox_status,
        available_at = now()
      + interval '1 second' * sqlc.arg(delay_seconds)::float8,
        locked_by = null,

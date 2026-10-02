@@ -13,7 +13,7 @@ import (
 
 const requeue = `-- name: Requeue :execrows
 update dbtx.outbox
-   set status = 'pending',
+   set status = 'pending'::dbtx.outbox_status,
        attempts = 0,
        available_at = now(),
        locked_by = null,

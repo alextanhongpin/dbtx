@@ -1,7 +1,9 @@
 package cache
 
 import (
+	"bytes"
 	"context"
+	"encoding/json/v2"
 	"fmt"
 	"time"
 )
@@ -59,18 +61,35 @@ func Idempotent[K, V any](fn fun[K, V], cfg *FuncConfig[K, V]) ifun[K, V] {
 		if err != nil {
 			return zero, false, err
 		}
-		curr, err := hash(req)
-		if err != nil {
-			return zero, false, err
-		}
-		prev, err := hash(res.Request)
-		if err != nil {
-			return zero, false, err
-		}
-		if curr != prev {
+		if loaded && !jsonEqual(req, res.Request) {
 			return zero, false, fmt.Errorf("%w: request", ErrConflict)
 		}
 
 		return res.Response, loaded, err
 	}
+}
+
+func jsonEqual(a, b any) bool {
+	c, err := jsonNorm(a)
+	if err != nil {
+		return false
+	}
+	d, err := jsonNorm(b)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(c, d)
+}
+
+func jsonNorm(v any) ([]byte, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	var a any
+	err = json.Unmarshal(b, &a)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(a, json.Deterministic(true))
 }

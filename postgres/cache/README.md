@@ -40,8 +40,7 @@ This creates the `dbtx.cache` UNLOGGED table used by the cache.
 ```go
 import "github.com/alextanhongpin/dbtx/postgres/cache"
 
-c := cache.New(db)
-c.SetPrefix("books:") // optional namespace
+c := cache.New(cache.NewPostgresRepository(db), cache.WithPrefix("books:"))
 
 // Store
 err := c.Store(ctx, id.String(), book, time.Minute)
@@ -56,28 +55,28 @@ val, loaded, err := c.LoadOrStore(ctx, key, value, ttl)
 
 ### Prefix
 
-All keys are prefixed internally via `SetPrefix` / `Prefix`. Useful for multi-tenant repositories:
+All keys are prefixed with the `WithPrefix` option (read back with `Prefix`). No separator is added, so include one. Useful for multi-tenant repositories:
 
 ```go
-repo.Cache.SetPrefix("books:")
+c := cache.New(repo, cache.WithPrefix("books:"))
 ```
 
 ## API highlights
 
 * `Migrate(ctx)` – run embedded schema to create `dbtx.cache`
-* `Store(ctx, key, value, ttl)` – write value with TTL
+* `Store(ctx, key, value, ttl)` – write value with TTL (`cache.NoExpiration` for none)
 * `StoreOnce(ctx, key, value, ttl)` – write only if absent → `cache.ErrExists`
 * `Load[T](ctx, key)` – typed read
 * `LoadAndDelete[T](ctx, key)` – get and remove
 * `Delete(ctx, key)` – remove
 * `Exists(ctx, key)` – existence check, auto-invalidates expired entries
-* `TTL(ctx, key)` – remaining time, `-1` = no expiration, `-2` = not exist
+* `TTL(ctx, key)` – remaining time, `cache.NoExpiration` if none, `cache.ErrNotExist` if missing
 * `Expire(ctx, key, ttl)` – extend/lock TTL
-* `CompareAndSwap(ctx, key, old, value, ttl)` – CAS by digest
-* `CompareAndDelete(ctx, key, old)` – delete only if value matches
+* `CompareAndSwap(ctx, key, old, value, ttl)` – write only if value matches → `cache.ErrConflict` on mismatch
+* `CompareAndDelete(ctx, key, old)` – delete only if value matches → `cache.ErrConflict` on mismatch
 * `LoadOrStore(ctx, key, value, ttl)` – atomic load-or-write
-* `LoadOrCreate(ctx, key, fn)` – load or create via factory, with optional `lock.NamedLock`
-* `Cleanup(ctx)` – purge expired rows
+* `LoadOrCreate(ctx, key, fn)` – load or compute via `fn`; the key is leased while `fn` runs, so concurrent callers get `cache.ErrRequestInFlight`
+* `Purge(ctx)` – delete expired rows (all prefixes)
 
 Errors: `ErrNotExist`, `ErrConflict`, `ErrExists`.
 

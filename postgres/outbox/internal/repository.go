@@ -147,7 +147,7 @@ func (r *Repository) Poll(ctx context.Context, lockedBy string, limit int32, lea
 
 func (r *Repository) Purge(ctx context.Context, status string, before time.Time) (int64, error) {
 	return r.db(ctx).Purge(ctx, postgres.PurgeParams{
-		Status:    status,
+		Status:    postgres.DbtxOutboxStatus(status),
 		UpdatedAt: before,
 	})
 }
@@ -199,7 +199,7 @@ func newMessage(row *postgres.DbtxOutbox) *Message {
 		AggregateID:   row.AggregateID,
 		EventType:     row.EventType,
 		Payload:       jsontext.Value(row.Payload),
-		Status:        row.Status,
+		Status:        string(row.Status),
 		Attempts:      row.Attempts,
 		MaxAttempts:   row.MaxAttempts,
 		LastError:     row.LastError.String,

@@ -19,7 +19,6 @@ var ErrNegativeCacheHit = errors.New("negative cache hit")
 func TestCache(t *testing.T) {
 	ctx := t.Context()
 	repo := NewBookRepository(dbtest.DB(t))
-	repo.Cache.SetPrefix("books:")
 
 	t.Run("empty", func(t *testing.T) {
 		// Given that the db does not have the data.
@@ -53,7 +52,7 @@ func TestCache(t *testing.T) {
 		is.Equal(b.Title, t.Name())
 
 		// And it should be cached.
-		exists, err := repo.Cache.Exists(ctx, b.ID.String())
+		exists, err := repo.cache.Exists(ctx, b.ID.String())
 		is.NoError(err)
 		is.True(exists)
 
@@ -71,7 +70,7 @@ func TestCache(t *testing.T) {
 		})
 
 		t.Run("cache expired", func(t *testing.T) {
-			err := repo.Cache.Delete(ctx, old.ID.String())
+			err := repo.cache.Delete(ctx, old.ID.String())
 			is := assert.New(t)
 			is.NoError(err)
 
@@ -96,7 +95,7 @@ func TestCache(t *testing.T) {
 			is.Equal(old.ID, b.ID)
 			is.Equal(old.Title, b.Title)
 
-			exists, err := repo.Cache.Exists(ctx, old.ID.String())
+			exists, err := repo.cache.Exists(ctx, old.ID.String())
 			is.NoError(err)
 			is.False(exists)
 		})
@@ -109,26 +108,29 @@ type Book struct {
 }
 
 type BookRepository struct {
-	*cache.Cache
+	cache *cache.Cache
+	repo  *cache.PostgresRepository
 }
 
 func NewBookRepository(db *sql.DB) *BookRepository {
+	repo := cache.NewPostgresRepository(db)
 	return &BookRepository{
-		Cache: cache.New(db),
+		repo:  repo,
+		cache: cache.New(repo, cache.WithPrefix("books:")),
 	}
 }
 
 func (r *BookRepository) Create(ctx context.Context, title string) (*Book, error) {
-	return r.DB.RunInTx2(ctx, func(ctx context.Context) (*Book, error) {
+	return r.repo.DB.RunInTx2(ctx, func(ctx context.Context) (*Book, error) {
 		var id uuid.UUID
-		err := r.DBTx(ctx).QueryRowContext(ctx, `insert into books (title) values ($1) returning id`, title).Scan(&id)
+		err := r.repo.DBTx(ctx).QueryRowContext(ctx, `insert into books (title) values ($1) returning id`, title).Scan(&id)
 		if err != nil {
 			return nil, err
 		}
 		b := &Book{ID: id, Title: title}
 
 		// Cached atomically in transaction upon creation.
-		err = r.Store(ctx, b.ID.String(), b, time.Second)
+		err = r.cache.Store(ctx, b.ID.String(), b, time.Second)
 		if err != nil {
 			return nil, err
 		}
@@ -138,7 +140,7 @@ func (r *BookRepository) Create(ctx context.Context, title string) (*Book, error
 
 func (r *BookRepository) Find(ctx context.Context, id uuid.UUID) (*Book, bool, error) {
 	key := id.String()
-	b, err := r.Load[*Book](ctx, key)
+	b, err := r.cache.Load[*Book](ctx, key)
 	if err == nil {
 		if b.ID == uuid.Nil() {
 			return nil, true, ErrNegativeCacheHit
@@ -146,18 +148,18 @@ func (r *BookRepository) Find(ctx context.Context, id uuid.UUID) (*Book, bool, e
 		return b, true, nil
 	}
 
-	b, err = r.RunInTx2(ctx, func(ctx context.Context) (*Book, error) {
+	b, err = r.repo.RunInTx2(ctx, func(ctx context.Context) (*Book, error) {
 		// No longer need singleflight, only one transaction will have access to this.
 		if err := lock.Lock(ctx, key); err != nil {
 			return nil, err
 		}
 
 		var title string
-		err = r.DBTx(ctx).QueryRowContext(ctx, `select title from books where id = $1`, id).Scan(&title)
+		err = r.repo.DBTx(ctx).QueryRowContext(ctx, `select title from books where id = $1`, id).Scan(&title)
 		if errors.Is(err, sql.ErrNoRows) {
 			// Store negative cache to avoid thundering herd.
 			b := new(Book)
-			if err := r.Store(ctx, key, b, 10*time.Second); err != nil {
+			if err := r.cache.Store(ctx, key, b, 10*time.Second); err != nil {
 				return nil, err
 			}
 			// Don't return error here, since r.Store runs in transaction.
@@ -169,7 +171,7 @@ func (r *BookRepository) Find(ctx context.Context, id uuid.UUID) (*Book, bool, e
 
 		// Store in transaction!
 		b := &Book{ID: id, Title: title}
-		err = r.Store(ctx, key, b, time.Second)
+		err = r.cache.Store(ctx, key, b, time.Second)
 		if err != nil {
 			return nil, err
 		}
@@ -186,9 +188,9 @@ func (r *BookRepository) Find(ctx context.Context, id uuid.UUID) (*Book, bool, e
 
 func (r *BookRepository) Delete(ctx context.Context, id uuid.UUID) (*Book, error) {
 	key := id.String()
-	return r.RunInTx2(ctx, func(ctx context.Context) (*Book, error) {
+	return r.repo.RunInTx2(ctx, func(ctx context.Context) (*Book, error) {
 		var title string
-		err := r.DBTx(ctx).QueryRowContext(ctx, `delete from books where id = $1 returning title`, id).Scan(&title)
+		err := r.repo.DBTx(ctx).QueryRowContext(ctx, `delete from books where id = $1 returning title`, id).Scan(&title)
 		if err != nil {
 			return nil, err
 		}
@@ -198,7 +200,7 @@ func (r *BookRepository) Delete(ctx context.Context, id uuid.UUID) (*Book, error
 		}
 
 		// Cache deleted atomically.
-		err = r.Cache.Delete(ctx, key)
+		err = r.cache.Delete(ctx, key)
 		if err != nil {
 			return nil, err
 		}

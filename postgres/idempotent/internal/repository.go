@@ -3,26 +3,27 @@ package internal
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
-	"time"
 
 	"github.com/alextanhongpin/dbtx"
 	"github.com/alextanhongpin/dbtx/postgres/idempotent/internal/postgres"
 )
 
 var (
+	ErrClaimed         = errors.New("lease expired or claimed by another process")
 	ErrNotFound        = errors.New("idempotency key not found")
-	ErrRequestConflict = errors.New("request conflict")
+	ErrRequestInFlight = errors.New("request in flight")
+	ErrRequestMismatch = errors.New("request mismatch")
 )
 
-type IdempotencyKey struct {
-	Scope     string
-	Key       string
-	Request   json.RawMessage
-	Response  json.RawMessage
-	CreatedAt time.Time
-}
+type Status = postgres.DbtxIdempotencyKeyStatus
+
+const (
+	StatusInProgress = postgres.DbtxIdempotencyKeyStatusInProgress
+	StatusRetryable  = postgres.DbtxIdempotencyKeyStatusRetryable
+	StatusCompleted  = postgres.DbtxIdempotencyKeyStatusCompleted
+	StatusFailed     = postgres.DbtxIdempotencyKeyStatusFailed
+)
 
 type Repository struct {
 	*dbtx.DB
@@ -34,75 +35,82 @@ func NewRepository(db *sql.DB) *Repository {
 	}
 }
 
-func (r *Repository) db(ctx context.Context) postgres.Querier {
-	return postgres.New(r.DBTx(ctx))
+type AckParams = postgres.AckParams
+
+func (r *Repository) Ack(ctx context.Context, params AckParams) error {
+	_, err := r.db(ctx).Ack(ctx, params)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrClaimed
+	}
+	return err
 }
 
-func (r *Repository) Delete(ctx context.Context, scope, key string) (*IdempotencyKey, error) {
-	row, err := r.db(ctx).Delete(ctx, postgres.DeleteParams{
-		Scope: scope,
-		Key:   key,
-	})
+type CheckpointParams = postgres.CheckpointParams
+
+func (r *Repository) Checkpoint(ctx context.Context, params CheckpointParams) error {
+	_, err := r.db(ctx).Checkpoint(ctx, params)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrClaimed
+	}
+	return err
+}
+
+type ClaimParams = postgres.ClaimParams
+type ClaimResponse = postgres.ClaimRow
+
+func (r *Repository) Claim(ctx context.Context, params ClaimParams) (*ClaimResponse, error) {
+	res, err := r.db(ctx).Claim(ctx, params)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrClaimed
+	}
+	return res, err
+}
+
+type FailParams = postgres.FailParams
+
+func (r *Repository) Fail(ctx context.Context, params FailParams) error {
+	_, err := r.db(ctx).Fail(ctx, params)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrClaimed
+	}
+	return err
+}
+
+type InspectParams = postgres.InspectParams
+type InspectResponse = postgres.InspectRow
+
+func (r *Repository) Inspect(ctx context.Context, params InspectParams) (*InspectResponse, error) {
+	res, err := r.db(ctx).Inspect(ctx, params)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
-	if err != nil {
-		return nil, err
-	}
-
-	return newIdempotencyKey(row), nil
+	return res, err
 }
 
-// DeleteBefore removes all idempotency keys created before t, and returns the
-// number of keys removed.
-func (r *Repository) DeleteBefore(ctx context.Context, t time.Time) (int64, error) {
-	return r.db(ctx).DeleteBefore(ctx, t)
+type LockParams = postgres.LockParams
+
+func (r *Repository) Lock(ctx context.Context, params LockParams) error {
+	_, err := r.db(ctx).Lock(ctx, params)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrClaimed
+	}
+	return err
 }
 
-func (r *Repository) Update(ctx context.Context, scope, key string, res json.RawMessage) error {
-	return r.db(ctx).Update(ctx, postgres.UpdateParams{
-		Response: res,
-		Scope:    scope,
-		Key:      key,
-	})
+type NackParams = postgres.NackParams
+
+func (r *Repository) Nack(ctx context.Context, params NackParams) error {
+	_, err := r.db(ctx).Nack(ctx, params)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrClaimed
+	}
+	return err
 }
 
-// The row is new if it was inserted by the current transaction. xmin is a
-// 32-bit xid, so the 64-bit pg_current_xact_id() must be cast down before
-// comparing, otherwise the comparison fails once the xid epoch is non-zero.
-//
-// The request is compared using jsonb equality, which is exact for numbers and
-// ignores key order and whitespace.
-const loadOrStoreStmt = `insert into dbtx.idempotency_keys(scope, key, request, response)
-values ($1, $2, $3, 'null')
-on conflict (scope, key) do select
-returning scope, key, request, response, created_at,
-  xmin = pg_current_xact_id()::xid as is_new,
-  request = $3::jsonb as is_match`
-
-// LoadOrStore inserts the scoped key with the given request, or loads the existing
-// row. It returns ErrRequestConflict if the existing row was stored with a
-// different request.
-func (r *Repository) LoadOrStore(ctx context.Context, scope, key string, req json.RawMessage) (*IdempotencyKey, bool, error) {
-	var row postgres.DbtxIdempotencyKey
-	var isNew, isMatch bool
-	err := r.DBTx(ctx).QueryRowContext(ctx, loadOrStoreStmt, scope, key, req).Scan(&row.Scope, &row.Key, &row.Request, &row.Response, &row.CreatedAt, &isNew, &isMatch)
-	if err != nil {
-		return nil, false, err
-	}
-	if !isMatch {
-		return nil, false, ErrRequestConflict
-	}
-
-	return newIdempotencyKey(&row), !isNew, nil
+func (r *Repository) Purge(ctx context.Context) (int64, error) {
+	return r.db(ctx).Purge(ctx)
 }
 
-func newIdempotencyKey(row *postgres.DbtxIdempotencyKey) *IdempotencyKey {
-	return &IdempotencyKey{
-		Scope:     row.Scope,
-		Key:       row.Key,
-		Request:   row.Request,
-		Response:  row.Response,
-		CreatedAt: row.CreatedAt,
-	}
+func (r *Repository) db(ctx context.Context) postgres.Querier {
+	return postgres.New(r.DBTx(ctx))
 }

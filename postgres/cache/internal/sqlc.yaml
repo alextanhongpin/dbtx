@@ -14,5 +14,22 @@ sql:
         emit_interface: true
         emit_pointers_for_null_types: true
         emit_result_struct_pointers: true
+        overrides:
+          # The stdlib uuid.UUID does not implement sql.Scanner/driver.Valuer,
+          # so UUIDs cross the driver boundary as strings.
+          - db_type: "uuid"
+            nullable: false
+            go_type:
+              type: "string"
+          - db_type: "uuid"
+            nullable: true
+            go_type:
+              import: "database/sql"
+              type: "NullString"
+          - db_type: "jsonb"
+            nullable: false # If you need to set nullable true, create another instance of override.
+            go_type:
+              import: "encoding/json/jsontext"
+              type: "Value"
     rules:
       - sqlc/db-prepare

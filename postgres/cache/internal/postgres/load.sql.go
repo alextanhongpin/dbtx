@@ -10,16 +10,23 @@ import (
 )
 
 const load = `-- name: Load :one
-select key, value, digest, created_at, updated_at, expires_at from dbtx.live_cache where key = $1 for update
+with expired as (
+  delete from dbtx.cache where key = $1 and expires_at <= statement_timestamp() returning key
+)
+select key, value, lease, created_at, updated_at, expires_at
+  from dbtx.cache
+ where dbtx.cache.key = $1
+   and lease is null
+   and not exists (select 1 from expired)
 `
 
-func (q *Queries) Load(ctx context.Context, key string) (*DbtxLiveCache, error) {
+func (q *Queries) Load(ctx context.Context, key string) (*DbtxCache, error) {
 	row := q.db.QueryRowContext(ctx, load, key)
-	var i DbtxLiveCache
+	var i DbtxCache
 	err := row.Scan(
 		&i.Key,
 		&i.Value,
-		&i.Digest,
+		&i.Lease,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ExpiresAt,
