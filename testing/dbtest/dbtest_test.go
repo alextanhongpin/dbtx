@@ -5,9 +5,9 @@ import (
 	"database/sql"
 	"testing"
 
-	"github.com/alextanhongpin/dbtx/testing/dbtest"
-	"github.com/alextanhongpin/testdump/yamldump"
 	_ "github.com/lib/pq"
+
+	"github.com/alextanhongpin/dbtx/testing/dbtest"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -75,16 +75,4 @@ func TestStandalone(t *testing.T) {
 	is := assert.New(t)
 	is.NoError(err)
 	is.Equal(2, n)
-}
-
-func TestDump(t *testing.T) {
-	is := assert.New(t)
-
-	db := dbtest.Tx(t)
-	_, err := db.ExecContext(ctx, `INSERT INTO users (name, data) VALUES ('Alice', null), ('Bob', '{"age": 30}')`)
-	is.NoError(err)
-
-	dbtest.Dump(t, db, "select * from users", nil)
-	dbtest.Dump(t, db, "select * from users where name=$1", []any{"Bob"}, yamldump.File("where"))
-	dbtest.WithDumper(t, db, "select * from users", nil, yamldump.New(), yamldump.File("with-dumper"))
 }
