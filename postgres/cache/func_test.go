@@ -163,7 +163,7 @@ func TestIdempotent(t *testing.T) {
 		is.Equal(t.Name(), res.Name)
 		// And the key will be cached.
 
-		exists, err := c.Exists(ctx, "user:TestFunc/ok")
+		exists, err := c.Exists(ctx, fmt.Sprintf("user:%s", t.Name()))
 		is.NoError(err)
 		is.True(exists)
 	})
@@ -193,7 +193,7 @@ func TestIdempotent(t *testing.T) {
 		is.Equal(t.Name(), res.Name)
 
 		// And the key should be created.
-		exists, err := c.Exists(ctx, "user:TestFunc/exists")
+		exists, err := c.Exists(ctx, fmt.Sprintf("user:%s", t.Name()))
 		is.NoError(err)
 		is.True(exists)
 	})
@@ -214,7 +214,7 @@ func TestIdempotent(t *testing.T) {
 		is.Empty(res.Name)
 
 		// And the key should be created.
-		exists, err := c.Exists(ctx, "user:TestFunc/none")
+		exists, err := c.Exists(ctx, fmt.Sprintf("user:%s", t.Name()))
 		is.NoError(err)
 		is.True(exists)
 	})
