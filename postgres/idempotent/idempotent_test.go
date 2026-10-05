@@ -13,6 +13,7 @@ import (
 	"uuid"
 
 	"github.com/alextanhongpin/dbtx/postgres/idempotent"
+	"github.com/alextanhongpin/dbtx/postgres/idempotent/repository"
 	"github.com/alextanhongpin/dbtx/testing/dbtest"
 	"github.com/stretchr/testify/assert"
 )
@@ -23,7 +24,7 @@ func migrate(dsn string) error {
 		return err
 	}
 	defer db.Close()
-	_, err = db.Exec(idempotent.Schema)
+	_, err = db.Exec(repository.Schema)
 	return err
 }
 
@@ -62,9 +63,9 @@ func greet(ctx context.Context, p idempotent.Params) (*idempotent.Result, error)
 	return completed(`{"msg": "hi, foo"}`), nil
 }
 
-func newRepository(t *testing.T) *idempotent.PostgresRepository {
+func newRepository(t *testing.T) *repository.Repository {
 	t.Helper()
-	return idempotent.NewRepository(dbtest.DB(t))
+	return repository.New(dbtest.DB(t))
 }
 
 func newIdempotent(t *testing.T) *idempotent.Idempotent {
@@ -267,6 +268,64 @@ func TestDo(t *testing.T) {
 		is.ErrorIs(err, idempotent.ErrRequestInFlight)
 	})
 
+	t.Run("empty data", func(t *testing.T) {
+		statuses := map[string]idempotent.Status{
+			"completed": idempotent.StatusCompleted,
+			"failed":    idempotent.StatusFailed,
+		}
+		for name, status := range statuses {
+			t.Run(name, func(t *testing.T) {
+				var calls atomic.Int64
+				fn := func(ctx context.Context, p idempotent.Params) (*idempotent.Result, error) {
+					calls.Add(1)
+					if p.Checkpoint.Name != "step" {
+						return &idempotent.Result{
+							Checkpoint: &idempotent.Checkpoint{Name: "step"},
+						}, nil
+					}
+					return &idempotent.Result{
+						Response: &idempotent.Response{Status: string(status)},
+					}, nil
+				}
+				idp := newIdempotent(t)
+				res, err := idp.Do(t.Context(), keyOf(t), fn, idempotent.Request{})
+				is := assert.New(t)
+				is.NoError(err)
+				is.Equal(string(status), res.Status)
+				is.Equal(int64(2), calls.Load())
+
+				// Nil and empty requests are the same request.
+				res, err = idp.Do(t.Context(), keyOf(t), fn, idempotent.Request{Data: []byte{}})
+				is.NoError(err)
+				is.Equal(string(status), res.Status)
+				is.JSONEq(`null`, string(res.Data))
+				is.Equal(int64(2), calls.Load())
+			})
+		}
+	})
+
+	t.Run("in transaction", func(t *testing.T) {
+		repo := newRepository(t)
+		var calls atomic.Int64
+		fn := func(ctx context.Context, p idempotent.Params) (*idempotent.Result, error) {
+			calls.Add(1)
+			return greet(ctx, p)
+		}
+		err := repo.RunInTx(t.Context(), func(txCtx context.Context) error {
+			_, err := idempotent.New(repo).Do(txCtx, keyOf(t), fn, req)
+			return err
+		})
+		is := assert.New(t)
+		is.ErrorIs(err, idempotent.ErrTxInContext)
+		is.Zero(calls.Load())
+
+		// The key was not claimed.
+		res, err := idempotent.New(repo).Do(t.Context(), keyOf(t), fn, req)
+		is.NoError(err)
+		is.Equal(string(idempotent.StatusCompleted), res.Status)
+		is.Equal(int64(1), calls.Load())
+	})
+
 	t.Run("concurrent", func(t *testing.T) {
 		var calls atomic.Int64
 		fn := func(ctx context.Context, p idempotent.Params) (*idempotent.Result, error) {
@@ -428,7 +487,7 @@ func TestLongRunningStep(t *testing.T) {
 
 func TestPurge(t *testing.T) {
 	db := dbtest.DB(t)
-	idp := idempotent.New(idempotent.NewRepository(db))
+	idp := idempotent.New(repository.New(db))
 	key := keyOf(t)
 	_, err := idp.Do(t.Context(), key, greet, req)
 	is := assert.New(t)
@@ -440,7 +499,7 @@ func TestPurge(t *testing.T) {
 		 where idempotency_key = $1`, key)
 	is.NoError(err)
 
-	n, err := idempotent.NewRepository(db).Purge(t.Context())
+	n, err := repository.New(db).Purge(t.Context())
 	is.NoError(err)
 	is.GreaterOrEqual(n, int64(1))
 

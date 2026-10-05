@@ -1,20 +1,13 @@
 package idempotent
 
 import (
-	_ "embed"
-
 	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"time"
 	"uuid"
-
-	"github.com/alextanhongpin/dbtx/postgres/idempotent/internal"
 )
-
-//go:embed internal/schema.sql
-var Schema string
 
 const (
 	DefaultLease       = 30 * time.Second
@@ -23,20 +16,23 @@ const (
 )
 
 var (
-	ErrClaimed         = internal.ErrClaimed
-	ErrNotFound        = internal.ErrNotFound
-	ErrRequestInFlight = internal.ErrRequestInFlight
-	ErrRequestMismatch = internal.ErrRequestMismatch
+	ErrClaimed         = errors.New("lease expired or claimed by another process")
+	ErrNotFound        = errors.New("idempotency key not found")
+	ErrRequestInFlight = errors.New("request in flight")
+	ErrRequestMismatch = errors.New("request mismatch")
 	ErrMaxAttempts     = errors.New("max attempts reached")
 	ErrBackoff         = errors.New("retry backoff")
 	ErrInvalidResult   = errors.New("result must set exactly one of Checkpoint or Response")
+	ErrTxInContext     = errors.New("idempotent: ctx must not carry a transaction")
 )
 
+type Status string
+
 const (
-	StatusInProgress = internal.StatusInProgress
-	StatusRetryable  = internal.StatusRetryable
-	StatusCompleted  = internal.StatusCompleted
-	StatusFailed     = internal.StatusFailed
+	StatusInProgress Status = "in_progress"
+	StatusRetryable  Status = "retryable"
+	StatusCompleted  Status = "completed"
+	StatusFailed     Status = "failed"
 )
 
 // Outcomes returned by Claim.
@@ -51,19 +47,66 @@ const (
 	OutcomePayloadMismatch = "payload_mismatch"
 )
 
-var NewRepository = internal.NewRepository
+type AckParams struct {
+	IdempotencyKey string
+	FencingToken   int64
+	Response       []byte
+	TtlSeconds     float64
+}
 
-type (
-	AckParams          = internal.AckParams
-	CheckpointParams   = internal.CheckpointParams
-	ClaimParams        = internal.ClaimParams
-	ClaimResponse      = internal.ClaimResponse
-	FailParams         = internal.FailParams
-	LockParams         = internal.LockParams
-	NackParams         = internal.NackParams
-	PostgresRepository = internal.Repository
-	Status             = internal.Status
-)
+type CheckpointParams struct {
+	IdempotencyKey string
+	FencingToken   int64
+	Checkpoint     string
+	CheckpointData []byte
+	LeaseSeconds   float64
+}
+
+type ClaimParams struct {
+	IdempotencyKey string
+	Request        []byte
+	LeaseOwner     string
+	LeaseSeconds   float64
+	MaxAttempts    int32
+	TtlSeconds     float64
+}
+
+// ClaimResponse fields that do not apply to the Outcome are zero.
+type ClaimResponse struct {
+	Outcome        string
+	FencingToken   int64
+	Attempts       int32
+	Checkpoint     string
+	CheckpointData []byte
+	Response       []byte
+	Error          string
+	LeaseExpiresAt time.Time
+	RetryAfter     time.Time
+}
+
+type FailParams struct {
+	IdempotencyKey string
+	FencingToken   int64
+	Response       []byte
+	Error          string
+	TtlSeconds     float64
+}
+
+type LockParams struct {
+	IdempotencyKey string
+	FencingToken   int64
+	LeaseSeconds   float64
+}
+
+type NackParams struct {
+	IdempotencyKey     string
+	FencingToken       int64
+	Error              string
+	MaxAttempts        int32
+	BaseBackoffSeconds float64
+	MaxBackoffSeconds  float64
+	TtlSeconds         float64
+}
 
 // Repository stores idempotency keys.
 type Repository interface {
@@ -73,6 +116,7 @@ type Repository interface {
 	Fail(ctx context.Context, params FailParams) error
 	Lock(ctx context.Context, params LockParams) error
 	Nack(ctx context.Context, params NackParams) error
+	IsTx(ctx context.Context) bool
 	Purge(ctx context.Context) (int64, error)
 	RunInTx(ctx context.Context, fn func(txCtx context.Context) error) error
 }
@@ -105,7 +149,13 @@ type fun = func(context.Context, Params) (*Result, error)
 // extends the lease, so the key cannot be taken over while fn is running.
 // fn returns either a Checkpoint, which is saved and passed to the next call,
 // or a Response, which ends the run.
+//
+// Do returns ErrTxInContext if ctx carries a transaction of the repository:
+// each step must commit on its own, so it cannot join the caller's.
 func (i *Idempotent) Do(ctx context.Context, key string, fn fun, req Request) (*Response, error) {
+	if i.repo.IsTx(ctx) {
+		return nil, ErrTxInContext
+	}
 	claim, cached, err := i.claim(ctx, key, req)
 	if err != nil {
 		return nil, err

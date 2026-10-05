@@ -23,10 +23,10 @@ Requires Go 1.27+ (for the standard library `uuid` and `encoding/json/jsontext` 
 
 ## Schema
 
-The schema lives in [`internal/schema.sql`](internal/schema.sql) and is exported as `idempotent.Schema`:
+The schema lives in [`repository/schema.sql`](repository/schema.sql) and is exported as `repository.Schema`:
 
 ```go
-_, err := db.ExecContext(ctx, idempotent.Schema)
+_, err := db.ExecContext(ctx, repository.Schema)
 ```
 
 > **Note:** `create type` has no `if not exists`, so the schema cannot be run twice yet. Copy it into your migrations instead of running it at every startup.
@@ -59,10 +59,11 @@ import (
     "errors"
 
     "github.com/alextanhongpin/dbtx/postgres/idempotent"
+    "github.com/alextanhongpin/dbtx/postgres/idempotent/repository"
 )
 
 db, _ := sql.Open("postgres", dsn)
-idp := idempotent.New(idempotent.NewRepository(db))
+idp := idempotent.New(repository.New(db))
 
 fn := func(ctx context.Context, p idempotent.Params) (*idempotent.Result, error) {
     // ctx carries the transaction. Writes made through dbtx with this ctx
@@ -144,13 +145,13 @@ While a step holds the row lock, a concurrent `Claim` waits until the step commi
 ## API
 
 - `New(repo Repository) *Idempotent` creates a client. `Repository` is an interface, so you can supply your own implementation.
-- `NewRepository(db *sql.DB) *PostgresRepository` creates the PostgreSQL repository backed by `dbtx`.
+- `repository.New(db *sql.DB) *repository.Repository` creates the PostgreSQL repository backed by `dbtx`.
 - `Idempotent.Lease` is the lease length (default `DefaultLease`, 30s). Each step extends it.
 - `Idempotent.MaxAttempts` caps claims per key (default `DefaultMaxAttempts`, 10).
 - `Idempotent.TTL` is how long a key is kept (default `DefaultTTL`, 24h).
 - `Idempotent.BaseBackoff` and `Idempotent.MaxBackoff` set the retry backoff after a handler error. A zero `MaxBackoff` disables it.
 - `Do(ctx, key, fn, req) (*Response, error)` runs `fn` or returns the stored response.
-- `PostgresRepository.Purge(ctx)` deletes up to 1000 expired keys and returns the number deleted. Keys whose lease is still live are never deleted. Run it periodically until it returns 0.
+- `repository.Repository.Purge(ctx)` deletes up to 1000 expired keys and returns the number deleted. Keys whose lease is still live are never deleted. Run it periodically until it returns 0.
 
 Errors:
 
@@ -176,7 +177,7 @@ Errors:
 
 - `idempotent.go`: `Do`, claim handling and the step transaction.
 - `idempotent_test.go`: integration tests against a PostgreSQL container.
-- `internal/`: schema, queries, sqlc-generated code and the `Repository` implementation.
+- `repository/`: schema, queries, sqlc-generated code and the PostgreSQL implementation of `idempotent.Repository`.
 
 ## Running tests
 
