@@ -1247,3 +1247,20 @@ func TestLoadOrCreatePanic(t *testing.T) {
 	is.False(loaded)
 	is.Equal("v", v)
 }
+
+func TestLoadOrCreateShortLease(t *testing.T) {
+	// A lease shorter than the renewal interval would expire before it is
+	// renewed, and the value would never be cached.
+	c := cache.New(repository.New(dbtest.DB(t)), cache.WithLease(time.Millisecond))
+	key := uuid.NewV7().String()
+	_, _, err := c.LoadOrCreate(t.Context(), key, func(context.Context, string) (string, time.Duration, error) {
+		time.Sleep(100 * time.Millisecond)
+		return "v", time.Minute, nil
+	})
+	is := assert.New(t)
+	is.NoError(err)
+
+	v, err := c.Load[string](t.Context(), key)
+	is.NoError(err)
+	is.Equal("v", v)
+}

@@ -24,6 +24,9 @@ const (
 	// minRenewInterval bounds how often a lease is renewed.
 	minRenewInterval = 10 * time.Millisecond
 
+	// minLease is the shortest lease that is renewed before it expires.
+	minLease = 3 * minRenewInterval
+
 	// releaseTimeout bounds releasing a lease after the caller's context is
 	// done.
 	releaseTimeout = 5 * time.Second
@@ -81,6 +84,8 @@ func WithPrefix(prefix string) Option {
 // WithLease sets how long LoadOrCreate holds a key while computing its value.
 // The lease is renewed in the background until the value is stored.
 // Non-positive values use DefaultLease.
+// Leases shorter than 30ms are raised to 30ms, so that they can be renewed
+// before they expire.
 func WithLease(lease time.Duration) Option {
 	return func(c *Cache) {
 		c.lease = lease
@@ -104,6 +109,7 @@ func New(repo Repository, opts ...Option) *Cache {
 	if c.lease <= 0 {
 		c.lease = DefaultLease
 	}
+	c.lease = max(c.lease, minLease)
 	return c
 }
 
