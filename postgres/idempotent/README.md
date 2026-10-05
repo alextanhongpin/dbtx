@@ -129,7 +129,7 @@ fn := func(ctx context.Context, p idempotent.Params) (*idempotent.Result, error)
 
 A result with neither or both fields set returns `ErrInvalidResult` and releases the key.
 
-Each saved checkpoint appends the one it replaces to the `checkpoint_logs` column, as `{"name", "data"}` objects with the oldest first. The column records the steps a key has passed through, which helps when debugging.
+Each saved checkpoint appends the one it replaces to the `checkpoint_logs` column, as `{"name", "data"}` objects with the oldest first. Only the last 100 are kept. The column records the steps a key has passed through, which helps when debugging.
 
 ## How it works
 

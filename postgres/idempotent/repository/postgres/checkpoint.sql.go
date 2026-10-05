@@ -13,9 +13,16 @@ import (
 
 const checkpoint = `-- name: Checkpoint :one
    update dbtx.idempotency_keys
-      set checkpoint_logs = checkpoint_logs
-       || jsonb_build_array(
-            jsonb_build_object('name', checkpoint, 'data', checkpoint_data)
+      set checkpoint_logs =
+          (
+            select coalesce(jsonb_agg(log.entry order by log.n), '[]')
+              from jsonb_array_elements(
+                     checkpoint_logs
+                  || jsonb_build_array(
+                       jsonb_build_object('name', checkpoint, 'data', checkpoint_data)
+                     )
+                   ) with ordinality as log(entry, n)
+             where log.n > jsonb_array_length(checkpoint_logs) + 1 - 100
           ),
           checkpoint = $1::text,
           checkpoint_data = $2::jsonb,
@@ -38,7 +45,8 @@ type CheckpointParams struct {
 
 // Extends the lease on commit, so a Claim blocked on the row lock does not
 // take over between steps. The previous checkpoint is appended to
-// checkpoint_logs.
+// checkpoint_logs, which keeps the last 100 entries, so that a long or
+// looping run does not rewrite an ever larger value on every step.
 func (q *Queries) Checkpoint(ctx context.Context, arg CheckpointParams) (string, error) {
 	row := q.db.QueryRowContext(ctx, checkpoint,
 		arg.Checkpoint,

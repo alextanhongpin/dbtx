@@ -18,7 +18,7 @@ create table if not exists dbtx.idempotency_keys
   attempts         integer not null default 1,
   checkpoint       text not null default 'started',  -- optional recovery point
   checkpoint_data  jsonb not null default 'null',
-  checkpoint_logs  jsonb not null default '[]',  -- previous checkpoints, oldest first
+  checkpoint_logs  jsonb not null default '[]',  -- last 100 previous checkpoints, oldest first
   response         jsonb not null default 'null',
   error            text,
   created_at       timestamptz not null default now(),

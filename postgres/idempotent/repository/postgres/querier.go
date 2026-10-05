@@ -12,7 +12,8 @@ type Querier interface {
 	Ack(ctx context.Context, arg AckParams) (*DbtxIdempotencyKey, error)
 	// Extends the lease on commit, so a Claim blocked on the row lock does not
 	// take over between steps. The previous checkpoint is appended to
-	// checkpoint_logs.
+	// checkpoint_logs, which keeps the last 100 entries, so that a long or
+	// looping run does not rewrite an ever larger value on every step.
 	Checkpoint(ctx context.Context, arg CheckpointParams) (string, error)
 	// Columns that do not apply to the outcome are null; they are coalesced to
 	// the Go zero values ('0001-01-01' scans to time.Time{}).

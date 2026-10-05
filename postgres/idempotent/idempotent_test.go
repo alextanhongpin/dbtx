@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -685,4 +686,39 @@ func TestStepFailureIsRecorded(t *testing.T) {
 		is.NoError(err)
 		is.Equal(string(idempotent.StatusCompleted), res.Status)
 	})
+}
+
+func TestCheckpointLogsAreCapped(t *testing.T) {
+	const steps = 105
+	fn := func(ctx context.Context, p idempotent.Params) (*idempotent.Result, error) {
+		var n int
+		if p.Checkpoint.Name != "started" {
+			if _, err := fmt.Sscanf(p.Checkpoint.Name, "step%d", &n); err != nil {
+				return nil, err
+			}
+		}
+		if n == steps {
+			return completed(`null`), nil
+		}
+		return &idempotent.Result{
+			Checkpoint: &idempotent.Checkpoint{Name: fmt.Sprintf("step%d", n+1)},
+		}, nil
+	}
+	_, err := newIdempotent(t).Do(t.Context(), keyOf(t), fn, req)
+	is := assert.New(t)
+	is.NoError(err)
+
+	// The log holds started, step1 ... step104; only the last 100 are kept.
+	var n int
+	var first, last string
+	err = dbtest.DB(t).QueryRowContext(t.Context(), `
+		select jsonb_array_length(checkpoint_logs),
+		       checkpoint_logs->0->>'name',
+		       checkpoint_logs->-1->>'name'
+		  from dbtx.idempotency_keys
+		 where idempotency_key = $1`, keyOf(t)).Scan(&n, &first, &last)
+	is.NoError(err)
+	is.Equal(100, n)
+	is.Equal("step5", first)
+	is.Equal("step104", last)
 }
