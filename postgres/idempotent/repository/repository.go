@@ -65,8 +65,8 @@ func (r *Repository) Claim(ctx context.Context, params idempotent.ClaimParams) (
 		FencingToken:   res.FencingToken,
 		Attempts:       res.Attempts,
 		Checkpoint:     res.Checkpoint,
-		CheckpointData: res.CheckpointData,
-		Response:       res.Response,
+		CheckpointData: nullToNil(res.CheckpointData),
+		Response:       nullToNil(res.Response),
 		Error:          res.Error,
 		LeaseExpiresAt: res.LeaseExpiresAt,
 		RetryAfter:     res.RetryAfter,
@@ -120,6 +120,15 @@ func (r *Repository) db(ctx context.Context) postgres.Querier {
 func jsonOrNull(b []byte) []byte {
 	if len(b) == 0 {
 		return []byte("null")
+	}
+	return b
+}
+
+// nullToNil reverses jsonOrNull, so that data saved empty is read back as
+// nil.
+func nullToNil(b []byte) []byte {
+	if string(b) == "null" {
+		return nil
 	}
 	return b
 }

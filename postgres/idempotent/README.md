@@ -160,7 +160,7 @@ Errors:
 | `ErrRequestMismatch` | The key was used with a different request. |
 | `ErrRequestInFlight` | Another worker holds a live lease on the key. |
 | `ErrBackoff` | The last attempt failed and the backoff has not elapsed. |
-| `ErrMaxAttempts` | A crashed worker used the last attempt; the key is now `failed`. The message includes the last error. |
+| `ErrMaxAttempts` | A crashed worker used the last attempt; the key is now `failed`. The message includes the last error. Later calls for the key return its cached `failed` response, with a nil error, like any other failed key. |
 | `ErrInvalidResult` | The handler returned neither or both of `Checkpoint` and `Response`. |
 | `ErrClaimed` | The fencing token no longer matches; another worker owns the key. |
 | `ErrNotFound` | The key does not exist. |

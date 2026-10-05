@@ -281,6 +281,8 @@ func TestDo(t *testing.T) {
 				fn := func(ctx context.Context, p idempotent.Params) (*idempotent.Result, error) {
 					calls.Add(1)
 					if p.Checkpoint.Name != "step" {
+						// No checkpoint data was saved yet.
+						assert.Nil(t, p.Checkpoint.Data)
 						return &idempotent.Result{
 							Checkpoint: &idempotent.Checkpoint{Name: "step"},
 						}, nil
@@ -300,7 +302,7 @@ func TestDo(t *testing.T) {
 				res, err = idp.Do(t.Context(), keyOf(t), fn, idempotent.Request{Data: []byte{}})
 				is.NoError(err)
 				is.Equal(string(status), res.Status)
-				is.JSONEq(`null`, string(res.Data))
+				is.Nil(res.Data)
 				is.Equal(int64(2), calls.Load())
 			})
 		}
