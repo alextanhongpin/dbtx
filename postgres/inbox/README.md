@@ -83,7 +83,7 @@ for {
 }
 ```
 
-`Dequeue` leases up to `limit` messages to the worker (`FOR UPDATE SKIP LOCKED`), so several workers can run concurrently. It does not keep a transaction open while the batch waits: each message is handled in its own short transaction. Leased messages are hidden for `in.Lease` (default 30s), which must cover handling the whole batch. If a lease expires, for example because the worker crashed, the message is delivered again. A lease that expires on the final attempt marks the message dead.
+`Dequeue` leases up to `limit` messages to the worker (`FOR UPDATE SKIP LOCKED`), so several workers can run concurrently. It does not keep a transaction open while the batch waits: each message is handled in its own short transaction. Leased messages are hidden for `in.Lease` (default 30s). Each message's lease is renewed when its handler starts, and its row stays locked while the handler runs, so it is not delivered to another worker meanwhile, even if the handler outlives the lease. A message whose lease expires while it waits for its turn in the batch may be taken by another worker, and is then skipped. If a worker crashes, its messages are delivered again once their leases expire. A lease that expires on the final attempt marks the message dead.
 
 ### Ordering
 
@@ -99,7 +99,7 @@ Without `Ordered`, messages are dequeued in `available_at` order, so retried mes
 
 ### Failure semantics
 
-Return `nil` to acknowledge the message. It is marked as `done` in the same transaction as the writes the handler made through `ctx`. If another worker took the message in the meantime, the transaction is rolled back and `Dequeue` returns an error wrapping `inbox.ErrLeaseLost`.
+Return `nil` to acknowledge the message. It is marked as `done` in the same transaction as the writes the handler made through `ctx`. If another worker took the message before its turn, the handler is not called and `Dequeue` returns an error wrapping `inbox.ErrLeaseLost`.
 
 Return any error to fail it. Writes the handler made through `ctx` are rolled back, the error is stored in `last_error`, and the message is hidden until its backoff expires. Backoff times are computed by the database, so clock skew between app and database does not matter.
 
@@ -119,9 +119,9 @@ in.OnError = func(msg *inbox.Message, err error) {
 }
 ```
 
-An error from `Dequeue` other than `ErrEOQ` means the affected messages will be retried once their lease expires.
+A failed handler's error and backoff are recorded in the same transaction that rolls back its writes, before the message is released. An error from `Dequeue` other than `ErrEOQ` means the affected messages will be retried once their lease expires.
 
-A panic in the handler rolls back its transaction and propagates. The message is retried once its lease expires.
+A panic in the handler rolls back its transaction and propagates. The message is retried once its lease expires. If `ctx` is cancelled or a handler panics, the messages of the batch that were not handled yet are released right away, without using up an attempt.
 
 ### Dead letters and cleanup
 
