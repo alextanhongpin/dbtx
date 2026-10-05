@@ -382,3 +382,34 @@ func TestWorkerShutdownDuringClaim(t *testing.T) {
 		t.Fatalf("handler ran %d times, want 1", n)
 	}
 }
+
+func TestWorkerShutdownTimeout(t *testing.T) {
+	repo := newFake()
+	_, _ = repo.Create(context.Background(), CreateParams{IdempotencyKey: "k", Request: json.RawMessage(`{}`), MaxAttempts: 3})
+	started := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	w := NewWorker(repo, func(context.Context, Job) (json.RawMessage, error) {
+		close(started)
+		<-release // ignores ctx
+		return nil, nil
+	}, WorkerConfig{
+		PollInterval:    10 * time.Millisecond,
+		ShutdownGrace:   50 * time.Millisecond,
+		FinalizeTimeout: 100 * time.Millisecond,
+	}, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	errc := make(chan error, 1)
+	go func() { errc <- w.Run(ctx) }()
+	<-started
+	cancel()
+
+	select {
+	case err := <-errc:
+		if !errors.Is(err, ErrShutdownTimeout) {
+			t.Fatalf("Run() = %v, want ErrShutdownTimeout", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return")
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"os"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 	"uuid"
 )
@@ -102,7 +103,8 @@ func NewWorker(repo Repository, handler Handler, cfg WorkerConfig, log *slog.Log
 // Run polls until ctx is cancelled, then stops claiming and lets in-flight
 // jobs finish for up to ShutdownGrace. After the grace period their contexts
 // are cancelled (cause ErrShutdown) and they are released for fast retry.
-// Run returns once everything has drained.
+// Run returns once everything has drained, or with ErrShutdownTimeout if
+// cancelled jobs do not stop within twice FinalizeTimeout.
 func (w *Worker) Run(ctx context.Context) error {
 	if w.repo.IsTx(ctx) {
 		return ErrTxInContext
@@ -114,6 +116,7 @@ func (w *Worker) Run(ctx context.Context) error {
 
 	sem := make(chan struct{}, w.cfg.Concurrency)
 	var wg sync.WaitGroup
+	var running atomic.Int64
 	claimFailures := 0
 
 	for ctx.Err() == nil {
@@ -145,7 +148,9 @@ func (w *Worker) Run(ctx context.Context) error {
 		claimFailures = 0
 
 		for _, job := range claimed {
+			running.Add(1)
 			wg.Go(func() {
+				defer running.Add(-1)
 				defer func() { <-sem }()
 				w.process(workCtx, job, claimedAt)
 			})
@@ -164,7 +169,14 @@ func (w *Worker) Run(ctx context.Context) error {
 	case <-time.After(w.cfg.ShutdownGrace):
 		w.log.Warn("shutdown grace elapsed; cancelling in-flight jobs")
 		cancelWork(ErrShutdown)
-		<-done
+
+		// Handlers must honour ctx; one that does not would block Run
+		// forever. Allow time to return and to record the outcome.
+		select {
+		case <-done:
+		case <-time.After(2 * w.cfg.FinalizeTimeout):
+			return fmt.Errorf("%w: %d still running", ErrShutdownTimeout, running.Load())
+		}
 	}
 	return nil
 }

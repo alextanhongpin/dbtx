@@ -33,6 +33,11 @@ var (
 	// a value (SQLSTATE class 22, data exception). Retrying cannot fix it.
 	ErrInvalidData = errors.New("jobs: invalid data")
 
+	// ErrShutdownTimeout: Run gave up waiting for in-flight jobs that did not
+	// stop after their context was cancelled. They keep running in the
+	// background, and are retried once their lease expires.
+	ErrShutdownTimeout = errors.New("jobs: in-flight jobs did not stop after shutdown")
+
 	// ErrShutdown is the cancel cause when the shutdown grace period elapses.
 	ErrShutdown = errors.New("jobs: worker shutting down")
 )
