@@ -25,6 +25,11 @@ type Querier interface {
 	ClaimByAggregateID(ctx context.Context, arg ClaimByAggregateIDParams) ([]*DbtxInbox, error)
 	Count(ctx context.Context) (int64, error)
 	Create(ctx context.Context, arg CreateParams) (uuid.UUID, error)
+	// Marks messages whose lease expired on their final attempt as dead.
+	//
+	// Rows locked by a running handler are skipped instead of waited for: the
+	// handler is still delivering the message. Skipping also means concurrent
+	// calls never wait on each other, so they cannot deadlock.
 	ExpireLeases(ctx context.Context) error
 	Find(ctx context.Context, id uuid.UUID) (*DbtxInbox, error)
 	ListDead(ctx context.Context, limit int32) ([]*DbtxInbox, error)

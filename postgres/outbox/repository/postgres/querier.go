@@ -16,6 +16,10 @@ type Querier interface {
 	Create(ctx context.Context, arg CreateParams) (uuid.UUID, error)
 	// Dead marks messages whose lease expired on their final attempt, for
 	// example because the worker crashed, as dead.
+	//
+	// Rows locked by a running handler are skipped instead of waited for: the
+	// handler is still delivering the message. Skipping also means concurrent
+	// calls never wait on each other, so they cannot deadlock.
 	Dead(ctx context.Context) (int64, error)
 	Find(ctx context.Context, id uuid.UUID) (*DbtxOutbox, error)
 	ListDead(ctx context.Context, limit int32) ([]*DbtxOutbox, error)

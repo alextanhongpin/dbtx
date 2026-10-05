@@ -808,3 +808,42 @@ func (suite *InboxTestSuite) TestInvalidMaxAttempts() {
 		update dbtx.inbox set max_attempts = 0 where id = $1`, suite.ids[0])
 	suite.ErrorContains(err, "check constraint")
 }
+
+func (suite *InboxTestSuite) TestExpiredLeaseLockedIsSkipped() {
+	ctx := suite.T().Context()
+	suite.createN(1)
+
+	// A worker's lease expired on the final attempt, but its handler still
+	// holds the row lock.
+	_, err := suite.repo.DBTx(ctx).ExecContext(ctx, `
+		update dbtx.inbox
+		   set status = 'processing', locked_by = 'slow', attempts = max_attempts,
+		       available_at = now() - interval '1 second'
+		 where id = $1`, suite.ids[0])
+	suite.Require().NoError(err)
+	tx, err := suite.repo.Unwrap().BeginTx(ctx, nil)
+	suite.Require().NoError(err)
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `select 1 from dbtx.inbox where id = $1 for update`, suite.ids[0])
+	suite.Require().NoError(err)
+
+	// Dequeue does not wait for the handler, and leaves the message alone.
+	timeout, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	start := time.Now()
+	err = suite.ob.Dequeue(timeout, 1, func(context.Context, *inbox.Message) error {
+		suite.Fail("delivered while locked")
+		return nil
+	})
+	suite.ErrorIs(err, inbox.ErrEOQ)
+	suite.Less(time.Since(start), time.Second)
+	suite.Equal(inbox.StatusProcessing, suite.find(suite.ids[0]).Status)
+
+	// Once the handler is gone, the message is dead.
+	suite.NoError(tx.Rollback())
+	suite.ErrorIs(suite.ob.Dequeue(ctx, 1, func(context.Context, *inbox.Message) error {
+		suite.Fail("delivered after the final attempt")
+		return nil
+	}), inbox.ErrEOQ)
+	suite.Equal(inbox.StatusDead, suite.find(suite.ids[0]).Status)
+}
