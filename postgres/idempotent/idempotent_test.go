@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"math"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -302,6 +303,21 @@ func TestDo(t *testing.T) {
 				is.Equal(int64(2), calls.Load())
 			})
 		}
+	})
+
+	t.Run("invalid max attempts", func(t *testing.T) {
+		for _, n := range []int{-1, math.MaxInt32 + 1} {
+			idp := newIdempotent(t)
+			idp.MaxAttempts = n
+			_, err := idp.Do(t.Context(), keyOf(t), greet, req)
+			assert.ErrorIs(t, err, idempotent.ErrInvalidConfig, n)
+		}
+
+		// The key was not claimed.
+		res, err := newIdempotent(t).Do(t.Context(), keyOf(t), greet, req)
+		is := assert.New(t)
+		is.NoError(err)
+		is.Equal(string(idempotent.StatusCompleted), res.Status)
 	})
 
 	t.Run("in transaction", func(t *testing.T) {

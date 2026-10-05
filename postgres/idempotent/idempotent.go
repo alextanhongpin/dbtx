@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 	"uuid"
 )
@@ -18,6 +19,7 @@ const (
 var (
 	ErrBackoff         = errors.New("retry backoff")
 	ErrClaimed         = errors.New("lease expired or claimed by another process")
+	ErrInvalidConfig   = errors.New("idempotent: invalid config")
 	ErrInvalidResult   = errors.New("result must set exactly one of Checkpoint or Response")
 	ErrMaxAttempts     = errors.New("max attempts reached")
 	ErrNotFound        = errors.New("idempotency key not found")
@@ -122,8 +124,11 @@ type Repository interface {
 }
 
 type Idempotent struct {
-	repo        Repository
-	Lease       time.Duration
+	repo  Repository
+	Lease time.Duration
+	// MaxAttempts is the number of attempts before the key fails. Zero means
+	// DefaultMaxAttempts, and values outside int32 make Do fail with
+	// ErrInvalidConfig.
 	MaxAttempts int
 	// TTL is how long a key is kept after its last write before Purge
 	// removes it.
@@ -155,6 +160,10 @@ type fun = func(context.Context, Params) (*Result, error)
 func (i *Idempotent) Do(ctx context.Context, key string, fn fun, req Request) (*Response, error) {
 	if i.repo.IsTx(ctx) {
 		return nil, ErrTxInContext
+	}
+	// maxAttempts converts to int32 for the database.
+	if i.MaxAttempts < 0 || i.MaxAttempts > math.MaxInt32 {
+		return nil, fmt.Errorf("%w: MaxAttempts must be between 0 (default) and %d", ErrInvalidConfig, math.MaxInt32)
 	}
 	claim, cached, err := i.claim(ctx, key, req)
 	if err != nil {
