@@ -3,6 +3,7 @@ package cache
 import (
 	"bytes"
 	"context"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
 	"time"
@@ -85,15 +86,19 @@ func jsonEqual(a, b any) bool {
 	return bytes.Equal(c, d)
 }
 
+// jsonNorm returns a canonical JSON encoding of v: object members are sorted
+// and whitespace is removed, so that requests that differ only in key order or
+// formatting, such as a raw JSON request read back from jsonb, compare equal.
+// Integers keep their exact digits; decoding into any, or plain RFC 8785
+// canonicalization, would round those beyond 2^53 to float64.
 func jsonNorm(v any) ([]byte, error) {
-	b, err := json.Marshal(v)
+	b, err := json.Marshal(v, json.Deterministic(true))
 	if err != nil {
 		return nil, err
 	}
-	var a any
-	err = json.Unmarshal(b, &a)
-	if err != nil {
+	val := jsontext.Value(b)
+	if err := val.Canonicalize(jsontext.CanonicalizeRawInts(false)); err != nil {
 		return nil, err
 	}
-	return json.Marshal(a, json.Deterministic(true))
+	return val, nil
 }

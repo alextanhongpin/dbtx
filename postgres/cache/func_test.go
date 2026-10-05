@@ -2,10 +2,12 @@ package cache_test
 
 import (
 	"context"
+	"encoding/json/jsontext"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
+	"uuid"
 
 	"github.com/alextanhongpin/dbtx/postgres/cache"
 	"github.com/alextanhongpin/dbtx/postgres/cache/repository"
@@ -272,5 +274,54 @@ func TestIdempotent(t *testing.T) {
 		// It should return a conflict instead of panicking.
 		_, _, err = idp(ctx, dto)
 		is.ErrorIs(err, cache.ErrConflict)
+	})
+}
+
+func TestIdempotentRequestEquality(t *testing.T) {
+	ctx := t.Context()
+	c := cache.New(repository.New(dbtest.DB(t)))
+
+	t.Run("large integers", func(t *testing.T) {
+		type Transfer struct {
+			AccountID int64
+		}
+		key := uuid.NewV7().String()
+		idp := cache.Idempotent(func(ctx context.Context, req Transfer) (int64, time.Duration, error) {
+			return req.AccountID, time.Minute, nil
+		}, &cache.FuncConfig[Transfer, int64]{
+			Cache: c,
+			KeyFn: func(context.Context, Transfer) (string, error) { return key, nil },
+		})
+
+		_, _, err := idp(ctx, Transfer{AccountID: 9007199254740993})
+		is := assert.New(t)
+		is.NoError(err)
+
+		// Differs from the first request only beyond float64 precision.
+		_, _, err = idp(ctx, Transfer{AccountID: 9007199254740992})
+		is.ErrorIs(err, cache.ErrConflict)
+	})
+
+	t.Run("raw json formatting", func(t *testing.T) {
+		key := uuid.NewV7().String()
+		var calls int
+		idp := cache.Idempotent(func(ctx context.Context, req jsontext.Value) (string, time.Duration, error) {
+			calls++
+			return "ok", time.Minute, nil
+		}, &cache.FuncConfig[jsontext.Value, string]{
+			Cache: c,
+			KeyFn: func(context.Context, jsontext.Value) (string, error) { return key, nil },
+		})
+
+		_, _, err := idp(ctx, jsontext.Value(`{"b": 1, "a": 9007199254740993}`))
+		is := assert.New(t)
+		is.NoError(err)
+
+		// The same request, formatted differently.
+		res, loaded, err := idp(ctx, jsontext.Value(`{ "a":9007199254740993,"b":1 }`))
+		is.NoError(err)
+		is.True(loaded)
+		is.Equal("ok", res)
+		is.Equal(1, calls)
 	})
 }
