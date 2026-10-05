@@ -1,0 +1,37 @@
+---
+version: "2"
+sql:
+  - schema: "schema.sql"
+    queries: "queries"
+    engine: "postgresql"
+    gen:
+      go:
+        package: "postgres"
+        out: "postgres"
+        emit_all_enum_values: true
+        emit_empty_slices: true
+        emit_enum_valid_method: true
+        emit_interface: true
+        emit_pointers_for_null_types: true
+        emit_result_struct_pointers: true
+        overrides:
+          - db_type: "uuid"
+            nullable: false # If you need to set nullable true, create another instance of override.
+            go_type:
+              import: "uuid"
+              type: "UUID"
+          - db_type: "uuid"
+            nullable: true # If you need to set nullable true, create another instance of override.
+            go_type:
+              import: "database/sql"
+              type: "Null[uuid.UUID]"
+          # dbtx.job_status is created in a DO block, which sqlc does not parse.
+          - db_type: "dbtx.job_status"
+            go_type: "string"
+          - db_type: "jsonb"
+            nullable: false # If you need to set nullable true, create another instance of override.
+            go_type:
+              import: "encoding/json/jsontext"
+              type: "Value"
+    rules:
+      - sqlc/db-prepare
