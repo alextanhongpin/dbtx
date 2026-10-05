@@ -380,7 +380,7 @@ SET status       = 'failed',
     processed_at = clock_timestamp(),
     error        = COALESCE(error, 'lease expired; max attempts exceeded')
 WHERE status IN ('running', 'error')
-  AND visible_at <= NOW()
+  AND visible_at <= NOW() - (INTERVAL '1 second' * $1::float8)
   AND attempts >= max_attempts
 `
 
@@ -389,8 +389,12 @@ WHERE status IN ('running', 'error')
 // an expired lease and attempts = max_attempts. The claim query skips it
 // (attempts < max_attempts), so without this it would be stuck forever and
 // would also never be archived. Run periodically (e.g. every minute).
-func (q *Queries) ReapExhausted(ctx context.Context) (int64, error) {
-	result, err := q.db.ExecContext(ctx, reapExhausted)
+//
+// A worker whose lease merely expired can still complete (see Heartbeat), so
+// the lease must have expired grace_seconds ago, giving that worker time to
+// record its outcome.
+func (q *Queries) ReapExhausted(ctx context.Context, graceSeconds float64) (int64, error) {
+	result, err := q.db.ExecContext(ctx, reapExhausted, graceSeconds)
 	if err != nil {
 		return 0, err
 	}

@@ -14,6 +14,12 @@ type JanitorConfig struct {
 	KeyTTL             time.Duration // idempotency window; MUST exceed Retention (default 7d)
 	BatchSize          int32         // rows per statement (default 1000)
 	MaxBatchesPerCycle int           // cap per cycle so one cycle cannot run forever (default 50)
+
+	// ReapGrace is how long a job's last lease must have been expired before
+	// it is failed, so that a worker whose lease merely expired can still
+	// record its outcome. Keep it above WorkerConfig.FinalizeTimeout
+	// (default 1m).
+	ReapGrace time.Duration
 }
 
 func (c *JanitorConfig) applyDefaults() {
@@ -31,6 +37,9 @@ func (c *JanitorConfig) applyDefaults() {
 	}
 	if c.MaxBatchesPerCycle <= 0 {
 		c.MaxBatchesPerCycle = 50
+	}
+	if c.ReapGrace <= 0 {
+		c.ReapGrace = time.Minute
 	}
 }
 
@@ -79,7 +88,7 @@ func (j *Janitor) Run(ctx context.Context) error {
 func (j *Janitor) cycle(ctx context.Context) {
 	// 1. Jobs stuck on an expired lease with no attempts left -> 'failed'.
 	//    Must run before archiving so they become archivable.
-	if n, err := j.repo.ReapExhausted(ctx); err != nil {
+	if n, err := j.repo.ReapExhausted(ctx, ReapExhaustedParams{GraceSeconds: j.cfg.ReapGrace.Seconds()}); err != nil {
 		j.log.Error("reap exhausted failed", "err", err)
 	} else if n > 0 {
 		j.log.Warn("reaped jobs that exhausted their attempts", "count", n)

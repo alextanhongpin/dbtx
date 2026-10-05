@@ -112,8 +112,8 @@ func (r *Repository) Retry(ctx context.Context, params jobs.RetryParams) (jobs.J
 	}))
 }
 
-func (r *Repository) ReapExhausted(ctx context.Context) (int64, error) {
-	return r.db(ctx).ReapExhausted(ctx)
+func (r *Repository) ReapExhausted(ctx context.Context, params jobs.ReapExhaustedParams) (int64, error) {
+	return r.db(ctx).ReapExhausted(ctx, params.GraceSeconds)
 }
 
 func (r *Repository) ArchiveOldJobs(ctx context.Context, params jobs.ArchiveOldJobsParams) (int64, error) {

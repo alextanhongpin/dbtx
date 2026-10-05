@@ -141,8 +141,10 @@ func (f *fakeRepo) Retry(_ context.Context, p RetryParams) (Job, error) {
 	return *j, nil
 }
 
-func (f *fakeRepo) IsTx(context.Context) bool                    { return false }
-func (f *fakeRepo) ReapExhausted(context.Context) (int64, error) { return 0, nil }
+func (f *fakeRepo) IsTx(context.Context) bool { return false }
+func (f *fakeRepo) ReapExhausted(context.Context, ReapExhaustedParams) (int64, error) {
+	return 0, nil
+}
 func (f *fakeRepo) ArchiveOldJobs(context.Context, ArchiveOldJobsParams) (int64, error) {
 	return 0, nil
 }

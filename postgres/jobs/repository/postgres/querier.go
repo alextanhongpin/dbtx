@@ -53,7 +53,11 @@ type Querier interface {
 	// an expired lease and attempts = max_attempts. The claim query skips it
 	// (attempts < max_attempts), so without this it would be stuck forever and
 	// would also never be archived. Run periodically (e.g. every minute).
-	ReapExhausted(ctx context.Context) (int64, error)
+	//
+	// A worker whose lease merely expired can still complete (see Heartbeat), so
+	// the lease must have expired grace_seconds ago, giving that worker time to
+	// record its outcome.
+	ReapExhausted(ctx context.Context, graceSeconds float64) (int64, error)
 	// -----------------------------------------------------------------------------
 	// Retry with backoff. When attempts are exhausted the job becomes terminal
 	// ('failed') instead of sitting in 'error' forever (the claim query would

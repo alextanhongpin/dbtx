@@ -101,6 +101,10 @@ type RetryParams struct {
 	BackoffSeconds float64
 }
 
+type ReapExhaustedParams struct {
+	GraceSeconds float64
+}
+
 type ArchiveOldJobsParams struct {
 	RetentionSeconds float64
 	BatchSize        int32
@@ -123,7 +127,7 @@ type Repository interface {
 	Complete(ctx context.Context, p CompleteParams) (Job, error)
 	Fail(ctx context.Context, p FailParams) (Job, error)
 	Retry(ctx context.Context, p RetryParams) (Job, error)
-	ReapExhausted(ctx context.Context) (int64, error)
+	ReapExhausted(ctx context.Context, p ReapExhaustedParams) (int64, error)
 	ArchiveOldJobs(ctx context.Context, p ArchiveOldJobsParams) (int64, error)
 	PurgeOldJobKeys(ctx context.Context, p PurgeOldJobKeysParams) (int64, error)
 

@@ -617,7 +617,7 @@ func TestReapExhausted(t *testing.T) {
 	// Only the exhausted job's lease has expired.
 	makeVisible(t, db, exhausted)
 
-	n, err := repo.ReapExhausted(t.Context())
+	n, err := repo.ReapExhausted(t.Context(), jobs.ReapExhaustedParams{})
 	is := assert.New(t)
 	is.NoError(err)
 	is.Equal(int64(1), n)
@@ -638,7 +638,7 @@ func TestReapExhausted(t *testing.T) {
 	is.NoError(err)
 	is.Equal(jobs.StatusQueued, s)
 
-	n, err = repo.ReapExhausted(t.Context())
+	n, err = repo.ReapExhausted(t.Context(), jobs.ReapExhaustedParams{})
 	is.NoError(err)
 	is.Zero(n)
 }
@@ -937,4 +937,24 @@ func TestInvalidMaxAttempts(t *testing.T) {
 		MaxAttempts:    -1,
 	})
 	assert.ErrorIs(t, err, jobs.ErrInvalidInput)
+}
+
+func TestReapExhaustedGrace(t *testing.T) {
+	repo, db := newRepository(t)
+	id := create(t, repo, "k", 1)
+	claimOne(t, repo, "w1")
+	makeVisible(t, db, id) // The last lease expired a second ago.
+
+	// The worker may still be recording its outcome.
+	n, err := repo.ReapExhausted(t.Context(), jobs.ReapExhaustedParams{GraceSeconds: 60})
+	is := assert.New(t)
+	is.NoError(err)
+	is.Zero(n)
+	s, err := status(t, db, "jobs", id)
+	is.NoError(err)
+	is.Equal(jobs.StatusRunning, s)
+
+	n, err = repo.ReapExhausted(t.Context(), jobs.ReapExhaustedParams{})
+	is.NoError(err)
+	is.Equal(int64(1), n)
 }
