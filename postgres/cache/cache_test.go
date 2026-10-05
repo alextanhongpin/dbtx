@@ -1222,3 +1222,28 @@ func TestLoadOrStoreConcurrentWrite(t *testing.T) {
 		is.Equal("new", v)
 	})
 }
+
+func TestLoadOrCreatePanic(t *testing.T) {
+	c := cache.New(repository.New(dbtest.DB(t)))
+	key := uuid.NewV7().String()
+
+	// The panic is raised in the caller's goroutine, where it can be
+	// recovered, instead of crashing the process.
+	func() {
+		defer func() {
+			assert.Equal(t, "boom", recover())
+		}()
+		_, _, _ = c.LoadOrCreate(t.Context(), key, func(context.Context, string) (string, time.Duration, error) {
+			panic("boom")
+		})
+	}()
+
+	// The lease is released, so the next caller computes the value.
+	v, loaded, err := c.LoadOrCreate(t.Context(), key, func(context.Context, string) (string, time.Duration, error) {
+		return "v", time.Minute, nil
+	})
+	is := assert.New(t)
+	is.NoError(err)
+	is.False(loaded)
+	is.Equal("v", v)
+}

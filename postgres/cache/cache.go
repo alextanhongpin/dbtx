@@ -238,9 +238,18 @@ func (c *Cache) LoadOrCreate[T any](ctx context.Context, key string, fn func(ctx
 		val T
 		ttl time.Duration
 		err error
+		// panic holds what fn panicked with. fn runs in its own goroutine,
+		// where a panic would crash the process, so it is re-raised in the
+		// caller's goroutine instead.
+		panic any
 	}
 	ch := make(chan result, 1)
 	go func() {
+		defer func() {
+			if p := recover(); p != nil {
+				ch <- result{panic: p}
+			}
+		}()
 		val, ttl, err := fn(ctx, key)
 		ch <- result{val: val, ttl: ttl, err: err}
 	}()
@@ -265,6 +274,9 @@ func (c *Cache) LoadOrCreate[T any](ctx context.Context, key string, fn func(ctx
 				return zero, false, wrap("load or create: renewing lease", key, err)
 			}
 		case res := <-ch:
+			if res.panic != nil {
+				panic(res.panic) // the deferred release still runs
+			}
 			if res.err != nil {
 				return zero, false, wrap("load or create: executing", key, res.err)
 			}
