@@ -8,13 +8,14 @@ import (
 	"time"
 
 	"github.com/alextanhongpin/dbtx/postgres/cache"
+	"github.com/alextanhongpin/dbtx/postgres/cache/repository"
 	"github.com/alextanhongpin/dbtx/testing/dbtest"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestFunc(t *testing.T) {
 	ctx := t.Context()
-	c := cache.New(cache.NewPostgresRepository(dbtest.DB(t)))
+	c := cache.New(repository.New(dbtest.DB(t)))
 
 	type User struct {
 		// Non-empty id means a user exists.
@@ -114,7 +115,7 @@ func TestFunc(t *testing.T) {
 
 func TestIdempotent(t *testing.T) {
 	ctx := t.Context()
-	c := cache.New(cache.NewPostgresRepository(dbtest.DB(t)))
+	c := cache.New(repository.New(dbtest.DB(t)))
 
 	type User struct {
 		// Non-empty id means a user exists.

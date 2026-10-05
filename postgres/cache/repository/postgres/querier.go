@@ -9,23 +9,39 @@ import (
 )
 
 type Querier interface {
+	// curr reads the statement snapshot, so it checks liveness itself (see
+	// load.sql). The write re-checks its conditions against the latest row
+	// version, and skips rows the expired CTE deletes, so that the statement does
+	// not modify a row twice.
 	CompareAndDelete(ctx context.Context, arg CompareAndDeleteParams) (*CompareAndDeleteRow, error)
+	// curr reads the statement snapshot, so it checks liveness itself (see
+	// load.sql). The write re-checks its conditions against the latest row
+	// version, and skips rows the expired CTE deletes, so that the statement does
+	// not modify a row twice.
 	CompareAndSwap(ctx context.Context, arg CompareAndSwapParams) (*CompareAndSwapRow, error)
 	// Deletes leased rows too, so that invalidating a key also discards any
 	// value that is being computed for it.
 	Delete(ctx context.Context, key string) (*DbtxCache, error)
+	// The select reads the statement snapshot, which still holds a row that the
+	// expired CTE (or a concurrent transaction) deleted, so it checks liveness
+	// itself instead of relying on the delete.
 	Exists(ctx context.Context, key string) (bool, error)
 	Expire(ctx context.Context, arg ExpireParams) (*DbtxCache, error)
 	// Replaces the lease placeholder with the computed value. Affects no rows if
 	// the lease expired, was taken over, or the key was deleted or overwritten.
 	FulfillLease(ctx context.Context, arg FulfillLeaseParams) (int64, error)
+	// The select reads the statement snapshot, which still holds a row that the
+	// expired CTE (or a concurrent transaction) deleted, so it checks liveness
+	// itself instead of relying on the delete.
 	Load(ctx context.Context, key string) (*DbtxCache, error)
 	// Stores the value (or a lease placeholder) unless a live row exists, in which
 	// case the live row is returned with loaded = true. The caller must check the
 	// returned lease to tell a computed value from an in-flight placeholder.
 	//
-	// Returns no rows when a concurrent transaction inserted the key after this
-	// statement's snapshot was taken; the caller should retry.
+	// The fallback select locks the row, so that it returns the latest committed
+	// version (the one the conflict check saw) instead of the one in the snapshot.
+	// It returns no rows when the key was inserted, or an expired row replaced,
+	// after the snapshot was taken; the caller should retry.
 	LoadOrStore(ctx context.Context, arg LoadOrStoreParams) (*LoadOrStoreRow, error)
 	Purge(ctx context.Context) (int64, error)
 	ReleaseLease(ctx context.Context, arg ReleaseLeaseParams) (int64, error)
@@ -39,6 +55,10 @@ type Querier interface {
 	StoreOnce(ctx context.Context, arg StoreOnceParams) (int64, error)
 	// Returns the remaining time to live in microseconds, or 0 if the key does not
 	// expire. A live key always reports at least 1 microsecond.
+	//
+	// The select reads the statement snapshot, which still holds a row that the
+	// expired CTE (or a concurrent transaction) deleted, so it checks liveness
+	// itself instead of relying on the delete.
 	TTL(ctx context.Context, key string) (int64, error)
 }
 

@@ -9,6 +9,7 @@ import (
 	"uuid"
 
 	"github.com/alextanhongpin/dbtx/postgres/cache"
+	"github.com/alextanhongpin/dbtx/postgres/cache/repository"
 	"github.com/alextanhongpin/dbtx/testing/dbtest"
 	"github.com/stretchr/testify/assert"
 )
@@ -108,11 +109,11 @@ type Book struct {
 
 type BookRepository struct {
 	cache *cache.Cache
-	repo  *cache.PostgresRepository
+	repo  *repository.Repository
 }
 
 func NewBookRepository(db *sql.DB) *BookRepository {
-	repo := cache.NewPostgresRepository(db)
+	repo := repository.New(db)
 	return &BookRepository{
 		repo:  repo,
 		cache: cache.New(repo, cache.WithPrefix("books:")),

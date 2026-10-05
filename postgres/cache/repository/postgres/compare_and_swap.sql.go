@@ -21,7 +21,7 @@ curr as (
     from dbtx.cache
    where dbtx.cache.key = $1
      and lease is null
-     and not exists (select 1 from expired)
+     and (expires_at is null or expires_at > statement_timestamp())
 ),
 swapped as (
      update dbtx.cache
@@ -49,6 +49,10 @@ type CompareAndSwapRow struct {
 	Swapped bool
 }
 
+// curr reads the statement snapshot, so it checks liveness itself (see
+// load.sql). The write re-checks its conditions against the latest row
+// version, and skips rows the expired CTE deletes, so that the statement does
+// not modify a row twice.
 func (q *Queries) CompareAndSwap(ctx context.Context, arg CompareAndSwapParams) (*CompareAndSwapRow, error) {
 	row := q.db.QueryRowContext(ctx, compareAndSwap,
 		arg.Key,

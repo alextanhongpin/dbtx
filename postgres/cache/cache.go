@@ -1,8 +1,6 @@
 package cache
 
 import (
-	_ "embed"
-
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
@@ -12,7 +10,7 @@ import (
 	"time"
 	"uuid"
 
-	"github.com/alextanhongpin/dbtx/postgres/cache/internal"
+	"github.com/alextanhongpin/dbtx"
 )
 
 const (
@@ -32,21 +30,24 @@ const (
 )
 
 var (
-	//go:embed internal/schema.sql
-	Schema string
-
 	// Errors.
-	ErrConflict           = internal.ErrConflict
-	ErrExists             = internal.ErrExists
-	ErrNegativeTTL        = errors.New("negative ttl")
-	ErrNotExist           = internal.ErrNotExist
-	ErrRequestInFlight    = errors.New("request in flight")
-	NewPostgresRepository = internal.NewRepository
+	ErrConflict        = errors.New("conflict")
+	ErrExists          = errors.New("exists")
+	ErrNegativeTTL     = errors.New("negative ttl")
+	ErrNotExist        = errors.New("not exist")
+	ErrRequestInFlight = errors.New("request in flight")
 )
 
-type PostgresRepository = internal.Repository
-
-type Entry = internal.Entry
+type Entry struct {
+	Key   string
+	Value jsontext.Value
+	// Lease is non-nil when the entry is a placeholder held by a caller that
+	// is still computing the value. Value is meaningless in that case.
+	Lease     *uuid.UUID
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	ExpiresAt *time.Time
+}
 
 type Repository interface {
 	AcquireLease(ctx context.Context, key string, lease uuid.UUID, ttl time.Duration) (*Entry, bool, error)
@@ -189,12 +190,16 @@ func (c *Cache) LoadAndDelete[T any](ctx context.Context, key string) (T, error)
 // ErrRequestInFlight instead of computing the value again. If the lease is
 // lost, for example because the key was deleted or overwritten, fn's value is
 // still returned but not cached.
+//
+// The lease is written outside any transaction in ctx, so that other callers
+// see it. fn still runs with ctx, so a value computed from the caller's
+// uncommitted writes is cached even if that transaction rolls back.
 func (c *Cache) LoadOrCreate[T any](ctx context.Context, key string, fn func(ctx context.Context, key string) (T, time.Duration, error)) (curr T, loaded bool, err error) {
 	var zero T
 	fullKey := c.buildKey(key)
 	lease := uuid.NewV7()
 
-	entry, acquired, err := c.repo.AcquireLease(ctx, fullKey, lease, c.lease)
+	entry, acquired, err := c.repo.AcquireLease(withoutTx(ctx), fullKey, lease, c.lease)
 	if err != nil {
 		return zero, false, wrap("load or create", key, err)
 	}
@@ -217,7 +222,7 @@ func (c *Cache) LoadOrCreate[T any](ctx context.Context, key string, fn func(ctx
 		if !held {
 			return
 		}
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
+		ctx, cancel := context.WithTimeout(withoutTx(context.WithoutCancel(ctx)), releaseTimeout)
 		defer cancel()
 		err := c.repo.ReleaseLease(ctx, fullKey, lease)
 		if err != nil && !errors.Is(err, ErrNotExist) {
@@ -249,7 +254,7 @@ func (c *Cache) LoadOrCreate[T any](ctx context.Context, key string, fn func(ctx
 		case <-ctx.Done():
 			return zero, false, wrap("load or create", key, context.Cause(ctx))
 		case <-renew:
-			err := c.repo.RenewLease(ctx, fullKey, lease, c.lease)
+			err := c.repo.RenewLease(withoutTx(ctx), fullKey, lease, c.lease)
 			if errors.Is(err, ErrNotExist) {
 				// Lease lost. Let fn finish, but do not cache its value.
 				held = false
@@ -273,7 +278,7 @@ func (c *Cache) LoadOrCreate[T any](ctx context.Context, key string, fn func(ctx
 			if err != nil {
 				return zero, false, wrap("load or create", key, err)
 			}
-			err = c.repo.FulfillLease(ctx, fullKey, lease, b, res.ttl)
+			err = c.repo.FulfillLease(withoutTx(ctx), fullKey, lease, b, res.ttl)
 			if errors.Is(err, ErrNotExist) {
 				held = false
 				return res.val, false, nil
@@ -368,6 +373,25 @@ func (c *Cache) Purge(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("cache: purge: %w", err)
 	}
 	return n, nil
+}
+
+// txless hides dbtx transactions from the repository. Without it, the lease
+// would be invisible to other connections until the caller commits, and
+// renewing it would use the caller's connection while fn may be using it too.
+type txless struct {
+	context.Context
+}
+
+func withoutTx(ctx context.Context) context.Context {
+	return txless{ctx}
+}
+
+func (c txless) Value(key any) any {
+	v := c.Context.Value(key)
+	if _, ok := v.(*dbtx.Tx); ok {
+		return nil
+	}
+	return v
 }
 
 func (c *Cache) buildKey(key string) string {

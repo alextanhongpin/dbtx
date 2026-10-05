@@ -1,6 +1,8 @@
-package internal
+package repository
 
 import (
+	_ "embed"
+
 	"context"
 	"database/sql"
 	"encoding/json/jsontext"
@@ -10,35 +12,24 @@ import (
 	"uuid"
 
 	"github.com/alextanhongpin/dbtx"
-	"github.com/alextanhongpin/dbtx/postgres/cache/internal/postgres"
+	"github.com/alextanhongpin/dbtx/postgres/cache"
+	"github.com/alextanhongpin/dbtx/postgres/cache/repository/postgres"
 )
+
+//go:embed schema.sql
+var Schema string
+
+var _ cache.Repository = (*Repository)(nil)
 
 // loadOrStoreAttempts bounds the retries when LoadOrStore races with a
-// concurrent insert that is not visible to the statement's snapshot.
+// concurrent write that is not visible to the statement's snapshot.
 const loadOrStoreAttempts = 3
-
-var (
-	ErrConflict = errors.New("conflict")
-	ErrExists   = errors.New("exists")
-	ErrNotExist = errors.New("not exist")
-)
 
 type Repository struct {
 	*dbtx.DB
 }
 
-type Entry struct {
-	Key   string
-	Value jsontext.Value
-	// Lease is non-nil when the entry is a placeholder held by a caller that
-	// is still computing the value. Value is meaningless in that case.
-	Lease     *uuid.UUID
-	CreatedAt time.Time
-	UpdatedAt time.Time
-	ExpiresAt *time.Time
-}
-
-func NewRepository(db *sql.DB) *Repository {
+func New(db *sql.DB) *Repository {
 	return &Repository{
 		DB: dbtx.New(db),
 	}
@@ -74,10 +65,10 @@ func (r *Repository) CompareAndSwap(ctx context.Context, key string, oldValue, n
 
 // Delete deletes the key, including a lease placeholder, and returns the
 // deleted entry.
-func (r *Repository) Delete(ctx context.Context, key string) (*Entry, error) {
+func (r *Repository) Delete(ctx context.Context, key string) (*cache.Entry, error) {
 	row, err := r.db(ctx).Delete(ctx, key)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotExist
+		return nil, cache.ErrNotExist
 	}
 	if err != nil {
 		return nil, err
@@ -95,15 +86,15 @@ func (r *Repository) Expire(ctx context.Context, key string, ttl time.Duration) 
 		Ttl: ttlParam(ttl),
 	})
 	if errors.Is(err, sql.ErrNoRows) {
-		return ErrNotExist
+		return cache.ErrNotExist
 	}
 	return err
 }
 
-func (r *Repository) Load(ctx context.Context, key string) (*Entry, error) {
+func (r *Repository) Load(ctx context.Context, key string) (*cache.Entry, error) {
 	row, err := r.db(ctx).Load(ctx, key)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotExist
+		return nil, cache.ErrNotExist
 	}
 	if err != nil {
 		return nil, err
@@ -116,7 +107,7 @@ func (r *Repository) Load(ctx context.Context, key string) (*Entry, error) {
 func (r *Repository) TTL(ctx context.Context, key string) (time.Duration, error) {
 	us, err := r.db(ctx).TTL(ctx, key)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, ErrNotExist
+		return 0, cache.ErrNotExist
 	}
 	if err != nil {
 		return 0, err
@@ -128,7 +119,7 @@ func (r *Repository) Purge(ctx context.Context) (int64, error) {
 	return r.db(ctx).Purge(ctx)
 }
 
-func (r *Repository) Store(ctx context.Context, key string, value jsontext.Value, ttl time.Duration) (*Entry, error) {
+func (r *Repository) Store(ctx context.Context, key string, value jsontext.Value, ttl time.Duration) (*cache.Entry, error) {
 	row, err := r.db(ctx).Store(ctx, postgres.StoreParams{
 		Key:   key,
 		Value: value,
@@ -152,15 +143,15 @@ func (r *Repository) StoreOnce(ctx context.Context, key string, value jsontext.V
 		return err
 	}
 	if n == 0 {
-		return ErrExists
+		return cache.ErrExists
 	}
 	return nil
 }
 
 // LoadOrStore returns the existing live entry with loaded = true, or stores
 // the value and returns it with loaded = false. The returned entry may be a
-// lease placeholder; check Entry.Lease.
-func (r *Repository) LoadOrStore(ctx context.Context, key string, value jsontext.Value, ttl time.Duration) (*Entry, bool, error) {
+// lease placeholder; check cache.Entry.Lease.
+func (r *Repository) LoadOrStore(ctx context.Context, key string, value jsontext.Value, ttl time.Duration) (*cache.Entry, bool, error) {
 	return r.loadOrStore(ctx, postgres.LoadOrStoreParams{
 		Key:   key,
 		Value: value,
@@ -170,7 +161,7 @@ func (r *Repository) LoadOrStore(ctx context.Context, key string, value jsontext
 
 // AcquireLease stores a lease placeholder for the key unless a live entry
 // exists. It returns the existing entry with acquired = false otherwise.
-func (r *Repository) AcquireLease(ctx context.Context, key string, lease uuid.UUID, ttl time.Duration) (*Entry, bool, error) {
+func (r *Repository) AcquireLease(ctx context.Context, key string, lease uuid.UUID, ttl time.Duration) (*cache.Entry, bool, error) {
 	entry, loaded, err := r.loadOrStore(ctx, postgres.LoadOrStoreParams{
 		Key:   key,
 		Value: jsontext.Value("null"),
@@ -213,12 +204,13 @@ func (r *Repository) FulfillLease(ctx context.Context, key string, lease uuid.UU
 	return affected(n, err)
 }
 
-func (r *Repository) loadOrStore(ctx context.Context, arg postgres.LoadOrStoreParams) (*Entry, bool, error) {
+func (r *Repository) loadOrStore(ctx context.Context, arg postgres.LoadOrStoreParams) (*cache.Entry, bool, error) {
 	for range loadOrStoreAttempts {
 		row, err := r.db(ctx).LoadOrStore(ctx, arg)
 		if errors.Is(err, sql.ErrNoRows) {
-			// A concurrent insert committed after the snapshot was taken. A new
-			// statement gets a new snapshot (under READ COMMITTED), so retry.
+			// A concurrent insert, or a write replacing an expired row, committed
+			// after the snapshot was taken. A new statement gets a new snapshot
+			// (under READ COMMITTED), so retry.
 			continue
 		}
 		if err != nil {
@@ -239,14 +231,14 @@ func (r *Repository) loadOrStore(ctx context.Context, arg postgres.LoadOrStorePa
 		return entry, row.Loaded, nil
 	}
 
-	return nil, false, fmt.Errorf("%w: concurrent write to key %q", ErrConflict, arg.Key)
+	return nil, false, fmt.Errorf("%w: concurrent write to key %q", cache.ErrConflict, arg.Key)
 }
 
 func (r *Repository) db(ctx context.Context) postgres.Querier {
 	return postgres.New(r.DBTx(ctx))
 }
 
-func newEntry(row *postgres.DbtxCache) (*Entry, error) {
+func newEntry(row *postgres.DbtxCache) (*cache.Entry, error) {
 	var expiresAt *time.Time
 	if row.ExpiresAt.Valid {
 		expiresAt = new(row.ExpiresAt.Time)
@@ -261,7 +253,7 @@ func newEntry(row *postgres.DbtxCache) (*Entry, error) {
 		lease = &id
 	}
 
-	return &Entry{
+	return &cache.Entry{
 		Key:       row.Key,
 		Value:     row.Value,
 		Lease:     lease,
@@ -285,9 +277,9 @@ func compareResult(found, ok bool) error {
 	case ok:
 		return nil
 	case found:
-		return ErrConflict
+		return cache.ErrConflict
 	default:
-		return ErrNotExist
+		return cache.ErrNotExist
 	}
 }
 
@@ -296,7 +288,7 @@ func affected(n int64, err error) error {
 		return err
 	}
 	if n == 0 {
-		return ErrNotExist
+		return cache.ErrNotExist
 	}
 	return nil
 }

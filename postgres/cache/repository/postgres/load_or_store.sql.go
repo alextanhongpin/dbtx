@@ -32,9 +32,14 @@ select key, value, lease, created_at, updated_at, expires_at, false as loaded
   from ins
 union all
 select key, value, lease, created_at, updated_at, expires_at, true as loaded
-  from dbtx.cache
- where key = $1
-   and not exists (select 1 from ins)
+  from (
+         select key, value, lease, created_at, updated_at, expires_at
+           from dbtx.cache
+          where key = $1
+            and (expires_at is null or expires_at > statement_timestamp())
+            and not exists (select 1 from ins)
+            for share
+       ) curr
 `
 
 type LoadOrStoreParams struct {
@@ -58,8 +63,10 @@ type LoadOrStoreRow struct {
 // case the live row is returned with loaded = true. The caller must check the
 // returned lease to tell a computed value from an in-flight placeholder.
 //
-// Returns no rows when a concurrent transaction inserted the key after this
-// statement's snapshot was taken; the caller should retry.
+// The fallback select locks the row, so that it returns the latest committed
+// version (the one the conflict check saw) instead of the one in the snapshot.
+// It returns no rows when the key was inserted, or an expired row replaced,
+// after the snapshot was taken; the caller should retry.
 func (q *Queries) LoadOrStore(ctx context.Context, arg LoadOrStoreParams) (*LoadOrStoreRow, error) {
 	row := q.db.QueryRowContext(ctx, loadOrStore,
 		arg.Key,

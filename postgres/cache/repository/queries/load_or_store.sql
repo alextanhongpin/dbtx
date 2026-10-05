@@ -3,8 +3,10 @@
 -- case the live row is returned with loaded = true. The caller must check the
 -- returned lease to tell a computed value from an in-flight placeholder.
 --
--- Returns no rows when a concurrent transaction inserted the key after this
--- statement's snapshot was taken; the caller should retry.
+-- The fallback select locks the row, so that it returns the latest committed
+-- version (the one the conflict check saw) instead of the one in the snapshot.
+-- It returns no rows when the key was inserted, or an expired row replaced,
+-- after the snapshot was taken; the caller should retry.
 with ins as (
   insert into dbtx.cache as c(key, value, lease, expires_at)
        values ($1, sqlc.arg(value)::jsonb, sqlc.narg(lease)::uuid, statement_timestamp() + sqlc.narg(ttl)::bigint * interval '1 microsecond')
@@ -23,6 +25,11 @@ select *, false as loaded
   from ins
 union all
 select *, true as loaded
-  from dbtx.cache
- where key = $1
-   and not exists (select 1 from ins);
+  from (
+         select *
+           from dbtx.cache
+          where key = $1
+            and (expires_at is null or expires_at > statement_timestamp())
+            and not exists (select 1 from ins)
+            for share
+       ) curr;

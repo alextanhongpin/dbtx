@@ -6,11 +6,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 	"uuid"
 
 	"github.com/alextanhongpin/dbtx/postgres/cache"
+	"github.com/alextanhongpin/dbtx/postgres/cache/repository"
 	"github.com/alextanhongpin/dbtx/testing/dbtest"
 	"github.com/stretchr/testify/assert"
 )
@@ -21,7 +23,7 @@ func migrate(dsn string) error {
 		return err
 	}
 	defer db.Close()
-	_, err = db.Exec(cache.Schema)
+	_, err = db.Exec(repository.Schema)
 	if err != nil {
 		return err
 	}
@@ -46,7 +48,7 @@ func TestMain(m *testing.M) {
 
 func TestCompareAndDelete(t *testing.T) {
 	ctx := t.Context()
-	c := cache.New(cache.NewPostgresRepository(dbtest.DB(t)))
+	c := cache.New(repository.New(dbtest.DB(t)))
 
 	t.Run("empty", func(t *testing.T) {
 		key := t.Name()
@@ -129,7 +131,7 @@ func TestCompareAndDelete(t *testing.T) {
 
 func TestCompareAndSwap(t *testing.T) {
 	ctx := t.Context()
-	c := cache.New(cache.NewPostgresRepository(dbtest.DB(t)))
+	c := cache.New(repository.New(dbtest.DB(t)))
 
 	t.Run("empty", func(t *testing.T) {
 		key := t.Name()
@@ -230,7 +232,7 @@ func TestCompareAndSwap(t *testing.T) {
 
 func TestDelete(t *testing.T) {
 	ctx := t.Context()
-	c := cache.New(cache.NewPostgresRepository(dbtest.DB(t)))
+	c := cache.New(repository.New(dbtest.DB(t)))
 
 	t.Run("empty", func(t *testing.T) {
 		key := t.Name()
@@ -284,7 +286,7 @@ func TestDelete(t *testing.T) {
 
 func TestExists(t *testing.T) {
 	ctx := t.Context()
-	c := cache.New(cache.NewPostgresRepository(dbtest.DB(t)))
+	c := cache.New(repository.New(dbtest.DB(t)))
 
 	t.Run("empty", func(t *testing.T) {
 		key := t.Name()
@@ -331,7 +333,7 @@ func TestExists(t *testing.T) {
 
 func TestExpire(t *testing.T) {
 	ctx := t.Context()
-	c := cache.New(cache.NewPostgresRepository(dbtest.DB(t)))
+	c := cache.New(repository.New(dbtest.DB(t)))
 
 	t.Run("empty", func(t *testing.T) {
 		// Given that the key does not exists.
@@ -379,7 +381,7 @@ func TestExpire(t *testing.T) {
 
 func TestLoad(t *testing.T) {
 	ctx := t.Context()
-	c := cache.New(cache.NewPostgresRepository(dbtest.DB(t)))
+	c := cache.New(repository.New(dbtest.DB(t)))
 
 	t.Run("empty", func(t *testing.T) {
 		key := t.Name()
@@ -434,7 +436,7 @@ func TestLoad(t *testing.T) {
 func TestLoadAndDelete(t *testing.T) {
 
 	ctx := t.Context()
-	c := cache.New(cache.NewPostgresRepository(dbtest.DB(t)))
+	c := cache.New(repository.New(dbtest.DB(t)))
 
 	t.Run("empty", func(t *testing.T) {
 		// Given that the key does not exists,
@@ -497,7 +499,7 @@ func TestLoadAndDelete(t *testing.T) {
 }
 func TestLoadOrCreate(t *testing.T) {
 	ctx := t.Context()
-	c := cache.New(cache.NewPostgresRepository(dbtest.DB(t)))
+	c := cache.New(repository.New(dbtest.DB(t)))
 
 	t.Run("empty", func(t *testing.T) {
 		key := t.Name()
@@ -573,7 +575,7 @@ func TestLoadOrCreate(t *testing.T) {
 
 func TestLoadOrStore(t *testing.T) {
 	ctx := t.Context()
-	c := cache.New(cache.NewPostgresRepository(dbtest.DB(t)))
+	c := cache.New(repository.New(dbtest.DB(t)))
 
 	t.Run("empty", func(t *testing.T) {
 		key := t.Name()
@@ -633,7 +635,7 @@ func TestLoadOrStore(t *testing.T) {
 
 func TestStore(t *testing.T) {
 	ctx := t.Context()
-	c := cache.New(cache.NewPostgresRepository(dbtest.DB(t)))
+	c := cache.New(repository.New(dbtest.DB(t)))
 
 	t.Run("empty", func(t *testing.T) {
 		// Given that the key does not exists,
@@ -700,7 +702,7 @@ func TestStore(t *testing.T) {
 
 func TestStoreOnce(t *testing.T) {
 	ctx := t.Context()
-	c := cache.New(cache.NewPostgresRepository(dbtest.DB(t)))
+	c := cache.New(repository.New(dbtest.DB(t)))
 
 	t.Run("empty", func(t *testing.T) {
 		// Given that the key does not exists
@@ -762,7 +764,7 @@ func TestStoreOnce(t *testing.T) {
 
 func TestTTL(t *testing.T) {
 	ctx := t.Context()
-	c := cache.New(cache.NewPostgresRepository(dbtest.DB(t)))
+	c := cache.New(repository.New(dbtest.DB(t)))
 
 	t.Run("empty", func(t *testing.T) {
 		// Given that the key does not exists,
@@ -809,7 +811,7 @@ func TestTTL(t *testing.T) {
 
 func TestLoadOrCreateLease(t *testing.T) {
 	ctx := t.Context()
-	c := cache.New(cache.NewPostgresRepository(dbtest.DB(t)), cache.WithPrefix("lease:"))
+	c := cache.New(repository.New(dbtest.DB(t)), cache.WithPrefix("lease:"))
 
 	// inflight starts LoadOrCreate for key and blocks fn until release is
 	// closed. It returns once the lease is held.
@@ -971,7 +973,7 @@ func TestLoadOrCreateLease(t *testing.T) {
 	})
 
 	t.Run("renews lease", func(t *testing.T) {
-		c := cache.New(cache.NewPostgresRepository(dbtest.DB(t)), cache.WithLease(150*time.Millisecond))
+		c := cache.New(repository.New(dbtest.DB(t)), cache.WithLease(150*time.Millisecond))
 		key := t.Name()
 
 		// Given that fn outlives the lease,
@@ -1005,7 +1007,7 @@ func TestLoadOrCreateLease(t *testing.T) {
 
 func TestNoExpiration(t *testing.T) {
 	ctx := t.Context()
-	c := cache.New(cache.NewPostgresRepository(dbtest.DB(t)))
+	c := cache.New(repository.New(dbtest.DB(t)))
 	key := t.Name()
 
 	is := assert.New(t)
@@ -1018,7 +1020,7 @@ func TestNoExpiration(t *testing.T) {
 
 func TestNegativeTTL(t *testing.T) {
 	ctx := t.Context()
-	c := cache.New(cache.NewPostgresRepository(dbtest.DB(t)))
+	c := cache.New(repository.New(dbtest.DB(t)))
 	key := t.Name()
 
 	is := assert.New(t)
@@ -1027,4 +1029,196 @@ func TestNegativeTTL(t *testing.T) {
 	is.ErrorIs(c.Expire(ctx, key, -time.Second), cache.ErrNegativeTTL)
 	_, _, err := c.LoadOrStore(ctx, key, "hello", -time.Second)
 	is.ErrorIs(err, cache.ErrNegativeTTL)
+}
+
+func TestLoadOrCreateInTx(t *testing.T) {
+	repo := repository.New(dbtest.DB(t))
+	c := cache.New(repo)
+	key := uuid.NewV7().String()
+	ctx := t.Context()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var wg sync.WaitGroup
+	var otherErr error
+	err := repo.RunInTx(ctx, func(txCtx context.Context) error {
+		wg.Go(func() {
+			defer close(release)
+			<-started
+
+			// The lease is visible outside the caller's transaction, so this
+			// caller does not block until it ends.
+			ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+			_, _, otherErr = c.LoadOrCreate(ctx, key, func(context.Context, string) (string, time.Duration, error) {
+				t.Error("fn called twice")
+				return "", 0, nil
+			})
+		})
+
+		v, loaded, err := c.LoadOrCreate(txCtx, key, func(context.Context, string) (string, time.Duration, error) {
+			close(started)
+			select {
+			case <-release:
+			case <-time.After(5 * time.Second):
+				t.Error("other caller blocked on the lease")
+			}
+			return "v", time.Minute, nil
+		})
+		is := assert.New(t)
+		is.NoError(err)
+		is.False(loaded)
+		is.Equal("v", v)
+		return assert.AnError
+	})
+	wg.Wait()
+
+	is := assert.New(t)
+	is.ErrorIs(err, assert.AnError)
+	is.ErrorIs(otherErr, cache.ErrRequestInFlight)
+
+	// The value was cached outside the rolled-back transaction.
+	v, err := c.Load[string](ctx, key)
+	is.NoError(err)
+	is.Equal("v", v)
+}
+
+// The tests below hold a row lock in tx, so that the cache call takes its
+// snapshot before tx commits and runs its write after.
+func lockedKey(t *testing.T, db *sql.DB, query string, args ...any) *sql.Tx {
+	t.Helper()
+	tx, err := db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback() })
+	if _, err := tx.ExecContext(t.Context(), query, args...); err != nil {
+		t.Fatal(err)
+	}
+	return tx
+}
+
+// commitAfter commits tx once the cache call is blocked on its row lock.
+func commitAfter(t *testing.T, tx *sql.Tx, call func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		call()
+	}()
+	time.Sleep(200 * time.Millisecond)
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+}
+
+func TestExpiredConcurrentDelete(t *testing.T) {
+	db := dbtest.DB(t)
+	c := cache.New(repository.New(db))
+	ctx := t.Context()
+
+	// The lazy delete in each read blocks behind a concurrent delete of the
+	// expired row, and then deletes nothing.
+	expired := func(t *testing.T) (string, *sql.Tx) {
+		key := uuid.NewV7().String()
+		if err := c.Store(ctx, key, "stale", time.Millisecond); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(10 * time.Millisecond)
+		return key, lockedKey(t, db, `delete from dbtx.cache where key = $1`, key)
+	}
+
+	t.Run("load", func(t *testing.T) {
+		key, tx := expired(t)
+		var err error
+		commitAfter(t, tx, func() {
+			_, err = c.Load[string](ctx, key)
+		})
+		assert.ErrorIs(t, err, cache.ErrNotExist)
+	})
+
+	t.Run("exists", func(t *testing.T) {
+		key, tx := expired(t)
+		var ok bool
+		var err error
+		commitAfter(t, tx, func() {
+			ok, err = c.Exists(ctx, key)
+		})
+		is := assert.New(t)
+		is.NoError(err)
+		is.False(ok)
+	})
+
+	t.Run("ttl", func(t *testing.T) {
+		key, tx := expired(t)
+		var err error
+		commitAfter(t, tx, func() {
+			_, err = c.TTL(ctx, key)
+		})
+		assert.ErrorIs(t, err, cache.ErrNotExist)
+	})
+
+	t.Run("compare and swap", func(t *testing.T) {
+		key, tx := expired(t)
+		var err error
+		commitAfter(t, tx, func() {
+			err = c.CompareAndSwap(ctx, key, "other", "new", 0)
+		})
+		assert.ErrorIs(t, err, cache.ErrNotExist)
+	})
+
+	t.Run("compare and delete", func(t *testing.T) {
+		key, tx := expired(t)
+		var err error
+		commitAfter(t, tx, func() {
+			err = c.CompareAndDelete(ctx, key, "other")
+		})
+		assert.ErrorIs(t, err, cache.ErrNotExist)
+	})
+}
+
+func TestLoadOrStoreConcurrentWrite(t *testing.T) {
+	db := dbtest.DB(t)
+	c := cache.New(repository.New(db))
+	ctx := t.Context()
+
+	t.Run("expired row replaced", func(t *testing.T) {
+		key := uuid.NewV7().String()
+		if err := c.Store(ctx, key, "expired", time.Millisecond); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(10 * time.Millisecond)
+		tx := lockedKey(t, db, `update dbtx.cache set value = '"B"', expires_at = null where key = $1`, key)
+
+		var v string
+		var loaded bool
+		var err error
+		commitAfter(t, tx, func() {
+			v, loaded, err = c.LoadOrStore(ctx, key, "A", 0)
+		})
+		is := assert.New(t)
+		is.NoError(err)
+		is.True(loaded)
+		is.Equal("B", v)
+	})
+
+	t.Run("live row overwritten", func(t *testing.T) {
+		key := uuid.NewV7().String()
+		if err := c.Store(ctx, key, "old", 0); err != nil {
+			t.Fatal(err)
+		}
+		tx := lockedKey(t, db, `update dbtx.cache set value = '"new"' where key = $1`, key)
+
+		var v string
+		var loaded bool
+		var err error
+		commitAfter(t, tx, func() {
+			v, loaded, err = c.LoadOrStore(ctx, key, "A", 0)
+		})
+		is := assert.New(t)
+		is.NoError(err)
+		is.True(loaded)
+		is.Equal("new", v)
+	})
 }

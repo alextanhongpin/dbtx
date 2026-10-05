@@ -19,10 +19,13 @@ select exists
            from dbtx.cache
           where dbtx.cache.key = $1
             and lease is null
-            and not exists (select 1 from expired)
+            and (expires_at is null or expires_at > statement_timestamp())
        )
 `
 
+// The select reads the statement snapshot, which still holds a row that the
+// expired CTE (or a concurrent transaction) deleted, so it checks liveness
+// itself instead of relying on the delete.
 func (q *Queries) Exists(ctx context.Context, key string) (bool, error) {
 	row := q.db.QueryRowContext(ctx, exists, key)
 	var exists bool

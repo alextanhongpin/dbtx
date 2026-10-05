@@ -26,11 +26,10 @@ go get github.com/alextanhongpin/dbtx/postgres/cache
 
 ## Migration
 
-The schema for `dbtx.cache` is embedded in the package. Run it once during app startup:
+The schema for `dbtx.cache` lives in [`repository/schema.sql`](repository/schema.sql) and is exported as `repository.Schema`. Run it once during app startup:
 
 ```go
-c := cache.New(db)
-err := c.Migrate(ctx)
+_, err := db.ExecContext(ctx, repository.Schema)
 ```
 
 This creates the `dbtx.cache` UNLOGGED table used by the cache.
@@ -38,9 +37,12 @@ This creates the `dbtx.cache` UNLOGGED table used by the cache.
 ## Quick start
 
 ```go
-import "github.com/alextanhongpin/dbtx/postgres/cache"
+import (
+    "github.com/alextanhongpin/dbtx/postgres/cache"
+    "github.com/alextanhongpin/dbtx/postgres/cache/repository"
+)
 
-c := cache.New(cache.NewPostgresRepository(db), cache.WithPrefix("books:"))
+c := cache.New(repository.New(db), cache.WithPrefix("books:"))
 
 // Store
 err := c.Store(ctx, id.String(), book, time.Minute)
