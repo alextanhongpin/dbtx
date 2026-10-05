@@ -541,3 +541,17 @@ func (suite *OutboxTestSuite) TestFinalAttemptNotDeadWhileHandled() {
 	suite.NoError(errA)
 	suite.Equal(outbox.StatusDone, suite.find(id).Status)
 }
+
+func (suite *OutboxTestSuite) TestInvalidMaxAttempts() {
+	ctx := suite.T().Context()
+	params := suite.params(1)
+	params.MaxAttempts = -1
+	_, err := suite.ob.Enqueue(ctx, params)
+	suite.ErrorIs(err, outbox.ErrInvalidMaxAttempts)
+
+	// The schema rejects messages that could never be delivered.
+	suite.createN(1)
+	_, err = suite.repo.DBTx(ctx).ExecContext(ctx, `
+		update dbtx.outbox set max_attempts = 0 where id = $1`, suite.ids[0])
+	suite.ErrorContains(err, "check constraint")
+}

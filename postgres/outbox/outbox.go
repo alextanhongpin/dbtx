@@ -24,11 +24,12 @@ import (
 )
 
 var (
-	ErrNotFound     = errors.New("outbox: not found")
-	ErrEOQ          = errors.New("outbox: end of queue")
-	ErrLeaseExpired = errors.New("outbox: lease expired")
-	ErrDeadLetter   = errors.New("outbox: dead letter")
-	ErrTxInContext  = errors.New("outbox: ctx must not carry a transaction")
+	ErrDeadLetter         = errors.New("outbox: dead letter")
+	ErrEOQ                = errors.New("outbox: end of queue")
+	ErrInvalidMaxAttempts = errors.New("outbox: max attempts must not be negative")
+	ErrLeaseExpired       = errors.New("outbox: lease expired")
+	ErrNotFound           = errors.New("outbox: not found")
+	ErrTxInContext        = errors.New("outbox: ctx must not carry a transaction")
 )
 
 // Statuses of a message.
@@ -126,6 +127,9 @@ func New(repo Repository) *Outbox {
 
 // Enqueue enqueues a new message to outbox.
 func (o *Outbox) Enqueue(ctx context.Context, params EnqueueParams) (uuid.UUID, error) {
+	if params.MaxAttempts < 0 {
+		return uuid.Nil(), ErrInvalidMaxAttempts
+	}
 	return o.repo.Create(ctx, params)
 }
 
