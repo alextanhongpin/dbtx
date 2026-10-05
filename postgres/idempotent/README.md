@@ -133,7 +133,7 @@ Each saved checkpoint appends the one it replaces to the `checkpoint_logs` colum
 
 ## How it works
 
-1. **Claim.** The `dbtx.claim` function (it requires `READ COMMITTED`) reads the row and returns an outcome. A finished key returns the stored response; a mismatched request, a live lease or an unexpired backoff returns `ErrRequestMismatch`, `ErrRequestInFlight` or `ErrBackoff`. A key whose lease expired with no attempts left is marked `failed` and returns `ErrMaxAttempts`. Otherwise an `INSERT … ON CONFLICT DO UPDATE` creates the key (fencing token 1) or takes it over (fencing token + 1, attempts + 1). If it loses a race, the function reads the row again.
+1. **Claim.** The `dbtx.claim` function (it requires `READ COMMITTED`) reads the row and returns an outcome. A finished key returns the stored response; a mismatched request, a live lease or an unexpired backoff returns `ErrRequestMismatch`, `ErrRequestInFlight` or `ErrBackoff`. A key whose lease expired with no attempts left is marked `failed` and returns `ErrMaxAttempts`. Otherwise an `INSERT … ON CONFLICT DO UPDATE` creates the key or takes it over (attempts + 1), with a new fencing token from the `dbtx.idempotency_fencing_token_seq` sequence. Tokens never repeat, even after a key is purged and claimed again, and they increase for a key over time. If it loses a race, the function reads the row again.
 2. **Step.** Each handler call runs in its own transaction:
    - `Lock` updates the row, which locks it for the transaction and extends the lease. The update checks the fencing token, so a worker that lost the key fails here.
    - The handler runs with the transaction in `ctx`.

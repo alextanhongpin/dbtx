@@ -528,3 +528,56 @@ func TestPurge(t *testing.T) {
 	is.NoError(err)
 	is.Equal(int64(1), calls.Load())
 }
+
+func TestFencingTokenAfterPurge(t *testing.T) {
+	db := dbtest.DB(t)
+	repo := repository.New(db)
+	key := keyOf(t)
+	claim := func(owner string) *idempotent.ClaimResponse {
+		t.Helper()
+		res, err := repo.Claim(t.Context(), idempotent.ClaimParams{
+			IdempotencyKey: key,
+			LeaseOwner:     owner,
+			LeaseSeconds:   0.1,
+			MaxAttempts:    idempotent.DefaultMaxAttempts,
+			Request:        req.Data,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+
+	// Worker A claims the key and stalls past its lease and the key's TTL.
+	stale := claim("stalled")
+	is := assert.New(t)
+	is.Equal(idempotent.OutcomeClaimed, stale.Outcome)
+	time.Sleep(200 * time.Millisecond)
+	_, err := db.ExecContext(t.Context(), `
+		update dbtx.idempotency_keys
+		   set expires_at = now() - interval '1 second'
+		 where idempotency_key = $1`, key)
+	is.NoError(err)
+	n, err := repo.Purge(t.Context())
+	is.NoError(err)
+	is.GreaterOrEqual(n, int64(1))
+
+	// Worker B claims the purged key afresh.
+	fresh := claim("fresh")
+	is.Equal(idempotent.OutcomeClaimed, fresh.Outcome)
+	is.Greater(fresh.FencingToken, stale.FencingToken)
+
+	// A's token does not match B's row.
+	err = repo.Ack(t.Context(), idempotent.AckParams{
+		IdempotencyKey: key,
+		FencingToken:   stale.FencingToken,
+		Response:       []byte(`{"msg": "stale"}`),
+	})
+	is.ErrorIs(err, idempotent.ErrClaimed)
+
+	// A takeover still reports a resumed claim, with a new token.
+	time.Sleep(200 * time.Millisecond)
+	takeover := claim("takeover")
+	is.Equal(idempotent.OutcomeResumed, takeover.Outcome)
+	is.Greater(takeover.FencingToken, fresh.FencingToken)
+}

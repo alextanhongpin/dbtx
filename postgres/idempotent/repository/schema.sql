@@ -2,12 +2,17 @@ create schema if not exists dbtx;
 
 create TYPE dbtx.idempotency_key_status as ENUM('in_progress', 'retryable', 'completed', 'failed');
 
+-- Fencing tokens come from one sequence, not a per-key counter, so that a key
+-- that is purged and claimed again never reuses a token that a stale worker
+-- may still hold. Tokens also keep increasing for a key across purges.
+create sequence if not exists dbtx.idempotency_fencing_token_seq;
+
 create table if not exists dbtx.idempotency_keys
  (
   idempotency_key  text primary key,
   request          jsonb not null default 'null',
   status           dbtx.idempotency_key_status not null,
-  fencing_token    bigint not null default 1,
+  fencing_token    bigint not null default nextval('dbtx.idempotency_fencing_token_seq'),
   lease_owner      text,         -- worker/instance id
   lease_expires_at timestamptz,  -- NULL once finished
   attempts         integer not null default 1,
@@ -122,12 +127,13 @@ begin
     insert into dbtx.idempotency_keys as ik
            (idempotency_key, request, status, fencing_token, lease_owner,
             lease_expires_at, attempts, expires_at)
-    values (p_key, p_request, 'in_progress', 1, p_lease_owner,
+    values (p_key, p_request, 'in_progress',
+            nextval('dbtx.idempotency_fencing_token_seq'), p_lease_owner,
             clock_timestamp() + make_interval(secs => p_lease_seconds), 1,
             clock_timestamp() + make_interval(secs => p_ttl_seconds))
     on conflict (idempotency_key) do update
        set status           = 'in_progress',
-           fencing_token    = ik.fencing_token + 1,
+           fencing_token    = nextval('dbtx.idempotency_fencing_token_seq'),
            lease_owner      = excluded.lease_owner,
            lease_expires_at = clock_timestamp() + make_interval(secs => p_lease_seconds),
            attempts         = ik.attempts + 1,
@@ -144,7 +150,7 @@ begin
     returning * into r;
 
     if found then
-      outcome          := case when r.fencing_token = 1 then 'claimed' else 'resumed' end;
+      outcome          := case when r.attempts = 1 then 'claimed' else 'resumed' end;
       fencing_token    := r.fencing_token;
       attempts         := r.attempts;
       checkpoint       := r.checkpoint;
