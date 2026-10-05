@@ -581,3 +581,50 @@ func TestFencingTokenAfterPurge(t *testing.T) {
 	is.Equal(idempotent.OutcomeResumed, takeover.Outcome)
 	is.Greater(takeover.FencingToken, fresh.FencingToken)
 }
+
+func TestLongRunningStepFails(t *testing.T) {
+	// fn runs longer than the lease and then fails. The failure is recorded
+	// before the row lock is released, so a Claim that waited on the lock
+	// sees the backoff instead of taking over.
+	wantErr := errors.New("boom")
+	var calls atomic.Int64
+	inFn := make(chan struct{})
+	fn := func(ctx context.Context, p idempotent.Params) (*idempotent.Result, error) {
+		if calls.Add(1) == 1 {
+			close(inFn)
+			time.Sleep(time.Second)
+			return nil, wantErr
+		}
+		return greet(ctx, p)
+	}
+	idp := newIdempotent(t)
+	idp.Lease = 200 * time.Millisecond
+	idp.BaseBackoff = time.Hour
+	idp.MaxBackoff = time.Hour
+	key := keyOf(t)
+
+	var wg sync.WaitGroup
+	var firstErr, secondErr error
+	wg.Go(func() {
+		_, firstErr = idp.Do(t.Context(), key, fn, req)
+	})
+	<-inFn
+	time.Sleep(500 * time.Millisecond) // Let the lease expire.
+	wg.Go(func() {
+		_, secondErr = idp.Do(t.Context(), key, fn, req)
+	})
+	wg.Wait()
+
+	is := assert.New(t)
+	is.ErrorIs(firstErr, wantErr)
+	is.ErrorIs(secondErr, idempotent.ErrBackoff)
+	is.Equal(int64(1), calls.Load())
+
+	var status, errText string
+	err := dbtest.DB(t).QueryRowContext(t.Context(),
+		`select status, error from dbtx.idempotency_keys where idempotency_key = $1`,
+		key).Scan(&status, &errText)
+	is.NoError(err)
+	is.Equal(string(idempotent.StatusRetryable), status)
+	is.Equal(wantErr.Error(), errText)
+}

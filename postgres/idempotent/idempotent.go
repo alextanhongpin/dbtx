@@ -120,6 +120,7 @@ type Repository interface {
 	Lock(ctx context.Context, params LockParams) error
 	Nack(ctx context.Context, params NackParams) error
 	Purge(ctx context.Context) (int64, error)
+	RunInSubTx(ctx context.Context, fn func(txCtx context.Context) error) error
 	RunInTx(ctx context.Context, fn func(txCtx context.Context) error) error
 }
 
@@ -267,76 +268,104 @@ type Result struct {
 }
 
 func (i *Idempotent) atomic(ctx context.Context, key string, fencingToken int64, params Params, fn fun) (*Result, error) {
-	leaseSeconds := i.lease().Seconds()
-	ttlSeconds := i.ttl().Seconds()
-
 	var res *Result
+	var stepErr error
 	err := i.repo.RunInTx(ctx, func(ctx context.Context) error {
 		err := i.repo.Lock(ctx, LockParams{
 			IdempotencyKey: key,
 			FencingToken:   fencingToken,
-			LeaseSeconds:   leaseSeconds,
+			LeaseSeconds:   i.lease().Seconds(),
 		})
 		if err != nil {
 			return err
 		}
 
-		res, err = fn(ctx, params)
-		if err != nil {
+		// Run the step in a savepoint, so that its writes roll back on error
+		// while the row stays locked. Recording the failure here, before the
+		// lock is released, makes a Claim that waits on the lock see the
+		// backoff. After the transaction, the lease may have expired already,
+		// and the Claim would take over first.
+		stepErr = i.repo.RunInSubTx(ctx, func(ctx context.Context) error {
+			var err error
+			res, err = i.step(ctx, key, fencingToken, params, fn)
 			return err
+		})
+		if stepErr == nil {
+			return nil
 		}
-		if res == nil || (res.Checkpoint == nil) == (res.Response == nil) {
-			return ErrInvalidResult
-		}
-
-		if res.Checkpoint != nil {
-			return i.repo.Checkpoint(ctx, CheckpointParams{
-				IdempotencyKey: key,
-				FencingToken:   fencingToken,
-				Checkpoint:     res.Checkpoint.Name,
-				CheckpointData: res.Checkpoint.Data,
-				LeaseSeconds:   leaseSeconds,
-			})
-		}
-
-		switch Status(res.Response.Status) {
-		case StatusCompleted:
-			return i.repo.Ack(ctx, AckParams{
-				IdempotencyKey: key,
-				FencingToken:   fencingToken,
-				Response:       res.Response.Data,
-				TtlSeconds:     ttlSeconds,
-			})
-		case StatusFailed:
-			return i.repo.Fail(ctx, FailParams{
-				IdempotencyKey: key,
-				FencingToken:   fencingToken,
-				Response:       res.Response.Data,
-				Error:          res.Response.Error,
-				TtlSeconds:     ttlSeconds,
-			})
-		default:
-			return fmt.Errorf("unknown response status: %s", res.Response.Status)
-		}
+		return i.nack(ctx, key, fencingToken, stepErr)
 	})
-	if err == nil {
+	switch {
+	case err == nil && stepErr == nil:
 		return res, nil
+	case err == nil:
+		return nil, stepErr
 	}
 
-	// Release so that other processes can retry. The key fails once the
-	// attempts are exhausted.
-	nackErr := i.repo.Nack(ctx, NackParams{
-		IdempotencyKey:     key,
-		FencingToken:       fencingToken,
-		Error:              err.Error(),
-		MaxAttempts:        i.maxAttempts(),
-		BaseBackoffSeconds: i.BaseBackoff.Seconds(),
-		MaxBackoffSeconds:  i.MaxBackoff.Seconds(),
-		TtlSeconds:         ttlSeconds,
-	})
+	// The transaction failed, so release the key without it. The key fails
+	// once the attempts are exhausted.
+	if stepErr != nil {
+		err = errors.Join(stepErr, err)
+	}
+	nackErr := i.nack(ctx, key, fencingToken, err)
 	if errors.Is(nackErr, ErrClaimed) {
 		// Fenced out; the key belongs to another process.
 		return nil, err
 	}
 	return nil, errors.Join(err, nackErr)
+}
+
+// step runs fn and saves its result: a checkpoint, or the final response.
+func (i *Idempotent) step(ctx context.Context, key string, fencingToken int64, params Params, fn fun) (*Result, error) {
+	res, err := fn(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+	if res == nil || (res.Checkpoint == nil) == (res.Response == nil) {
+		return nil, ErrInvalidResult
+	}
+
+	if res.Checkpoint != nil {
+		return res, i.repo.Checkpoint(ctx, CheckpointParams{
+			IdempotencyKey: key,
+			FencingToken:   fencingToken,
+			Checkpoint:     res.Checkpoint.Name,
+			CheckpointData: res.Checkpoint.Data,
+			LeaseSeconds:   i.lease().Seconds(),
+		})
+	}
+
+	switch Status(res.Response.Status) {
+	case StatusCompleted:
+		return res, i.repo.Ack(ctx, AckParams{
+			IdempotencyKey: key,
+			FencingToken:   fencingToken,
+			Response:       res.Response.Data,
+			TtlSeconds:     i.ttl().Seconds(),
+		})
+	case StatusFailed:
+		return res, i.repo.Fail(ctx, FailParams{
+			IdempotencyKey: key,
+			FencingToken:   fencingToken,
+			Response:       res.Response.Data,
+			Error:          res.Response.Error,
+			TtlSeconds:     i.ttl().Seconds(),
+		})
+	default:
+		return nil, fmt.Errorf("unknown response status: %s", res.Response.Status)
+	}
+}
+
+// nack releases the key so that other processes can retry it after the
+// backoff. The key fails once the attempts are exhausted.
+func (i *Idempotent) nack(ctx context.Context, key string, fencingToken int64, cause error) error {
+	return i.repo.Nack(ctx, NackParams{
+		IdempotencyKey:     key,
+		FencingToken:       fencingToken,
+		Error:              cause.Error(),
+		MaxAttempts:        i.maxAttempts(),
+		BaseBackoffSeconds: i.BaseBackoff.Seconds(),
+		MaxBackoffSeconds:  i.MaxBackoff.Seconds(),
+		TtlSeconds:         i.ttl().Seconds(),
+	})
 }
