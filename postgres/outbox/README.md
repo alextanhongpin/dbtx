@@ -98,6 +98,16 @@ Handler errors are recorded on the message, not returned from `Dequeue`. A faile
 
 A panic in the handler rolls back its transaction and propagates. The message is retried once its lease expires. If `ctx` is cancelled or a handler panics, the messages of the batch that were not handled yet are released right away, without using up an attempt.
 
+### Ordering
+
+The outbox does not guarantee delivery order, not even for messages of the same aggregate:
+
+* Several workers handle messages at the same time, so two messages of an aggregate can be published concurrently and arrive in either order.
+* A failed message is retried after its backoff, behind messages enqueued after it.
+* Messages are polled in `available_at` order. `available_at` defaults to the start of the enqueuing transaction, not its commit, so a message from a long transaction can be delivered after a message that was enqueued later in another transaction, even if both committed before either was polled.
+
+Consumers must tolerate reordering, for example by giving each event the aggregate's version and ignoring events older than the version they have already applied. Ordering on the receiving side, such as the inbox's `Ordered` mode, cannot restore an order that was lost before the message arrived.
+
 ### Dead letters and cleanup
 
 ```go
@@ -120,4 +130,4 @@ n, err := o.Count(ctx) // visible, retryable messages
 ## Notes
 
 * Keep processing idempotent – the same message may be redelivered if a worker crashes after publishing but before commit, or if its lease expires.
-* Messages are dequeued in `available_at` order, so retried messages go behind fresh ones.
+* Messages are not delivered in order, not even per aggregate. See [Ordering](#ordering).

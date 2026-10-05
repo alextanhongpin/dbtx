@@ -11,6 +11,12 @@
 // transaction stays open while messages wait to be handled. A message whose
 // lease expires, for example because the worker crashed, is delivered again.
 // Delivery is at least once, so handlers must be idempotent.
+//
+// Delivery order is not guaranteed, not even for messages of the same
+// aggregate: workers publish concurrently, failed messages are retried behind
+// later ones, and poll order follows available_at, which defaults to the start
+// of the enqueuing transaction rather than its commit. Consumers must tolerate
+// reordering, for example by versioning the events of an aggregate.
 package outbox
 
 import (
