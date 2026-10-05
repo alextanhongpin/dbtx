@@ -464,9 +464,9 @@ func TestTakeover(t *testing.T) {
 }
 
 func TestLongRunningStep(t *testing.T) {
-	// fn runs longer than the lease. The row lock held by the step
-	// transaction blocks a concurrent Claim until the step commits, so the key
-	// is neither taken over nor reported as lost.
+	// fn runs longer than the lease. The step transaction holds the row lock
+	// until it commits, so a concurrent Claim reports the key as in progress
+	// instead of taking it over, or waiting for the step.
 	var calls atomic.Int64
 	inFn := make(chan struct{})
 	fn := func(ctx context.Context, p idempotent.Params) (*idempotent.Result, error) {
@@ -480,24 +480,28 @@ func TestLongRunningStep(t *testing.T) {
 	idp.Lease = 200 * time.Millisecond
 	key := keyOf(t)
 
-	var wg sync.WaitGroup
-	var first, second *idempotent.Response
-	var firstErr, secondErr error
-	wg.Go(func() {
+	var first *idempotent.Response
+	var firstErr error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
 		first, firstErr = idp.Do(t.Context(), key, fn, req)
-	})
+	}()
 	<-inFn
 	time.Sleep(500 * time.Millisecond) // Let the lease expire.
-	wg.Go(func() {
-		second, secondErr = idp.Do(t.Context(), key, fn, req)
-	})
-	wg.Wait()
 
+	start := time.Now()
+	_, err := idp.Do(t.Context(), key, fn, req)
 	is := assert.New(t)
+	is.ErrorIs(err, idempotent.ErrRequestInFlight)
+	is.Less(time.Since(start), 250*time.Millisecond, "Claim waited for the step")
+	<-done
+
 	is.NoError(firstErr)
-	is.NoError(secondErr)
 	is.Equal(string(idempotent.StatusCompleted), first.Status)
-	is.Equal(string(idempotent.StatusCompleted), second.Status)
+	res, err := idp.Do(t.Context(), key, fn, req)
+	is.NoError(err)
+	is.Equal(string(idempotent.StatusCompleted), res.Status)
 	is.Equal(int64(1), calls.Load())
 }
 
@@ -584,8 +588,8 @@ func TestFencingTokenAfterPurge(t *testing.T) {
 
 func TestLongRunningStepFails(t *testing.T) {
 	// fn runs longer than the lease and then fails. The failure is recorded
-	// before the row lock is released, so a Claim that waited on the lock
-	// sees the backoff instead of taking over.
+	// before the row lock is released, so a Claim after the step sees the
+	// backoff instead of taking over.
 	wantErr := errors.New("boom")
 	var calls atomic.Int64
 	inFn := make(chan struct{})
@@ -603,25 +607,27 @@ func TestLongRunningStepFails(t *testing.T) {
 	idp.MaxBackoff = time.Hour
 	key := keyOf(t)
 
-	var wg sync.WaitGroup
-	var firstErr, secondErr error
-	wg.Go(func() {
+	var firstErr error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
 		_, firstErr = idp.Do(t.Context(), key, fn, req)
-	})
+	}()
 	<-inFn
 	time.Sleep(500 * time.Millisecond) // Let the lease expire.
-	wg.Go(func() {
-		_, secondErr = idp.Do(t.Context(), key, fn, req)
-	})
-	wg.Wait()
 
+	_, err := idp.Do(t.Context(), key, fn, req)
 	is := assert.New(t)
+	is.ErrorIs(err, idempotent.ErrRequestInFlight)
+	<-done
+
 	is.ErrorIs(firstErr, wantErr)
-	is.ErrorIs(secondErr, idempotent.ErrBackoff)
+	_, err = idp.Do(t.Context(), key, fn, req)
+	is.ErrorIs(err, idempotent.ErrBackoff)
 	is.Equal(int64(1), calls.Load())
 
 	var status, errText string
-	err := dbtest.DB(t).QueryRowContext(t.Context(),
+	err = dbtest.DB(t).QueryRowContext(t.Context(),
 		`select status, error from dbtx.idempotency_keys where idempotency_key = $1`,
 		key).Scan(&status, &errText)
 	is.NoError(err)

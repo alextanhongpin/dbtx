@@ -140,7 +140,7 @@ Each saved checkpoint appends the one it replaces to the `checkpoint_logs` colum
    - `Checkpoint`, `Ack` (completed) or `Fail` (failed) writes the outcome, checking the fencing token again.
 3. **Release.** On any error, `Nack` marks the key `retryable` with `retry_after` set to `BaseBackoff * 2^(attempts-1)`, capped at `MaxBackoff`. On the last attempt it marks the key `failed` instead, and later calls get the stored failed response. If the worker was fenced out, `Nack` matches no row and nothing changes.
 
-While a step holds the row lock, a concurrent `Claim` waits until the step commits. It then sees either a fresh lease or a finished key, so a step that runs longer than the lease is never taken over. No heartbeat is needed. The lease only matters when a worker crashes: its transaction rolls back, the lock is released, and another worker can take over once the lease expires.
+While a step holds the row lock, a concurrent `Claim` returns `ErrRequestInFlight` right away, even if the lease has expired, instead of waiting for the step. A step that runs longer than the lease is never taken over, and callers do not hold a connection while it runs. If the step fails, its error and backoff are recorded before the lock is released. No heartbeat is needed. The lease only matters when a worker crashes: its transaction rolls back, the lock is released, and another worker can take over once the lease expires.
 
 ## API
 

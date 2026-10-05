@@ -53,7 +53,8 @@ language plpgsql
       as $$
 #variable_conflict use_column
 declare
-  r dbtx.idempotency_keys;
+  r      dbtx.idempotency_keys;
+  locked boolean := false;
 begin
   if current_setting('transaction_isolation') <> 'read committed' then
     raise exception 'dbtx.claim requires READ COMMITTED' using errcode = '25000';
@@ -89,6 +90,24 @@ begin
       elsif r.status = 'in_progress' and r.lease_expires_at > clock_timestamp() then
         outcome := 'in_progress';
         return next; return;
+      end if;
+
+      -- The row looks claimable, but a step may still hold its lock: the
+      -- step transaction locks the row until it commits, even past the
+      -- lease. Do not wait for it; report the key as in progress. With the
+      -- lock, inspect the row again, since the step may have finished.
+      if not locked then
+        perform 1
+           from dbtx.idempotency_keys
+          where idempotency_key = p_key
+            for update skip locked;
+        if found then
+          locked := true;
+        elsif exists (select 1 from dbtx.idempotency_keys where idempotency_key = p_key) then
+          outcome := 'in_progress';
+          return next; return;
+        end if;
+        continue;  -- re-inspect, or the row was purged
       end if;
 
       -- Row is retryable or has an expired lease. Exhaustion beats backoff.
