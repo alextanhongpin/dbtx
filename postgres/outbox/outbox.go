@@ -33,6 +33,7 @@ var (
 	ErrDeadLetter         = errors.New("outbox: dead letter")
 	ErrEOQ                = errors.New("outbox: end of queue")
 	ErrInvalidMaxAttempts = errors.New("outbox: max attempts must not be negative")
+	ErrNotInTx            = errors.New("outbox: ctx must carry a transaction")
 	ErrLeaseExpired       = errors.New("outbox: lease expired")
 	ErrNotFound           = errors.New("outbox: not found")
 	ErrTxInContext        = errors.New("outbox: ctx must not carry a transaction")
@@ -105,6 +106,11 @@ type HandlerFunc = func(ctx context.Context, msg *Message) error
 type Outbox struct {
 	repo Repository
 
+	// RequireTx makes Enqueue fail with ErrNotInTx unless ctx carries a
+	// transaction of the repository. Without a transaction, Enqueue commits
+	// the message on its own, which loses the outbox guarantee.
+	RequireTx bool
+
 	// Backoff returns how long a failed message stays hidden before it is
 	// retried. Defaults to DefaultBackoff.
 	Backoff func(msg *Message) time.Duration
@@ -135,6 +141,9 @@ func New(repo Repository) *Outbox {
 func (o *Outbox) Enqueue(ctx context.Context, params EnqueueParams) (uuid.UUID, error) {
 	if params.MaxAttempts < 0 {
 		return uuid.Nil(), ErrInvalidMaxAttempts
+	}
+	if o.RequireTx && !o.repo.IsTx(ctx) {
+		return uuid.Nil(), ErrNotInTx
 	}
 	return o.repo.Create(ctx, params)
 }

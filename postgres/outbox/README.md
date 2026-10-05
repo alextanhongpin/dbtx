@@ -59,7 +59,9 @@ err := repo.RunInTx(ctx, func(ctx context.Context) error {
 })
 ```
 
-Enqueue joins the transaction in `ctx` when it was started by a `dbtx.DB` with the same ID as the repository. Both default to `dbtx.ID`, so any `dbtx.New(db).RunInTx` works. Called without a transaction, Enqueue commits the message on its own, which loses the outbox guarantee.
+Enqueue joins the transaction in `ctx` when it was started by a `dbtx.DB` with the same ID as the repository. Both default to `dbtx.ID`, so any `dbtx.New(db).RunInTx` works. Called without a transaction, Enqueue commits the message on its own, which loses the outbox guarantee. Set `o.RequireTx = true` to make it return `outbox.ErrNotInTx` instead.
+
+The transaction is found by ID only. If your application uses several databases, give each `dbtx.DB` its own ID with `SetID`, and the outbox repository the ID of the database that holds `dbtx.outbox`. Otherwise Enqueue may join a transaction of another database.
 
 ### Dequeue worker
 

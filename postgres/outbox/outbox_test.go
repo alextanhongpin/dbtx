@@ -555,3 +555,19 @@ func (suite *OutboxTestSuite) TestInvalidMaxAttempts() {
 		update dbtx.outbox set max_attempts = 0 where id = $1`, suite.ids[0])
 	suite.ErrorContains(err, "check constraint")
 }
+
+func (suite *OutboxTestSuite) TestEnqueueRequireTx() {
+	ctx := suite.T().Context()
+	suite.ob.RequireTx = true
+
+	_, err := suite.ob.Enqueue(ctx, suite.params(1))
+	suite.ErrorIs(err, outbox.ErrNotInTx)
+	suite.count(0)
+
+	err = suite.repo.RunInTx(ctx, func(txCtx context.Context) error {
+		_, err := suite.ob.Enqueue(txCtx, suite.params(1))
+		return err
+	})
+	suite.NoError(err)
+	suite.count(1)
+}
