@@ -19,9 +19,16 @@ type Querier interface {
 	Dead(ctx context.Context) (int64, error)
 	Find(ctx context.Context, id uuid.UUID) (*DbtxOutbox, error)
 	ListDead(ctx context.Context, limit int32) ([]*DbtxOutbox, error)
+	// Renews the lease of a message leased to locked_by, and locks its row until
+	// the handler's transaction ends. Poll skips locked rows, and Dead waits for
+	// them, so the message is not delivered again while it is being handled, even
+	// if the lease expires meanwhile.
+	Lock(ctx context.Context, arg LockParams) (int64, error)
 	Nack(ctx context.Context, arg NackParams) (int64, error)
 	Poll(ctx context.Context, arg PollParams) ([]*DbtxOutbox, error)
 	Purge(ctx context.Context, arg PurgeParams) (int64, error)
+	// Returns a leased message that was never handled, and refunds its attempt.
+	Release(ctx context.Context, arg ReleaseParams) (int64, error)
 	Requeue(ctx context.Context, id uuid.UUID) (int64, error)
 }
 

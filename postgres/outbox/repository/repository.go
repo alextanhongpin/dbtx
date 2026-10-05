@@ -1,6 +1,8 @@
-package internal
+package repository
 
 import (
+	_ "embed"
+
 	"context"
 	"database/sql"
 	"encoding/json/jsontext"
@@ -9,51 +11,23 @@ import (
 	"uuid"
 
 	"github.com/alextanhongpin/dbtx"
-	"github.com/alextanhongpin/dbtx/postgres/outbox/internal/postgres"
+	"github.com/alextanhongpin/dbtx/postgres/outbox"
+	"github.com/alextanhongpin/dbtx/postgres/outbox/repository/postgres"
 )
 
-var (
-	ErrNotFound     = errors.New("outbox: not found")
-	ErrEOQ          = errors.New("outbox: end of queue")
-	ErrLeaseExpired = errors.New("outbox: lease expired")
-)
+//go:embed schema.sql
+var Schema string
+
+var _ outbox.Repository = (*Repository)(nil)
 
 type Repository struct {
 	*dbtx.DB
 }
 
-func NewRepository(db *sql.DB) *Repository {
+func New(db *sql.DB) *Repository {
 	return &Repository{
 		DB: dbtx.New(db),
 	}
-}
-
-type Message struct {
-	ID            uuid.UUID
-	AggregateType string
-	AggregateID   string
-	EventType     string
-	Payload       jsontext.Value
-	Status        string
-	Attempts      int32
-	MaxAttempts   int32
-	LastError     string
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
-}
-
-type CreateParams struct {
-	AggregateID   string
-	AggregateType string
-	EventType     string
-	Payload       jsontext.Value
-
-	// MaxAttempts is the number of deliveries before the message is dead.
-	// Zero means the default of 10.
-	MaxAttempts int32
-
-	// AvailableAt delays the first delivery. Zero means now.
-	AvailableAt time.Time
 }
 
 // Ack marks a leased message as done. It returns ErrLeaseExpired if the
@@ -66,12 +40,35 @@ func (r *Repository) Ack(ctx context.Context, id uuid.UUID, lockedBy string) err
 	return leased(n, err)
 }
 
+// Lock renews the lease of a message leased to lockedBy, and locks its row
+// until the transaction in ctx ends. It returns ErrLeaseExpired if the message
+// is no longer leased by lockedBy.
+func (r *Repository) Lock(ctx context.Context, id uuid.UUID, lockedBy string, lease time.Duration) error {
+	n, err := r.db(ctx).Lock(ctx, postgres.LockParams{
+		ID:           id,
+		LockedBy:     lockedBy,
+		LeaseSeconds: lease.Seconds(),
+	})
+	return leased(n, err)
+}
+
+// Release returns a leased message that was never handled, and refunds its
+// attempt. It returns ErrLeaseExpired if the message is no longer leased by
+// lockedBy.
+func (r *Repository) Release(ctx context.Context, id uuid.UUID, lockedBy string) error {
+	n, err := r.db(ctx).Release(ctx, postgres.ReleaseParams{
+		ID:       id,
+		LockedBy: lockedBy,
+	})
+	return leased(n, err)
+}
+
 // Count returns the number of visible messages.
 func (r *Repository) Count(ctx context.Context) (int64, error) {
 	return r.db(ctx).Count(ctx)
 }
 
-func (r *Repository) Create(ctx context.Context, params CreateParams) (uuid.UUID, error) {
+func (r *Repository) Create(ctx context.Context, params outbox.EnqueueParams) (uuid.UUID, error) {
 	return r.db(ctx).Create(ctx, postgres.CreateParams{
 		AggregateID:   params.AggregateID,
 		AggregateType: params.AggregateType,
@@ -94,10 +91,10 @@ func (r *Repository) Dead(ctx context.Context) (int64, error) {
 	return r.db(ctx).Dead(ctx)
 }
 
-func (r *Repository) Find(ctx context.Context, id uuid.UUID) (*Message, error) {
+func (r *Repository) Find(ctx context.Context, id uuid.UUID) (*outbox.Message, error) {
 	row, err := r.db(ctx).Find(ctx, id)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
+		return nil, outbox.ErrNotFound
 	}
 	if err != nil {
 		return nil, err
@@ -106,7 +103,7 @@ func (r *Repository) Find(ctx context.Context, id uuid.UUID) (*Message, error) {
 	return newMessage(row), nil
 }
 
-func (r *Repository) ListDead(ctx context.Context, limit int32) ([]*Message, error) {
+func (r *Repository) ListDead(ctx context.Context, limit int32) ([]*outbox.Message, error) {
 	rows, err := r.db(ctx).ListDead(ctx, limit)
 	if err != nil {
 		return nil, err
@@ -130,7 +127,7 @@ func (r *Repository) Nack(ctx context.Context, id uuid.UUID, lockedBy string, de
 
 // Poll leases up to limit visible messages to lockedBy for the lease duration.
 // It returns ErrEOQ if there are no visible messages.
-func (r *Repository) Poll(ctx context.Context, lockedBy string, limit int32, lease time.Duration) ([]*Message, error) {
+func (r *Repository) Poll(ctx context.Context, lockedBy string, limit int32, lease time.Duration) ([]*outbox.Message, error) {
 	rows, err := r.db(ctx).Poll(ctx, postgres.PollParams{
 		LockedBy:     newNullString(lockedBy),
 		LeaseSeconds: lease.Seconds(),
@@ -140,7 +137,7 @@ func (r *Repository) Poll(ctx context.Context, lockedBy string, limit int32, lea
 		return nil, err
 	}
 	if len(rows) == 0 {
-		return nil, ErrEOQ
+		return nil, outbox.ErrEOQ
 	}
 	return newMessages(rows), nil
 }
@@ -158,7 +155,7 @@ func (r *Repository) Requeue(ctx context.Context, id uuid.UUID) error {
 		return err
 	}
 	if n == 0 {
-		return ErrNotFound
+		return outbox.ErrNotFound
 	}
 	return nil
 }
@@ -172,7 +169,7 @@ func leased(n int64, err error) error {
 		return err
 	}
 	if n == 0 {
-		return ErrLeaseExpired
+		return outbox.ErrLeaseExpired
 	}
 	return nil
 }
@@ -184,16 +181,16 @@ func newNullString(s string) sql.NullString {
 	}
 }
 
-func newMessages(rows []*postgres.DbtxOutbox) []*Message {
-	res := make([]*Message, len(rows))
+func newMessages(rows []*postgres.DbtxOutbox) []*outbox.Message {
+	res := make([]*outbox.Message, len(rows))
 	for i, row := range rows {
 		res[i] = newMessage(row)
 	}
 	return res
 }
 
-func newMessage(row *postgres.DbtxOutbox) *Message {
-	return &Message{
+func newMessage(row *postgres.DbtxOutbox) *outbox.Message {
+	return &outbox.Message{
 		ID:            row.ID,
 		AggregateType: row.AggregateType,
 		AggregateID:   row.AggregateID,

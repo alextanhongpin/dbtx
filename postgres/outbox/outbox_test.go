@@ -6,6 +6,7 @@ import (
 	"encoding/json/jsontext"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 	"uuid"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/alextanhongpin/dbtx"
 	"github.com/alextanhongpin/dbtx/postgres/outbox"
+	"github.com/alextanhongpin/dbtx/postgres/outbox/repository"
 	"github.com/alextanhongpin/dbtx/testing/dbtest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
@@ -32,7 +34,7 @@ func migrate(dsn string) error {
 		return err
 	}
 	defer db.Close()
-	_, err = db.Exec(outbox.Schema)
+	_, err = db.Exec(repository.Schema)
 	return err
 }
 
@@ -51,7 +53,7 @@ type OutboxTestSuite struct {
 	suite.Suite
 	ids      []uuid.UUID
 	ob       *outbox.Outbox
-	repo     *outbox.PostgresRepository
+	repo     *repository.Repository
 	maxRetry int
 }
 
@@ -62,7 +64,7 @@ func (suite *OutboxTestSuite) SetupTest() {
 	_, err := db.ExecContext(t.Context(), `delete from dbtx.outbox`)
 	suite.Require().NoError(err)
 
-	suite.repo = outbox.NewRepository(db)
+	suite.repo = repository.New(db)
 	suite.ob = outbox.New(suite.repo)
 	suite.ob.Backoff = func(msg *outbox.Message) time.Duration {
 		return 0
@@ -394,4 +396,148 @@ func (suite *OutboxTestSuite) count(n int, msgAndArgs ...any) {
 	count, err := suite.ob.Count(ctx)
 	suite.NoError(err)
 	suite.Equal(int64(n), count, msgAndArgs...)
+}
+
+func (suite *OutboxTestSuite) TestDequeueInTx() {
+	ctx := suite.T().Context()
+	suite.createN(1)
+
+	var calls int
+	handle := func(context.Context, *outbox.Message) error {
+		calls++
+		return nil
+	}
+	err := suite.repo.RunInTx(ctx, func(txCtx context.Context) error {
+		return suite.ob.Dequeue(txCtx, 1, handle)
+	})
+	suite.ErrorIs(err, outbox.ErrTxInContext)
+	suite.Zero(calls)
+
+	// The message was not claimed.
+	suite.NoError(suite.ob.Dequeue(ctx, 1, handle))
+	suite.Equal(1, calls)
+}
+
+func (suite *OutboxTestSuite) TestBatchLeaseExpired() {
+	ctx := suite.T().Context()
+	suite.createN(2)
+	suite.ob.Lease = 300 * time.Millisecond
+
+	var mu sync.Mutex
+	handled := map[uuid.UUID]int{}
+	handle := func(_ context.Context, msg *outbox.Message) error {
+		mu.Lock()
+		handled[msg.ID]++
+		mu.Unlock()
+		if msg.ID == suite.ids[0] {
+			time.Sleep(600 * time.Millisecond)
+		}
+		return nil
+	}
+
+	// Worker A handles the first message for longer than the batch lease.
+	var errA error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		errA = suite.ob.Dequeue(ctx, 2, handle)
+	}()
+	time.Sleep(400 * time.Millisecond)
+
+	// Worker B reclaims the second message, whose lease expired while it
+	// waited for its turn. The first one is locked by A's handler.
+	b := outbox.New(suite.repo)
+	suite.NoError(b.Dequeue(ctx, 10, handle))
+	<-done
+
+	// A skips the message B handled.
+	suite.ErrorIs(errA, outbox.ErrLeaseExpired)
+	suite.Equal(map[uuid.UUID]int{suite.ids[0]: 1, suite.ids[1]: 1}, handled)
+	for _, id := range suite.ids {
+		suite.Equal(outbox.StatusDone, suite.find(id).Status)
+	}
+}
+
+func (suite *OutboxTestSuite) TestDequeueCancelReleases() {
+	ctx, cancel := context.WithCancel(suite.T().Context())
+	defer cancel()
+	suite.createN(3)
+
+	var calls int
+	err := suite.ob.Dequeue(ctx, 3, func(context.Context, *outbox.Message) error {
+		calls++
+		cancel()
+		return nil
+	})
+	suite.ErrorIs(err, context.Canceled)
+	suite.Equal(1, calls)
+
+	// The messages not handled yet keep their attempt, and can be dequeued
+	// again right away.
+	for _, id := range suite.ids[1:] {
+		msg := suite.find(id)
+		suite.Equal(outbox.StatusPending, msg.Status)
+		suite.Zero(msg.Attempts)
+	}
+	suite.count(2)
+}
+
+func (suite *OutboxTestSuite) TestDequeuePanicReleases() {
+	ctx := suite.T().Context()
+	suite.createN(3)
+
+	func() {
+		defer func() {
+			suite.Equal("boom", recover())
+		}()
+		_ = suite.ob.Dequeue(ctx, 3, func(context.Context, *outbox.Message) error {
+			panic("boom")
+		})
+	}()
+
+	// The panicking message used its attempt, and is retried once its lease
+	// expires. The others are released.
+	msg := suite.find(suite.ids[0])
+	suite.Equal(outbox.StatusProcessing, msg.Status)
+	suite.Equal(int32(1), msg.Attempts)
+	for _, id := range suite.ids[1:] {
+		msg := suite.find(id)
+		suite.Equal(outbox.StatusPending, msg.Status)
+		suite.Zero(msg.Attempts)
+	}
+}
+
+func (suite *OutboxTestSuite) TestFinalAttemptNotDeadWhileHandled() {
+	ctx := suite.T().Context()
+	params := suite.params(1)
+	params.MaxAttempts = 1
+	id, err := suite.ob.Enqueue(ctx, params)
+	suite.Require().NoError(err)
+	suite.ob.Lease = 200 * time.Millisecond
+
+	started := make(chan struct{})
+	done := make(chan struct{})
+	var errA error
+	go func() {
+		defer close(done)
+		errA = suite.ob.Dequeue(ctx, 1, func(context.Context, *outbox.Message) error {
+			close(started)
+			time.Sleep(500 * time.Millisecond)
+			return nil
+		})
+	}()
+	<-started
+	time.Sleep(300 * time.Millisecond)
+
+	// The lease expired on the final attempt, but the handler is still
+	// running, so another worker does not mark the message as dead.
+	err = outbox.New(suite.repo).Dequeue(ctx, 1, func(context.Context, *outbox.Message) error {
+		suite.Fail("delivered twice")
+		return nil
+	})
+	suite.ErrorIs(err, outbox.ErrEOQ)
+	<-done
+
+	suite.NoError(errA)
+	suite.Equal(outbox.StatusDone, suite.find(id).Status)
 }

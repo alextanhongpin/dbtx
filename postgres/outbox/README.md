@@ -14,10 +14,10 @@ The outbox pattern lets you write business data and domain events in the same da
 
 ## Schema
 
-The schema lives in [`internal/schema.sql`](internal/schema.sql) and is exported as `outbox.Schema`. It is idempotent, so you can run it at startup or copy it into your migrations:
+The schema lives in [`repository/schema.sql`](repository/schema.sql) and is exported as `repository.Schema`. It is idempotent, so you can run it at startup or copy it into your migrations:
 
 ```go
-_, err := db.ExecContext(ctx, outbox.Schema)
+_, err := db.ExecContext(ctx, repository.Schema)
 ```
 
 A message moves through these statuses:
@@ -40,7 +40,7 @@ go get github.com/alextanhongpin/dbtx/postgres/outbox
 ## Quick start
 
 ```go
-repo := outbox.NewRepository(db) // db is a *sql.DB
+repo := repository.New(db) // db is a *sql.DB
 o := outbox.New(repo)
 
 // Enqueue inside the same transaction as your business write.

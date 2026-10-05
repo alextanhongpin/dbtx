@@ -14,26 +14,21 @@
 package outbox
 
 import (
-	_ "embed"
-
 	"context"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"math/rand/v2"
 	"time"
 	"uuid"
-
-	"github.com/alextanhongpin/dbtx/postgres/outbox/internal"
 )
 
-//go:embed internal/schema.sql
-var Schema string
-
 var (
-	ErrNotFound     = internal.ErrNotFound
-	ErrEOQ          = internal.ErrEOQ
-	ErrLeaseExpired = internal.ErrLeaseExpired
+	ErrNotFound     = errors.New("outbox: not found")
+	ErrEOQ          = errors.New("outbox: end of queue")
+	ErrLeaseExpired = errors.New("outbox: lease expired")
 	ErrDeadLetter   = errors.New("outbox: dead letter")
+	ErrTxInContext  = errors.New("outbox: ctx must not carry a transaction")
 )
 
 // Statuses of a message.
@@ -47,18 +42,36 @@ const (
 // DefaultLease is how long Dequeue leases messages when Outbox.Lease is zero.
 const DefaultLease = 30 * time.Second
 
-type (
-	Message = internal.Message
+// releaseTimeout bounds releasing unhandled messages after ctx is done.
+const releaseTimeout = 5 * time.Second
 
-	EnqueueParams = internal.CreateParams
+type Message struct {
+	ID            uuid.UUID
+	AggregateType string
+	AggregateID   string
+	EventType     string
+	Payload       jsontext.Value
+	Status        string
+	Attempts      int32
+	MaxAttempts   int32
+	LastError     string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
 
-	// PostgresRepository is the PostgreSQL implementation of Repository.
-	PostgresRepository = internal.Repository
-)
+type EnqueueParams struct {
+	AggregateID   string
+	AggregateType string
+	EventType     string
+	Payload       jsontext.Value
 
-var NewRepository = internal.NewRepository
+	// MaxAttempts is the number of deliveries before the message is dead.
+	// Zero means the default of 10.
+	MaxAttempts int32
 
-var _ Repository = (*PostgresRepository)(nil)
+	// AvailableAt delays the first delivery. Zero means now.
+	AvailableAt time.Time
+}
 
 // Repository stores outbox messages.
 type Repository interface {
@@ -66,11 +79,15 @@ type Repository interface {
 	Count(ctx context.Context) (int64, error)
 	Create(ctx context.Context, params EnqueueParams) (uuid.UUID, error)
 	Dead(ctx context.Context) (int64, error)
+	IsTx(ctx context.Context) bool
 	ListDead(ctx context.Context, limit int32) ([]*Message, error)
+	Lock(ctx context.Context, id uuid.UUID, lockedBy string, lease time.Duration) error
 	Nack(ctx context.Context, id uuid.UUID, lockedBy string, dead bool, lastError string, delay time.Duration) error
 	Poll(ctx context.Context, lockedBy string, limit int32, lease time.Duration) ([]*Message, error)
 	Purge(ctx context.Context, status string, before time.Time) (int64, error)
+	Release(ctx context.Context, id uuid.UUID, lockedBy string) error
 	Requeue(ctx context.Context, id uuid.UUID) error
+	RunInSubTx(ctx context.Context, fn func(txCtx context.Context) error) error
 	RunInTx(ctx context.Context, fn func(txCtx context.Context) error) error
 }
 
@@ -86,8 +103,11 @@ type Outbox struct {
 	Backoff func(msg *Message) time.Duration
 
 	// Lease is how long dequeued messages stay hidden from other workers.
-	// All messages in a batch are leased at once, so it must cover handling
-	// the whole batch. Defaults to DefaultLease.
+	// Each message's lease is renewed when its handler starts, and the
+	// message cannot be reclaimed while the handler runs. A message whose
+	// lease expires while it waits for its turn in the batch may be
+	// reclaimed by another worker, and is then skipped. Defaults to
+	// DefaultLease.
 	Lease time.Duration
 }
 
@@ -118,10 +138,16 @@ func (o *Outbox) Enqueue(ctx context.Context, params EnqueueParams) (uuid.UUID, 
 // message is dead once it runs out of attempts, or when the error wraps
 // ErrDeadLetter.
 //
-// Errors from fn are recorded on the message, and not returned. Any error
-// returned means the affected messages are retried once their lease expires.
-// It returns ErrEOQ if there are no visible messages.
-func (o *Outbox) Dequeue(ctx context.Context, limit int32, fn HandlerFunc) error {
+// Errors from fn are recorded on the message, and not returned. A message that
+// another worker reclaimed before its turn is skipped with ErrLeaseExpired. If
+// ctx is cancelled, or fn panics, the messages not handled yet are released
+// without using up an attempt.
+// It returns ErrEOQ if there are no visible messages, and ErrTxInContext if ctx
+// already carries a transaction of the repository.
+func (o *Outbox) Dequeue(ctx context.Context, limit int32, fn HandlerFunc) (err error) {
+	if o.repo.IsTx(ctx) {
+		return ErrTxInContext
+	}
 	lockedBy := uuid.NewV7().String()
 
 	// Messages that ran out of attempts are skipped by Poll, so the ones
@@ -136,33 +162,72 @@ func (o *Outbox) Dequeue(ctx context.Context, limit int32, fn HandlerFunc) error
 	}
 
 	var errs []error
-	for _, msg := range msgs {
+	// next is the first message not handled yet. The deferred release also
+	// runs when fn panics.
+	next := 0
+	defer func() {
+		if next < len(msgs) {
+			if rerr := o.release(ctx, lockedBy, msgs[next:]); rerr != nil {
+				err = errors.Join(err, rerr)
+			}
+		}
+	}()
+	for next < len(msgs) && ctx.Err() == nil {
+		msg := msgs[next]
+		next++
 		if err := o.handle(ctx, lockedBy, msg, fn); err != nil {
 			errs = append(errs, fmt.Errorf("outbox: message %s: %w", msg.ID, err))
 		}
+	}
+	if next < len(msgs) {
+		errs = append(errs, context.Cause(ctx))
 	}
 
 	return errors.Join(errs...)
 }
 
 func (o *Outbox) handle(ctx context.Context, lockedBy string, msg *Message, fn HandlerFunc) error {
-	var handlerErr error
-	err := o.repo.RunInTx(ctx, func(txCtx context.Context) error {
-		if err := fn(txCtx, msg); err != nil {
-			handlerErr = err
+	return o.repo.RunInTx(ctx, func(txCtx context.Context) error {
+		// Renew the lease and hold the row lock while fn runs, so that the
+		// message is not delivered to another worker meanwhile.
+		if err := o.repo.Lock(txCtx, msg.ID, lockedBy, o.lease()); err != nil {
 			return err
 		}
 
-		// Roll back the writes made by fn if another worker owns the
-		// message now.
-		return o.repo.Ack(txCtx, msg.ID, lockedBy)
-	})
-	if handlerErr == nil {
-		return err
-	}
+		// Run fn in a savepoint, so that its writes roll back on error while
+		// the failure is still recorded in this transaction. A Nack after the
+		// transaction would race with other workers reclaiming the message.
+		var handlerErr error
+		err := o.repo.RunInSubTx(txCtx, func(txCtx context.Context) error {
+			handlerErr = fn(txCtx, msg)
+			return handlerErr
+		})
+		if handlerErr == nil {
+			if err != nil {
+				return err
+			}
+			return o.repo.Ack(txCtx, msg.ID, lockedBy)
+		}
 
-	dead := msg.Attempts >= msg.MaxAttempts || errors.Is(handlerErr, ErrDeadLetter)
-	return o.repo.Nack(ctx, msg.ID, lockedBy, dead, handlerErr.Error(), o.backoff(msg))
+		dead := msg.Attempts >= msg.MaxAttempts || errors.Is(handlerErr, ErrDeadLetter)
+		return o.repo.Nack(txCtx, msg.ID, lockedBy, dead, handlerErr.Error(), o.backoff(msg))
+	})
+}
+
+// release returns messages that were never handled, on a context that
+// outlives ctx, since ctx being done is a common reason to get here.
+func (o *Outbox) release(ctx context.Context, lockedBy string, msgs []*Message) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
+	defer cancel()
+
+	var errs []error
+	for _, msg := range msgs {
+		err := o.repo.Release(ctx, msg.ID, lockedBy)
+		if err != nil && !errors.Is(err, ErrLeaseExpired) {
+			errs = append(errs, fmt.Errorf("outbox: releasing message %s: %w", msg.ID, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (o *Outbox) backoff(msg *Message) time.Duration {
