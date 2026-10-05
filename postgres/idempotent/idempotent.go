@@ -16,13 +16,13 @@ const (
 )
 
 var (
+	ErrBackoff         = errors.New("retry backoff")
 	ErrClaimed         = errors.New("lease expired or claimed by another process")
+	ErrInvalidResult   = errors.New("result must set exactly one of Checkpoint or Response")
+	ErrMaxAttempts     = errors.New("max attempts reached")
 	ErrNotFound        = errors.New("idempotency key not found")
 	ErrRequestInFlight = errors.New("request in flight")
 	ErrRequestMismatch = errors.New("request mismatch")
-	ErrMaxAttempts     = errors.New("max attempts reached")
-	ErrBackoff         = errors.New("retry backoff")
-	ErrInvalidResult   = errors.New("result must set exactly one of Checkpoint or Response")
 	ErrTxInContext     = errors.New("idempotent: ctx must not carry a transaction")
 )
 
@@ -37,14 +37,14 @@ const (
 
 // Outcomes returned by Claim.
 const (
+	OutcomeBackoff         = "backoff"
 	OutcomeClaimed         = "claimed"
-	OutcomeResumed         = "resumed"
 	OutcomeCompleted       = "completed"
+	OutcomeExhausted       = "exhausted"
 	OutcomeFailed          = "failed"
 	OutcomeInProgress      = "in_progress"
-	OutcomeBackoff         = "backoff"
-	OutcomeExhausted       = "exhausted"
 	OutcomePayloadMismatch = "payload_mismatch"
+	OutcomeResumed         = "resumed"
 )
 
 type AckParams struct {
@@ -114,9 +114,9 @@ type Repository interface {
 	Checkpoint(ctx context.Context, params CheckpointParams) error
 	Claim(ctx context.Context, params ClaimParams) (*ClaimResponse, error)
 	Fail(ctx context.Context, params FailParams) error
+	IsTx(ctx context.Context) bool
 	Lock(ctx context.Context, params LockParams) error
 	Nack(ctx context.Context, params NackParams) error
-	IsTx(ctx context.Context) bool
 	Purge(ctx context.Context) (int64, error)
 	RunInTx(ctx context.Context, fn func(txCtx context.Context) error) error
 }
