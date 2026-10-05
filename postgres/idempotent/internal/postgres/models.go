@@ -93,5 +93,6 @@ type DbtxIdempotencyKey struct {
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 	CompletedAt    sql.NullTime
+	RetryAfter     sql.NullTime
 	ExpiresAt      time.Time
 }

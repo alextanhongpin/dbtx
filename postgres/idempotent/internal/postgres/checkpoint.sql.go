@@ -13,14 +13,15 @@ import (
 
 const checkpoint = `-- name: Checkpoint :one
    update dbtx.idempotency_keys
-      set checkpoint_logs = checkpoint_logs || jsonb_build_array(
+      set checkpoint_logs = checkpoint_logs
+       || jsonb_build_array(
             jsonb_build_object('name', checkpoint, 'data', checkpoint_data)
           ),
           checkpoint = $1::text,
           checkpoint_data = $2::jsonb,
-          lease_expires_at = now()
-        + interval '1 second' * $3::float8,
-          updated_at = now()
+          updated_at = now(),
+          lease_expires_at = clock_timestamp()
+        + interval '1 second' * $3::float8
     where idempotency_key = $4::text
       and fencing_token = $5::bigint
       and status = 'in_progress'

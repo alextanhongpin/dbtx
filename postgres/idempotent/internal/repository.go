@@ -76,17 +76,6 @@ func (r *Repository) Fail(ctx context.Context, params FailParams) error {
 	return err
 }
 
-type InspectParams = postgres.InspectParams
-type InspectResponse = postgres.InspectRow
-
-func (r *Repository) Inspect(ctx context.Context, params InspectParams) (*InspectResponse, error) {
-	res, err := r.db(ctx).Inspect(ctx, params)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	return res, err
-}
-
 type LockParams = postgres.LockParams
 
 func (r *Repository) Lock(ctx context.Context, params LockParams) error {

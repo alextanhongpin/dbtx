@@ -14,31 +14,39 @@ import (
 const fail = `-- name: Fail :one
    update dbtx.idempotency_keys
       set status = 'failed',
-          response = $3,
-          error = $4::text,
+          response = $1::jsonb,
+          error = $2::text,
           lease_owner = null,
           lease_expires_at = null,
-          completed_at = now(),
-          updated_at = now()
-    where idempotency_key = $1
-      and fencing_token = $2
+          retry_after = null,
+          completed_at = clock_timestamp(),
+          expires_at = greatest(
+            expires_at,
+            clock_timestamp()
+          + interval '1 second' * $3::float8
+          ),
+          updated_at = clock_timestamp()
+    where idempotency_key = $4::text
+      and fencing_token = $5::bigint
       and status = 'in_progress'
-returning idempotency_key, request, status, fencing_token, lease_owner, lease_expires_at, attempts, checkpoint, checkpoint_data, checkpoint_logs, response, error, created_at, updated_at, completed_at, expires_at
+returning idempotency_key, request, status, fencing_token, lease_owner, lease_expires_at, attempts, checkpoint, checkpoint_data, checkpoint_logs, response, error, created_at, updated_at, completed_at, retry_after, expires_at
 `
 
 type FailParams struct {
-	IdempotencyKey string
-	FencingToken   int64
 	Response       jsontext.Value
 	Error          string
+	TtlSeconds     float64
+	IdempotencyKey string
+	FencingToken   int64
 }
 
 func (q *Queries) Fail(ctx context.Context, arg FailParams) (*DbtxIdempotencyKey, error) {
 	row := q.db.QueryRowContext(ctx, fail,
-		arg.IdempotencyKey,
-		arg.FencingToken,
 		arg.Response,
 		arg.Error,
+		arg.TtlSeconds,
+		arg.IdempotencyKey,
+		arg.FencingToken,
 	)
 	var i DbtxIdempotencyKey
 	err := row.Scan(
@@ -57,6 +65,7 @@ func (q *Queries) Fail(ctx context.Context, arg FailParams) (*DbtxIdempotencyKey
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.CompletedAt,
+		&i.RetryAfter,
 		&i.ExpiresAt,
 	)
 	return &i, err

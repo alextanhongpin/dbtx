@@ -11,25 +11,58 @@ import (
 
 const nack = `-- name: Nack :one
    update dbtx.idempotency_keys
-      set status = 'retryable',
-          error = $3::text,
+      set status = (
+  case
+       when attempts >= $1::int
+       then 'failed'
+       else 'retryable'
+  end)::dbtx.idempotency_key_status,
+          error = $2::text,
           lease_owner = null,
           lease_expires_at = null,
-          updated_at = now()
-    where idempotency_key = $1
-      and fencing_token = $2
+          retry_after = case
+                             when attempts >= $1::int
+                             then null
+                             else clock_timestamp() + interval '1 second' * least($3::float8, $4::float8 * power(2::float8, (attempts - 1)::float8))
+                        end,
+          completed_at = case
+                              when attempts >= $1::int
+                              then clock_timestamp()
+                         end,
+          expires_at = greatest(
+            expires_at,
+            clock_timestamp()
+          + interval '1 second' * $5::float8
+          ),
+          updated_at = clock_timestamp()
+    where idempotency_key = $6::text
+      and fencing_token = $7::bigint
       and status = 'in_progress'
-returning idempotency_key, request, status, fencing_token, lease_owner, lease_expires_at, attempts, checkpoint, checkpoint_data, checkpoint_logs, response, error, created_at, updated_at, completed_at, expires_at
+returning idempotency_key, request, status, fencing_token, lease_owner, lease_expires_at, attempts, checkpoint, checkpoint_data, checkpoint_logs, response, error, created_at, updated_at, completed_at, retry_after, expires_at
 `
 
 type NackParams struct {
-	IdempotencyKey string
-	FencingToken   int64
-	Error          string
+	MaxAttempts        int32
+	Error              string
+	MaxBackoffSeconds  float64
+	BaseBackoffSeconds float64
+	TtlSeconds         float64
+	IdempotencyKey     string
+	FencingToken       int64
 }
 
+// Exponential backoff: base * 2^(attempts-1), capped. `attempts` is the old
+// row value, i.e. the attempt that just failed. Terminal when exhausted.
 func (q *Queries) Nack(ctx context.Context, arg NackParams) (*DbtxIdempotencyKey, error) {
-	row := q.db.QueryRowContext(ctx, nack, arg.IdempotencyKey, arg.FencingToken, arg.Error)
+	row := q.db.QueryRowContext(ctx, nack,
+		arg.MaxAttempts,
+		arg.Error,
+		arg.MaxBackoffSeconds,
+		arg.BaseBackoffSeconds,
+		arg.TtlSeconds,
+		arg.IdempotencyKey,
+		arg.FencingToken,
+	)
 	var i DbtxIdempotencyKey
 	err := row.Scan(
 		&i.IdempotencyKey,
@@ -47,6 +80,7 @@ func (q *Queries) Nack(ctx context.Context, arg NackParams) (*DbtxIdempotencyKey
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.CompletedAt,
+		&i.RetryAfter,
 		&i.ExpiresAt,
 	)
 	return &i, err

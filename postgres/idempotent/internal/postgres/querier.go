@@ -14,14 +14,16 @@ type Querier interface {
 	// take over between steps. The previous checkpoint is appended to
 	// checkpoint_logs.
 	Checkpoint(ctx context.Context, arg CheckpointParams) (string, error)
+	// Columns that do not apply to the outcome are null; they are coalesced to
+	// the Go zero values ('0001-01-01' scans to time.Time{}).
 	Claim(ctx context.Context, arg ClaimParams) (*ClaimRow, error)
 	Fail(ctx context.Context, arg FailParams) (*DbtxIdempotencyKey, error)
-	// Called only when Claim returned no rows.
-	Inspect(ctx context.Context, arg InspectParams) (*InspectRow, error)
 	// Locks the row for the duration of the step transaction and extends the
 	// lease. While the row is locked, a concurrent Claim blocks until commit, so
 	// no separate heartbeat is needed.
 	Lock(ctx context.Context, arg LockParams) (int64, error)
+	// Exponential backoff: base * 2^(attempts-1), capped. `attempts` is the old
+	// row value, i.e. the attempt that just failed. Terminal when exhausted.
 	Nack(ctx context.Context, arg NackParams) (*DbtxIdempotencyKey, error)
 	Purge(ctx context.Context) (int64, error)
 }

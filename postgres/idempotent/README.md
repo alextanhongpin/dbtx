@@ -10,7 +10,7 @@ Work is protected by a **lease** and a **fencing token**. Long tasks can be spli
 - **Leases with fencing tokens.** When a worker crashes, another worker takes over after the lease expires. Writes from the crashed worker are rejected.
 - **Checkpoints** for multi-step tasks, so a retry continues from the last finished step.
 - **Cached outcomes.** Both `completed` and `failed` responses are stored and returned to later callers.
-- **Bounded retries.** Handler errors release the key for retry, up to `MaxAttempts`.
+- **Bounded retries with backoff.** Handler errors release the key for retry, with optional exponential backoff. The key fails once `MaxAttempts` is used up.
 - **Exact request comparison** using `jsonb` equality, which ignores key order and whitespace.
 
 ## Install
@@ -40,15 +40,15 @@ A key moves through these statuses:
 in_progress ──Response{completed}──▶ completed
   │     ▲   └─Response{failed}─────▶ failed
   │     │
-  │     │ Claim (attempts left)
+  │     │ Claim (attempts left, backoff elapsed)
   ▼     │
 retryable
 
-handler error or invalid result: in_progress ──▶ retryable
+handler error or invalid result: in_progress ──▶ retryable (or failed on the last attempt)
 worker crash, lease expired:     in_progress ──Claim──▶ in_progress (new fencing token)
 ```
 
-`completed` and `failed` are final. A key stays until `expires_at` (24 hours after creation) and is then removed by `Purge`.
+`completed` and `failed` are final. A key stays until `expires_at` (`TTL`, 24 hours by default, extended on each claim and outcome) and is then removed by `Purge`.
 
 ## Quick start
 
@@ -82,6 +82,8 @@ case errors.Is(err, idempotent.ErrRequestMismatch):
     // 422: key reused with a different request.
 case errors.Is(err, idempotent.ErrRequestInFlight):
     // 409: another worker holds the key; retry later.
+case errors.Is(err, idempotent.ErrBackoff):
+    // 429: the last attempt failed recently; retry later.
 case errors.Is(err, idempotent.ErrMaxAttempts):
     // The key ran out of attempts.
 case err != nil:
@@ -130,13 +132,12 @@ Each saved checkpoint appends the one it replaces to the `checkpoint_logs` colum
 
 ## How it works
 
-1. **Claim.** A single `INSERT … ON CONFLICT DO UPDATE` either creates the key (fencing token 1), or takes over a key that is `retryable` or has an expired lease (fencing token + 1, attempts + 1). The request must match and attempts must be below `MaxAttempts`.
-2. **Inspect.** If the claim fails, `Do` reads the row and returns the stored response, `ErrRequestMismatch`, `ErrRequestInFlight` or `ErrMaxAttempts`.
-3. **Step.** Each handler call runs in its own transaction:
+1. **Claim.** The `dbtx.claim` function (it requires `READ COMMITTED`) reads the row and returns an outcome. A finished key returns the stored response; a mismatched request, a live lease or an unexpired backoff returns `ErrRequestMismatch`, `ErrRequestInFlight` or `ErrBackoff`. A key whose lease expired with no attempts left is marked `failed` and returns `ErrMaxAttempts`. Otherwise an `INSERT … ON CONFLICT DO UPDATE` creates the key (fencing token 1) or takes it over (fencing token + 1, attempts + 1). If it loses a race, the function reads the row again.
+2. **Step.** Each handler call runs in its own transaction:
    - `Lock` updates the row, which locks it for the transaction and extends the lease. The update checks the fencing token, so a worker that lost the key fails here.
    - The handler runs with the transaction in `ctx`.
    - `Checkpoint`, `Ack` (completed) or `Fail` (failed) writes the outcome, checking the fencing token again.
-4. **Release.** On any error, `Nack` marks the key `retryable` so it can be claimed again. If the worker was fenced out, `Nack` matches no row and nothing changes.
+3. **Release.** On any error, `Nack` marks the key `retryable` with `retry_after` set to `BaseBackoff * 2^(attempts-1)`, capped at `MaxBackoff`. On the last attempt it marks the key `failed` instead, and later calls get the stored failed response. If the worker was fenced out, `Nack` matches no row and nothing changes.
 
 While a step holds the row lock, a concurrent `Claim` waits until the step commits. It then sees either a fresh lease or a finished key, so a step that runs longer than the lease is never taken over. No heartbeat is needed. The lease only matters when a worker crashes: its transaction rolls back, the lock is released, and another worker can take over once the lease expires.
 
@@ -146,6 +147,8 @@ While a step holds the row lock, a concurrent `Claim` waits until the step commi
 - `NewRepository(db *sql.DB) *PostgresRepository` creates the PostgreSQL repository backed by `dbtx`.
 - `Idempotent.Lease` is the lease length (default `DefaultLease`, 30s). Each step extends it.
 - `Idempotent.MaxAttempts` caps claims per key (default `DefaultMaxAttempts`, 10).
+- `Idempotent.TTL` is how long a key is kept (default `DefaultTTL`, 24h).
+- `Idempotent.BaseBackoff` and `Idempotent.MaxBackoff` set the retry backoff after a handler error. A zero `MaxBackoff` disables it.
 - `Do(ctx, key, fn, req) (*Response, error)` runs `fn` or returns the stored response.
 - `PostgresRepository.Purge(ctx)` deletes up to 1000 expired keys and returns the number deleted. Keys whose lease is still live are never deleted. Run it periodically until it returns 0.
 
@@ -155,7 +158,8 @@ Errors:
 |---|---|
 | `ErrRequestMismatch` | The key was used with a different request. |
 | `ErrRequestInFlight` | Another worker holds a live lease on the key. |
-| `ErrMaxAttempts` | The key is out of attempts. The message includes the last error. |
+| `ErrBackoff` | The last attempt failed and the backoff has not elapsed. |
+| `ErrMaxAttempts` | A crashed worker used the last attempt; the key is now `failed`. The message includes the last error. |
 | `ErrInvalidResult` | The handler returned neither or both of `Checkpoint` and `Response`. |
 | `ErrClaimed` | The fencing token no longer matches; another worker owns the key. |
 | `ErrNotFound` | The key does not exist. |

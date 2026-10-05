@@ -16,12 +16,11 @@ import (
 //go:embed internal/schema.sql
 var Schema string
 
-const DefaultLease = 30 * time.Second
-const DefaultMaxAttempts = 10
-
-// maxClaimRetries bounds how often Do re-claims a key whose state changed
-// between Claim and Inspect.
-const maxClaimRetries = 3
+const (
+	DefaultLease       = 30 * time.Second
+	DefaultMaxAttempts = 10
+	DefaultTTL         = 24 * time.Hour
+)
 
 var (
 	ErrClaimed         = internal.ErrClaimed
@@ -29,6 +28,7 @@ var (
 	ErrRequestInFlight = internal.ErrRequestInFlight
 	ErrRequestMismatch = internal.ErrRequestMismatch
 	ErrMaxAttempts     = errors.New("max attempts reached")
+	ErrBackoff         = errors.New("retry backoff")
 	ErrInvalidResult   = errors.New("result must set exactly one of Checkpoint or Response")
 )
 
@@ -39,6 +39,18 @@ const (
 	StatusFailed     = internal.StatusFailed
 )
 
+// Outcomes returned by Claim.
+const (
+	OutcomeClaimed         = "claimed"
+	OutcomeResumed         = "resumed"
+	OutcomeCompleted       = "completed"
+	OutcomeFailed          = "failed"
+	OutcomeInProgress      = "in_progress"
+	OutcomeBackoff         = "backoff"
+	OutcomeExhausted       = "exhausted"
+	OutcomePayloadMismatch = "payload_mismatch"
+)
+
 var NewRepository = internal.NewRepository
 
 type (
@@ -47,8 +59,6 @@ type (
 	ClaimParams        = internal.ClaimParams
 	ClaimResponse      = internal.ClaimResponse
 	FailParams         = internal.FailParams
-	InspectParams      = internal.InspectParams
-	InspectResponse    = internal.InspectResponse
 	LockParams         = internal.LockParams
 	NackParams         = internal.NackParams
 	PostgresRepository = internal.Repository
@@ -61,7 +71,6 @@ type Repository interface {
 	Checkpoint(ctx context.Context, params CheckpointParams) error
 	Claim(ctx context.Context, params ClaimParams) (*ClaimResponse, error)
 	Fail(ctx context.Context, params FailParams) error
-	Inspect(ctx context.Context, params InspectParams) (*InspectResponse, error)
 	Lock(ctx context.Context, params LockParams) error
 	Nack(ctx context.Context, params NackParams) error
 	Purge(ctx context.Context) (int64, error)
@@ -72,6 +81,14 @@ type Idempotent struct {
 	repo        Repository
 	Lease       time.Duration
 	MaxAttempts int
+	// TTL is how long a key is kept after its last write before Purge
+	// removes it.
+	TTL time.Duration
+	// After a handler error, the key cannot be claimed again for
+	// BaseBackoff * 2^(attempts-1), capped at MaxBackoff. Zero MaxBackoff
+	// disables the backoff.
+	BaseBackoff time.Duration
+	MaxBackoff  time.Duration
 }
 
 func New(repo Repository) *Idempotent {
@@ -119,68 +136,49 @@ func (i *Idempotent) Do(ctx context.Context, key string, fn fun, req Request) (*
 // claim acquires the lease for key. If the key is already finished, the cached
 // response is returned instead.
 func (i *Idempotent) claim(ctx context.Context, key string, req Request) (*ClaimResponse, *Response, error) {
-	maxAttempts := cmp.Or(i.MaxAttempts, DefaultMaxAttempts)
-	for range maxClaimRetries {
-		claim, err := i.repo.Claim(ctx, ClaimParams{
-			IdempotencyKey: key,
-			LeaseOwner:     uuid.NewV7().String(),
-			LeaseSeconds:   i.lease().Seconds(),
-			MaxAttempts:    int32(maxAttempts),
-			Request:        req.Data,
-		})
-		if err == nil {
-			return claim, nil, nil
-		}
-		if !errors.Is(err, ErrClaimed) {
-			return nil, nil, err
-		}
-
-		inspect, err := i.repo.Inspect(ctx, InspectParams{
-			Request:        req.Data,
-			IdempotencyKey: key,
-		})
-		if errors.Is(err, ErrNotFound) {
-			// Purged after Claim; try again.
-			continue
-		}
-		if err != nil {
-			return nil, nil, err
-		}
-		if inspect.PayloadMismatch {
-			return nil, nil, ErrRequestMismatch
-		}
-
-		exhausted := int(inspect.Attempts) >= maxAttempts
-		switch inspect.Status {
-		case StatusCompleted, StatusFailed:
-			return nil, &Response{
-				Status: string(inspect.Status),
-				Data:   inspect.Response,
-				Error:  inspect.Error.String,
-			}, nil
-		case StatusInProgress:
-			if !inspect.LeaseExpired {
-				return nil, nil, ErrRequestInFlight
-			}
-			if exhausted {
-				return nil, nil, ErrMaxAttempts
-			}
-			// Lease expired after Claim; try again.
-		case StatusRetryable:
-			if exhausted {
-				return nil, nil, fmt.Errorf("%w: %s", ErrMaxAttempts, inspect.Error.String)
-			}
-			// Released after Claim; try again.
-		default:
-			return nil, nil, fmt.Errorf("unknown status: %s", inspect.Status)
-		}
+	claim, err := i.repo.Claim(ctx, ClaimParams{
+		IdempotencyKey: key,
+		LeaseOwner:     uuid.NewV7().String(),
+		LeaseSeconds:   i.lease().Seconds(),
+		MaxAttempts:    i.maxAttempts(),
+		TtlSeconds:     i.ttl().Seconds(),
+		Request:        req.Data,
+	})
+	if err != nil {
+		return nil, nil, err
 	}
-
-	return nil, nil, ErrRequestInFlight
+	switch claim.Outcome {
+	case OutcomeClaimed, OutcomeResumed:
+		return claim, nil, nil
+	case OutcomeCompleted, OutcomeFailed:
+		return nil, &Response{
+			Status: claim.Outcome,
+			Data:   claim.Response,
+			Error:  claim.Error,
+		}, nil
+	case OutcomeInProgress:
+		return nil, nil, ErrRequestInFlight
+	case OutcomeBackoff:
+		return nil, nil, fmt.Errorf("%w: retry after %s", ErrBackoff, claim.RetryAfter)
+	case OutcomeExhausted:
+		return nil, nil, fmt.Errorf("%w: %s", ErrMaxAttempts, claim.Error)
+	case OutcomePayloadMismatch:
+		return nil, nil, ErrRequestMismatch
+	default:
+		return nil, nil, fmt.Errorf("unhandled outcome: %s", claim.Outcome)
+	}
 }
 
 func (i *Idempotent) lease() time.Duration {
 	return cmp.Or(i.Lease, DefaultLease)
+}
+
+func (i *Idempotent) ttl() time.Duration {
+	return cmp.Or(i.TTL, DefaultTTL)
+}
+
+func (i *Idempotent) maxAttempts() int32 {
+	return int32(cmp.Or(i.MaxAttempts, DefaultMaxAttempts))
 }
 
 type Checkpoint struct {
@@ -211,6 +209,7 @@ type Result struct {
 
 func (i *Idempotent) atomic(ctx context.Context, key string, fencingToken int64, params Params, fn fun) (*Result, error) {
 	leaseSeconds := i.lease().Seconds()
+	ttlSeconds := i.ttl().Seconds()
 
 	var res *Result
 	err := i.repo.RunInTx(ctx, func(ctx context.Context) error {
@@ -247,6 +246,7 @@ func (i *Idempotent) atomic(ctx context.Context, key string, fencingToken int64,
 				IdempotencyKey: key,
 				FencingToken:   fencingToken,
 				Response:       res.Response.Data,
+				TtlSeconds:     ttlSeconds,
 			})
 		case StatusFailed:
 			return i.repo.Fail(ctx, FailParams{
@@ -254,6 +254,7 @@ func (i *Idempotent) atomic(ctx context.Context, key string, fencingToken int64,
 				FencingToken:   fencingToken,
 				Response:       res.Response.Data,
 				Error:          res.Response.Error,
+				TtlSeconds:     ttlSeconds,
 			})
 		default:
 			return fmt.Errorf("unknown response status: %s", res.Response.Status)
@@ -263,11 +264,16 @@ func (i *Idempotent) atomic(ctx context.Context, key string, fencingToken int64,
 		return res, nil
 	}
 
-	// Release so that other processes can retry.
+	// Release so that other processes can retry. The key fails once the
+	// attempts are exhausted.
 	nackErr := i.repo.Nack(ctx, NackParams{
-		IdempotencyKey: key,
-		FencingToken:   fencingToken,
-		Error:          err.Error(),
+		IdempotencyKey:     key,
+		FencingToken:       fencingToken,
+		Error:              err.Error(),
+		MaxAttempts:        i.maxAttempts(),
+		BaseBackoffSeconds: i.BaseBackoff.Seconds(),
+		MaxBackoffSeconds:  i.MaxBackoff.Seconds(),
+		TtlSeconds:         ttlSeconds,
 	})
 	if errors.Is(nackErr, ErrClaimed) {
 		// Fenced out; the key belongs to another process.

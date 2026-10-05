@@ -7,34 +7,26 @@ package postgres
 
 import (
 	"context"
+	"time"
 
 	"encoding/json/jsontext"
 )
 
 const claim = `-- name: Claim :one
-insert into dbtx.idempotency_keys as ik(idempotency_key, request, status,
-                                        fencing_token, lease_owner,
-                                        lease_expires_at, attempts)
-     values ($1::text, $2::jsonb,
-             'in_progress', 1, $3::text,
-             now() + interval '1 second' * $4::float8, 1)
-on conflict (idempotency_key) do
-     update
-        set status = 'in_progress',
-            fencing_token = ik.fencing_token + 1,
-            lease_owner = EXCLUDED.lease_owner,
-            lease_expires_at = EXCLUDED.lease_expires_at,
-            attempts = ik.attempts + 1,
-            error = null,
-            updated_at = now()
-      where ik.request = EXCLUDED.request
-        and ik.attempts < $5::int
-        and ((ik.status = 'in_progress' and ik.lease_expires_at <= now()) or ik.status = 'retryable')
-  returning fencing_token,
-            attempts,
-            checkpoint,  -- resume from here on takeover
-            checkpoint_data,
-            (xmax = 0) as is_new
+select outcome::text,
+       coalesce(fencing_token, 0)::bigint as fencing_token,
+       coalesce(attempts, 0)::int as attempts,
+       coalesce(checkpoint, '')::text as checkpoint,
+       coalesce(checkpoint_data, 'null')::jsonb as checkpoint_data,
+       coalesce(response, 'null')::jsonb as response,
+       coalesce(error, '')::text as error,
+       coalesce(lease_expires_at, '0001-01-01 00:00:00+00')::timestamptz as lease_expires_at,
+       coalesce(retry_after, '0001-01-01 00:00:00+00')::timestamptz as retry_after
+  from dbtx.claim(
+         $1::text, $2::jsonb,
+         $3::text, $4::float8,
+         $5::int, $6::float8
+       )
 `
 
 type ClaimParams struct {
@@ -43,16 +35,23 @@ type ClaimParams struct {
 	LeaseOwner     string
 	LeaseSeconds   float64
 	MaxAttempts    int32
+	TtlSeconds     float64
 }
 
 type ClaimRow struct {
+	Outcome        string
 	FencingToken   int64
 	Attempts       int32
 	Checkpoint     string
 	CheckpointData jsontext.Value
-	IsNew          bool
+	Response       jsontext.Value
+	Error          string
+	LeaseExpiresAt time.Time
+	RetryAfter     time.Time
 }
 
+// Columns that do not apply to the outcome are null; they are coalesced to
+// the Go zero values ('0001-01-01' scans to time.Time{}).
 func (q *Queries) Claim(ctx context.Context, arg ClaimParams) (*ClaimRow, error) {
 	row := q.db.QueryRowContext(ctx, claim,
 		arg.IdempotencyKey,
@@ -60,14 +59,19 @@ func (q *Queries) Claim(ctx context.Context, arg ClaimParams) (*ClaimRow, error)
 		arg.LeaseOwner,
 		arg.LeaseSeconds,
 		arg.MaxAttempts,
+		arg.TtlSeconds,
 	)
 	var i ClaimRow
 	err := row.Scan(
+		&i.Outcome,
 		&i.FencingToken,
 		&i.Attempts,
 		&i.Checkpoint,
 		&i.CheckpointData,
-		&i.IsNew,
+		&i.Response,
+		&i.Error,
+		&i.LeaseExpiresAt,
+		&i.RetryAfter,
 	)
 	return &i, err
 }

@@ -198,9 +198,37 @@ func TestDo(t *testing.T) {
 			is.ErrorIs(err, wantErr)
 		}
 
+		// The last failed attempt marks the key as failed.
+		res, err := idp.Do(t.Context(), keyOf(t), fn, req)
+		is.NoError(err)
+		is.Equal(string(idempotent.StatusFailed), res.Status)
+		is.Equal(wantErr.Error(), res.Error)
+		is.Equal(int64(2), calls.Load())
+	})
+
+	t.Run("backoff", func(t *testing.T) {
+		wantErr := errors.New("bad request")
+		var calls atomic.Int64
+		fn := func(ctx context.Context, p idempotent.Params) (*idempotent.Result, error) {
+			if calls.Add(1) == 1 {
+				return nil, wantErr
+			}
+			return greet(ctx, p)
+		}
+		idp := newIdempotent(t)
+		idp.BaseBackoff = 200 * time.Millisecond
+		idp.MaxBackoff = time.Second
 		_, err := idp.Do(t.Context(), keyOf(t), fn, req)
-		is.ErrorIs(err, idempotent.ErrMaxAttempts)
-		is.ErrorContains(err, wantErr.Error())
+		is := assert.New(t)
+		is.ErrorIs(err, wantErr)
+
+		_, err = idp.Do(t.Context(), keyOf(t), fn, req)
+		is.ErrorIs(err, idempotent.ErrBackoff)
+
+		time.Sleep(300 * time.Millisecond)
+		res, err := idp.Do(t.Context(), keyOf(t), fn, req)
+		is.NoError(err)
+		is.Equal(string(idempotent.StatusCompleted), res.Status)
 		is.Equal(int64(2), calls.Load())
 	})
 
@@ -343,7 +371,7 @@ func TestTakeover(t *testing.T) {
 	})
 	is := assert.New(t)
 	is.NoError(err)
-	is.True(stale.IsNew)
+	is.Equal(idempotent.OutcomeClaimed, stale.Outcome)
 	time.Sleep(200 * time.Millisecond)
 
 	// Another worker takes over once the lease expires.
