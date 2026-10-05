@@ -266,8 +266,10 @@ func newEntry(row *postgres.DbtxCache) (*cache.Entry, error) {
 // ttlParam converts a TTL to microseconds, the resolution of timestamptz.
 // A zero TTL means no expiration.
 func ttlParam(ttl time.Duration) sql.NullInt64 {
+	// Round up, so that a TTL below 1µs does not expire as it is written.
+	us := (ttl + time.Microsecond - 1) / time.Microsecond
 	return sql.NullInt64{
-		Int64: ttl.Microseconds(),
+		Int64: int64(us),
 		Valid: ttl != 0,
 	}
 }
