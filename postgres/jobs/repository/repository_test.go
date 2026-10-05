@@ -919,3 +919,22 @@ func TestSubmitRejectsInvalidRequest(t *testing.T) {
 		assert.ErrorIs(t, err, jobs.ErrInvalidInput, req)
 	}
 }
+
+func TestInvalidMaxAttempts(t *testing.T) {
+	repo, _ := newRepository(t)
+	for _, n := range []int32{0, -1} {
+		_, err := repo.Create(t.Context(), jobs.CreateParams{
+			IdempotencyKey: fmt.Sprintf("k%d", n),
+			Request:        json.RawMessage(`{}`),
+			MaxAttempts:    n,
+		})
+		// -1 trips attempts <= max_attempts first.
+		assert.ErrorContains(t, err, "violates check constraint", n)
+	}
+
+	_, err := jobs.NewSubmitter(repo, jobs.SubmitConfig{}).Submit(t.Context(), jobs.SubmitInput{
+		IdempotencyKey: "k",
+		MaxAttempts:    -1,
+	})
+	assert.ErrorIs(t, err, jobs.ErrInvalidInput)
+}

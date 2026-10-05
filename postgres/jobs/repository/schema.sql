@@ -62,6 +62,8 @@ CREATE TABLE IF NOT EXISTS dbtx.jobs (
 
     -- Make invalid states unrepresentable.
     CONSTRAINT jobs_attempts_within_max CHECK (attempts <= max_attempts),
+    -- A job without attempts could never be claimed, reaped or archived.
+    CONSTRAINT jobs_max_attempts_positive CHECK (max_attempts > 0),
     CONSTRAINT jobs_pending_has_worker  CHECK (status <> 'running' OR worker_id IS NOT NULL),
     CONSTRAINT jobs_terminal_processed  CHECK (status NOT IN ('success', 'failed') OR processed_at IS NOT NULL)
 ) WITH (fillfactor = 70,
