@@ -18,6 +18,7 @@ type fakeRepo struct {
 	keys     map[string]CreateResult
 	payloads map[string]string
 	hbErr    error // injected heartbeat error
+	hbHang   bool  // heartbeats block until their ctx is done
 	calls    map[string]int
 }
 
@@ -67,10 +68,16 @@ func (f *fakeRepo) guard(id uuid.UUID, tok int64, worker string) (*Job, error) {
 	return j, nil
 }
 
-func (f *fakeRepo) Heartbeat(_ context.Context, p HeartbeatParams) (Job, error) {
+func (f *fakeRepo) Heartbeat(ctx context.Context, p HeartbeatParams) (Job, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls["heartbeat"]++
+	if f.hbHang {
+		f.mu.Unlock()
+		<-ctx.Done()
+		f.mu.Lock()
+		return Job{}, ctx.Err()
+	}
 	if f.hbErr != nil {
 		return Job{}, f.hbErr
 	}
@@ -277,4 +284,54 @@ func TestJanitorValidatesTTL(t *testing.T) {
 	if _, err := NewJanitor(newFake(), JanitorConfig{Retention: time.Hour, KeyTTL: time.Hour}, nil); err == nil {
 		t.Fatal("expected KeyTTL <= Retention to be rejected")
 	}
+}
+
+func TestWorkerHangingHeartbeatStopsHandlerBeforeLeaseExpires(t *testing.T) {
+	repo := newFake()
+	repo.hbHang = true
+	_, _ = repo.Create(context.Background(), CreateParams{IdempotencyKey: "k", Request: json.RawMessage(`{}`), MaxAttempts: 3})
+	const lease = 300 * time.Millisecond
+
+	type result struct {
+		elapsed time.Duration
+		cause   error
+	}
+	stopped := make(chan result, 1)
+	stop := runWorker(t, repo, func(ctx context.Context, j Job) (json.RawMessage, error) {
+		start := time.Now()
+		<-ctx.Done()
+		stopped <- result{time.Since(start), context.Cause(ctx)}
+		return nil, ctx.Err()
+	}, WorkerConfig{LeaseDuration: lease})
+	defer stop()
+
+	select {
+	case r := <-stopped:
+		if !errors.Is(r.cause, errLeaseExpiredLocally) {
+			t.Fatalf("cause = %v, want errLeaseExpiredLocally", r.cause)
+		}
+		// Another worker may claim the job once the lease expires.
+		if r.elapsed >= lease {
+			t.Fatalf("handler stopped after %s, want before the %s lease", r.elapsed, lease)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler was not stopped")
+	}
+}
+
+func TestWorkerHeartbeatsKeepHandlerRunning(t *testing.T) {
+	repo := newFake()
+	r, _ := repo.Create(context.Background(), CreateParams{IdempotencyKey: "k", Request: json.RawMessage(`{}`), MaxAttempts: 3})
+	stop := runWorker(t, repo, func(ctx context.Context, j Job) (json.RawMessage, error) {
+		// Several leases long.
+		select {
+		case <-ctx.Done():
+			t.Errorf("handler stopped: %v", context.Cause(ctx))
+			return nil, ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+			return nil, nil
+		}
+	}, WorkerConfig{LeaseDuration: 150 * time.Millisecond})
+	defer stop()
+	waitFor(t, func() bool { return repo.status(r.ID) == StatusSuccess })
 }

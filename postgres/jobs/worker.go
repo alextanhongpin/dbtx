@@ -264,21 +264,40 @@ func (w *Worker) process(workCtx context.Context, job Job, claimedAt time.Time) 
 // heartbeatLoop renews the lease every LeaseDuration/3.
 //   - ErrNoRows from the server => ownership is gone: cancel the handler with
 //     ErrLeaseLost and let process() drop the result.
-//   - Transient errors => keep trying, but if our local lease clock runs out
-//     we can no longer prove ownership, so tell the handler to stop
-//     (errLeaseExpiredLocally). We still try to finalize afterwards.
+//   - Transient errors => keep trying, but stop the handler
+//     (errLeaseExpiredLocally) a margin before our local lease clock runs out,
+//     since another worker may claim the job once it does. We still try to
+//     finalize afterwards: the fencing token makes that safe.
+//
+// The local deadline is enforced by its own timer, so a heartbeat that hangs
+// cannot delay it, and each heartbeat's timeout ends at the deadline.
 func (w *Worker) heartbeatLoop(ctx context.Context, cancel context.CancelCauseFunc, job Job, leaseDeadline time.Time, log *slog.Logger) {
+	// The margin covers clock drift between us and the database, and the time
+	// the handler takes to notice the cancellation.
+	margin := w.cfg.LeaseDuration / 6
+	stopAt := func() time.Duration { return time.Until(leaseDeadline) - margin }
+
+	expire := time.NewTimer(stopAt())
+	defer expire.Stop()
 	t := time.NewTicker(w.cfg.LeaseDuration / 3)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-expire.C:
+			cancel(errLeaseExpiredLocally)
+			return
 		case <-t.C:
 		}
 
-		sent := time.Now()
-		hbCtx, c := context.WithTimeout(ctx, w.cfg.HeartbeatTimeout)
+		timeout := min(w.cfg.HeartbeatTimeout, stopAt())
+		if timeout <= 0 {
+			cancel(errLeaseExpiredLocally)
+			return
+		}
+		sent := time.Now() // taken BEFORE the call: a conservative lease start
+		hbCtx, c := context.WithTimeout(ctx, timeout)
 		_, err := w.repo.Heartbeat(hbCtx, HeartbeatParams{
 			ID: job.ID, FencingToken: job.FencingToken, WorkerID: w.cfg.WorkerID,
 			LeaseSeconds: w.cfg.LeaseDuration.Seconds(),
@@ -288,6 +307,7 @@ func (w *Worker) heartbeatLoop(ctx context.Context, cancel context.CancelCauseFu
 		switch {
 		case err == nil:
 			leaseDeadline = sent.Add(w.cfg.LeaseDuration)
+			expire.Reset(stopAt())
 		case errors.Is(err, ErrNoRows):
 			cancel(ErrLeaseLost)
 			return
@@ -295,10 +315,6 @@ func (w *Worker) heartbeatLoop(ctx context.Context, cancel context.CancelCauseFu
 			return // job finished while the heartbeat was in flight
 		default:
 			log.Warn("heartbeat failed", "err", err)
-			if time.Now().After(leaseDeadline) {
-				cancel(errLeaseExpiredLocally)
-				return
-			}
 		}
 	}
 }

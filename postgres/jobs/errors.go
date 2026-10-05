@@ -17,8 +17,8 @@ var (
 	ErrLeaseLost = errors.New("jobs: lease lost")
 
 	// errLeaseExpiredLocally: heartbeats kept failing and our local lease clock
-	// ran out. Ownership is uncertain, so handlers are told to stop, but we
-	// still try to finalize: the fencing token makes that safe.
+	// is about to run out. Ownership is uncertain, so handlers are told to
+	// stop, but we still try to finalize: the fencing token makes that safe.
 	errLeaseExpiredLocally = errors.New("jobs: lease expired locally (heartbeats failing)")
 
 	// ErrTxInContext: Worker.Run and Janitor.Run commit each statement on its
