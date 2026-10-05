@@ -24,6 +24,15 @@ with next as (
                 and earlier.id < i.id
                 and earlier.status in ('pending', 'processing')
            )
+       and not exists
+           (
+             select 1
+               from dbtx.inbox busy
+              where busy.aggregate_id = i.aggregate_id
+                and busy.id <> i.id
+                and busy.status = 'processing'
+                and busy.available_at > now()
+           )
   order by i.available_at, i.id
      limit $1
        for update SKIP LOCKED
@@ -50,6 +59,11 @@ type ClaimByAggregateIDParams struct {
 // same aggregate are handled one at a time, in order. Messages without an
 // aggregate are not ordered. A dead message no longer blocks the messages
 // after it.
+//
+// A message is also skipped while another message of its aggregate holds a
+// live lease, whatever their order: an earlier message can become pending
+// after a later one was claimed, when it is requeued or when the transaction
+// that enqueued it commits late.
 func (q *Queries) ClaimByAggregateID(ctx context.Context, arg ClaimByAggregateIDParams) ([]*DbtxInbox, error) {
 	rows, err := q.db.QueryContext(ctx, claimByAggregateID, arg.Limit, arg.LockedBy, arg.LeaseSeconds)
 	if err != nil {

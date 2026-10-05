@@ -6,6 +6,8 @@ import (
 	"encoding/json/jsontext"
 	"errors"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"uuid"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/alextanhongpin/dbtx"
 	"github.com/alextanhongpin/dbtx/postgres/inbox"
+	"github.com/alextanhongpin/dbtx/postgres/inbox/repository"
 	"github.com/alextanhongpin/dbtx/testing/dbtest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
@@ -32,7 +35,7 @@ func migrate(dsn string) error {
 		return err
 	}
 	defer db.Close()
-	_, err = db.Exec(inbox.Schema)
+	_, err = db.Exec(repository.Schema)
 	return err
 }
 
@@ -51,7 +54,7 @@ type InboxTestSuite struct {
 	suite.Suite
 	ids      []uuid.UUID
 	ob       *inbox.Inbox
-	repo     *inbox.PostgresRepository
+	repo     *repository.Repository
 	maxRetry int
 }
 
@@ -62,7 +65,7 @@ func (suite *InboxTestSuite) SetupTest() {
 	_, err := db.ExecContext(t.Context(), `delete from dbtx.inbox`)
 	suite.Require().NoError(err)
 
-	suite.repo = inbox.NewRepository(db)
+	suite.repo = repository.New(db)
 	suite.ob = inbox.New(suite.repo)
 	suite.ob.Backoff = func(msg *inbox.Message) time.Duration {
 		return 0
@@ -213,23 +216,24 @@ func (suite *InboxTestSuite) TestEnqueueDBError() {
 func (suite *InboxTestSuite) TestLeaseLost() {
 	ctx := suite.T().Context()
 	ob := suite.ob
-	suite.createN(1)
+	suite.createN(2)
 
-	err := ob.Dequeue(ctx, 1, func(txCtx context.Context, msg *inbox.Message) error {
-		_, err := ob.Enqueue(txCtx, suite.params(2))
-		suite.NoError(err)
+	var handled []uuid.UUID
+	err := ob.Dequeue(ctx, 2, func(txCtx context.Context, msg *inbox.Message) error {
+		handled = append(handled, msg.ID)
 
-		// Simulate another worker claiming the message after the lease expired.
-		_, err = suite.repo.DBTx(ctx).ExecContext(ctx, `
-			update dbtx.inbox set locked_by = 'other' where id = $1`, msg.ID)
+		// Simulate another worker claiming the next message after its lease
+		// expired.
+		_, err := suite.repo.DBTx(ctx).ExecContext(ctx, `
+			update dbtx.inbox set locked_by = 'other' where id = $1`, suite.ids[1])
 		suite.Require().NoError(err)
 		return nil
 	})
 	suite.ErrorIs(err, inbox.ErrLeaseLost)
 
-	// The writes made by the handler are rolled back.
-	suite.count(0)
-	msg := suite.find(suite.ids[0])
+	// The next message is skipped, and left to the other worker.
+	suite.Equal([]uuid.UUID{suite.ids[0]}, handled)
+	msg := suite.find(suite.ids[1])
 	suite.Equal(inbox.StatusProcessing, msg.Status)
 	suite.Equal("other", msg.LockedBy)
 }
@@ -506,4 +510,301 @@ func (suite *InboxTestSuite) count(n int, msgAndArgs ...any) {
 	count, err := suite.ob.Count(ctx)
 	suite.NoError(err)
 	suite.Equal(int64(n), count, msgAndArgs...)
+}
+
+func (suite *InboxTestSuite) TestDequeueInTx() {
+	ctx := suite.T().Context()
+	suite.createN(1)
+
+	var calls int
+	handle := func(context.Context, *inbox.Message) error {
+		calls++
+		return nil
+	}
+	err := suite.repo.RunInTx(ctx, func(txCtx context.Context) error {
+		return suite.ob.Dequeue(txCtx, 1, handle)
+	})
+	suite.ErrorIs(err, inbox.ErrTxInContext)
+	suite.Zero(calls)
+
+	// The message was not claimed.
+	suite.NoError(suite.ob.Dequeue(ctx, 1, handle))
+	suite.Equal(1, calls)
+}
+
+func (suite *InboxTestSuite) TestBatchLeaseExpired() {
+	ctx := suite.T().Context()
+	suite.createN(2)
+	suite.ob.Lease = 300 * time.Millisecond
+
+	var mu sync.Mutex
+	handled := map[uuid.UUID]int{}
+	handle := func(_ context.Context, msg *inbox.Message) error {
+		mu.Lock()
+		handled[msg.ID]++
+		mu.Unlock()
+		if msg.ID == suite.ids[0] {
+			time.Sleep(600 * time.Millisecond)
+		}
+		return nil
+	}
+
+	// Worker A handles the first message for longer than the batch lease.
+	var errA error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		errA = suite.ob.Dequeue(ctx, 2, handle)
+	}()
+	time.Sleep(400 * time.Millisecond)
+
+	// Worker B reclaims the second message, whose lease expired while it
+	// waited for its turn. The first one is locked by A's handler.
+	b := inbox.New(suite.repo)
+	suite.NoError(b.Dequeue(ctx, 10, handle))
+	<-done
+
+	// A skips the message B handled.
+	suite.ErrorIs(errA, inbox.ErrLeaseLost)
+	suite.Equal(map[uuid.UUID]int{suite.ids[0]: 1, suite.ids[1]: 1}, handled)
+	for _, id := range suite.ids {
+		suite.Equal(inbox.StatusDone, suite.find(id).Status)
+	}
+}
+
+func (suite *InboxTestSuite) TestDequeueCancelReleases() {
+	ctx, cancel := context.WithCancel(suite.T().Context())
+	defer cancel()
+	suite.createN(3)
+
+	var calls int
+	err := suite.ob.Dequeue(ctx, 3, func(context.Context, *inbox.Message) error {
+		calls++
+		cancel()
+		return nil
+	})
+	suite.ErrorIs(err, context.Canceled)
+	suite.Equal(1, calls)
+
+	// The messages not handled yet keep their attempt, and can be dequeued
+	// again right away.
+	for _, id := range suite.ids[1:] {
+		msg := suite.find(id)
+		suite.Equal(inbox.StatusPending, msg.Status)
+		suite.Zero(msg.Attempts)
+	}
+	suite.count(2)
+}
+
+func (suite *InboxTestSuite) TestDequeuePanicReleases() {
+	ctx := suite.T().Context()
+	suite.createN(3)
+
+	func() {
+		defer func() {
+			suite.Equal("boom", recover())
+		}()
+		_ = suite.ob.Dequeue(ctx, 3, func(context.Context, *inbox.Message) error {
+			panic("boom")
+		})
+	}()
+
+	// The panicking message used its attempt, and is retried once its lease
+	// expires. The others are released.
+	msg := suite.find(suite.ids[0])
+	suite.Equal(inbox.StatusProcessing, msg.Status)
+	suite.Equal(int32(1), msg.Attempts)
+	for _, id := range suite.ids[1:] {
+		msg := suite.find(id)
+		suite.Equal(inbox.StatusPending, msg.Status)
+		suite.Zero(msg.Attempts)
+	}
+}
+
+func (suite *InboxTestSuite) TestFinalAttemptNotDeadWhileHandled() {
+	ctx := suite.T().Context()
+	params := suite.params(1)
+	params.MaxAttempts = 1
+	id, err := suite.ob.Enqueue(ctx, params)
+	suite.Require().NoError(err)
+	suite.ob.Lease = 200 * time.Millisecond
+
+	started := make(chan struct{})
+	done := make(chan struct{})
+	var errA error
+	go func() {
+		defer close(done)
+		errA = suite.ob.Dequeue(ctx, 1, func(context.Context, *inbox.Message) error {
+			close(started)
+			time.Sleep(500 * time.Millisecond)
+			return nil
+		})
+	}()
+	<-started
+	time.Sleep(300 * time.Millisecond)
+
+	// The lease expired on the final attempt, but the handler is still
+	// running, so another worker does not mark the message as dead.
+	err = inbox.New(suite.repo).Dequeue(ctx, 1, func(context.Context, *inbox.Message) error {
+		suite.Fail("delivered twice")
+		return nil
+	})
+	suite.ErrorIs(err, inbox.ErrEOQ)
+	<-done
+
+	suite.NoError(errA)
+	suite.Equal(inbox.StatusDone, suite.find(id).Status)
+}
+
+// concurrency counts the handlers running at once.
+type concurrency struct {
+	active, max atomic.Int32
+}
+
+func (c *concurrency) handle(d time.Duration) inbox.HandlerFunc {
+	return func(context.Context, *inbox.Message) error {
+		n := c.active.Add(1)
+		defer c.active.Add(-1)
+		for {
+			m := c.max.Load()
+			if n <= m || c.max.CompareAndSwap(m, n) {
+				break
+			}
+		}
+		time.Sleep(d)
+		return nil
+	}
+}
+
+func (suite *InboxTestSuite) enqueueAggregate(i int, aggregateID string) uuid.UUID {
+	params := suite.params(i)
+	params.AggregateID = aggregateID
+	id, err := suite.ob.Enqueue(suite.T().Context(), params)
+	suite.Require().NoError(err)
+	return id
+}
+
+func (suite *InboxTestSuite) TestOrderedRequeue() {
+	ctx := suite.T().Context()
+	ob := suite.ob
+	ob.Ordered = true
+	first := suite.enqueueAggregate(1, "x")
+	second := suite.enqueueAggregate(2, "x")
+
+	suite.NoError(ob.Dequeue(ctx, 10, func(context.Context, *inbox.Message) error {
+		return inbox.ErrDeadLetter
+	}))
+	suite.Equal(inbox.StatusDead, suite.find(first).Status)
+
+	// While the second message is handled, the first one is requeued.
+	var c concurrency
+	done := make(chan error)
+	go func() {
+		done <- ob.Dequeue(ctx, 10, c.handle(500*time.Millisecond))
+	}()
+	time.Sleep(100 * time.Millisecond)
+	suite.NoError(ob.Requeue(ctx, first))
+
+	// The requeued message waits for the second one.
+	suite.ErrorIs(ob.Dequeue(ctx, 10, c.handle(0)), inbox.ErrEOQ)
+	suite.NoError(<-done)
+	suite.Equal(inbox.StatusDone, suite.find(second).Status)
+
+	suite.NoError(ob.Dequeue(ctx, 10, c.handle(0)))
+	suite.Equal(inbox.StatusDone, suite.find(first).Status)
+	suite.Equal(int32(1), c.max.Load())
+}
+
+func (suite *InboxTestSuite) TestOrderedLateCommit() {
+	ctx := suite.T().Context()
+	ob := suite.ob
+	ob.Ordered = true
+
+	// The first message is enqueued in a transaction that commits after the
+	// second message is claimed.
+	commit := make(chan struct{})
+	enqueued := make(chan uuid.UUID)
+	committed := make(chan error)
+	go func() {
+		committed <- suite.repo.RunInTx(ctx, func(txCtx context.Context) error {
+			params := suite.params(1)
+			params.AggregateID = "x"
+			id, err := ob.Enqueue(txCtx, params)
+			enqueued <- id
+			<-commit
+			return err
+		})
+	}()
+	first := <-enqueued
+	suite.enqueueAggregate(2, "x")
+
+	var c concurrency
+	done := make(chan error)
+	go func() {
+		done <- ob.Dequeue(ctx, 10, c.handle(500*time.Millisecond))
+	}()
+	time.Sleep(100 * time.Millisecond)
+	close(commit)
+	suite.NoError(<-committed)
+
+	// The first message waits for the second one.
+	suite.ErrorIs(ob.Dequeue(ctx, 10, c.handle(0)), inbox.ErrEOQ)
+	suite.NoError(<-done)
+
+	suite.NoError(ob.Dequeue(ctx, 10, c.handle(0)))
+	suite.Equal(inbox.StatusDone, suite.find(first).Status)
+	suite.Equal(int32(1), c.max.Load())
+}
+
+func (suite *InboxTestSuite) TestOrderedHandlerOutlivesLease() {
+	ctx := suite.T().Context()
+	ob := suite.ob
+	ob.Ordered = true
+	ob.Lease = 200 * time.Millisecond
+
+	commit := make(chan struct{})
+	enqueued := make(chan struct{})
+	committed := make(chan error)
+	go func() {
+		committed <- suite.repo.RunInTx(ctx, func(txCtx context.Context) error {
+			params := suite.params(1)
+			params.AggregateID = "x"
+			_, err := ob.Enqueue(txCtx, params)
+			close(enqueued)
+			<-commit
+			return err
+		})
+	}()
+	<-enqueued
+	suite.enqueueAggregate(2, "x")
+
+	// The second message's handler runs past its lease, so Claim no longer
+	// sees the aggregate as busy once the first message commits.
+	var c concurrency
+	done := make(chan error)
+	go func() {
+		done <- ob.Dequeue(ctx, 10, c.handle(600*time.Millisecond))
+	}()
+	time.Sleep(300 * time.Millisecond)
+	close(commit)
+	suite.NoError(<-committed)
+
+	// The first message is claimed, but its handler waits for the second.
+	suite.NoError(ob.Dequeue(ctx, 10, c.handle(0)))
+	suite.NoError(<-done)
+	suite.Equal(int32(1), c.max.Load())
+}
+
+func (suite *InboxTestSuite) TestInvalidMaxAttempts() {
+	ctx := suite.T().Context()
+	params := suite.params(1)
+	params.MaxAttempts = -1
+	_, err := suite.ob.Enqueue(ctx, params)
+	suite.ErrorIs(err, inbox.ErrInvalidMaxAttempts)
+
+	// The schema rejects messages that could never be delivered.
+	suite.createN(1)
+	_, err = suite.repo.DBTx(ctx).ExecContext(ctx, `
+		update dbtx.inbox set max_attempts = 0 where id = $1`, suite.ids[0])
+	suite.ErrorContains(err, "check constraint")
 }

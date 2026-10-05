@@ -16,10 +16,10 @@ The inbox pattern is the receiving side of the outbox. Incoming messages are sto
 
 ## Schema
 
-The schema lives in [`internal/schema.sql`](internal/schema.sql) and is exported as `inbox.Schema`. Apply it once, or copy it into your migrations:
+The schema lives in [`repository/schema.sql`](repository/schema.sql) and is exported as `repository.Schema`. Apply it once, or copy it into your migrations:
 
 ```go
-_, err := db.ExecContext(ctx, inbox.Schema)
+_, err := db.ExecContext(ctx, repository.Schema)
 ```
 
 The table and indexes are created with `if not exists`, but the `dbtx.inbox_status` enum is not: Postgres has no `create type if not exists`, and sqlc cannot parse the `DO` block that would emulate it. Running the schema twice fails on that statement.
@@ -44,7 +44,7 @@ go get github.com/alextanhongpin/dbtx/postgres/inbox
 ## Quick start
 
 ```go
-repo := inbox.NewRepository(db) // db is a *sql.DB
+repo := repository.New(db) // db is a *sql.DB
 in := inbox.New(repo)
 
 // Store the message when it arrives from the broker.
@@ -92,6 +92,8 @@ in.Ordered = true
 ```
 
 With `Ordered`, a message is only claimed once every earlier message of the same `AggregateID` is done or dead. A batch then holds at most one message per aggregate. Messages without an `AggregateID` are not ordered. A dead message stops blocking the messages after it, so check dead letters if strict ordering matters.
+
+Two messages of the same aggregate are never handled at the same time, but order follows the messages that are visible when one is claimed. A message whose enqueuing transaction commits after a later message of its aggregate was claimed, or a dead message that is requeued, is handled after the later message.
 
 Without `Ordered`, messages are dequeued in `available_at` order, so retried messages go behind fresh ones.
 

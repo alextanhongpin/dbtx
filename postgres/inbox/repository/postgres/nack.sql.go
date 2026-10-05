@@ -11,7 +11,7 @@ import (
 	"uuid"
 )
 
-const nack = `-- name: Nack :exec
+const nack = `-- name: Nack :execrows
 update dbtx.inbox
    set status = (case when $2::bool then 'dead' else 'pending' end)::dbtx.inbox_status,
        available_at = now()
@@ -32,13 +32,16 @@ type NackParams struct {
 	LockedBy     string
 }
 
-func (q *Queries) Nack(ctx context.Context, arg NackParams) error {
-	_, err := q.db.ExecContext(ctx, nack,
+func (q *Queries) Nack(ctx context.Context, arg NackParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, nack,
 		arg.ID,
 		arg.Dead,
 		arg.DelaySeconds,
 		arg.LastError,
 		arg.LockedBy,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }

@@ -1,4 +1,4 @@
--- name: Nack :exec
+-- name: Nack :execrows
 update dbtx.inbox
    set status = (case when sqlc.arg(dead)::bool then 'dead' else 'pending' end)::dbtx.inbox_status,
        available_at = now()

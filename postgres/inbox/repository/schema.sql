@@ -22,7 +22,9 @@ create table if not exists dbtx.inbox
   processed_at TIMESTAMPTZ,
   updated_at   timestamptz not null default now(),
 
-  constraint inbox_dedup unique (source, message_id)
+  constraint inbox_dedup unique (source, message_id),
+  -- A message without attempts could never be claimed or dead-lettered.
+  check (max_attempts > 0)
 );
 
 create index if not exists inbox_ready_idx
