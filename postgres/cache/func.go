@@ -61,6 +61,10 @@ func Idempotent[K, V any](fn fun[K, V], cfg *FuncConfig[K, V]) ifun[K, V] {
 		if err != nil {
 			return zero, false, err
 		}
+		if loaded && res == nil {
+			// The key holds null, for example from a Store of a nil value.
+			return zero, false, fmt.Errorf("%w: key %q does not hold an idempotent result", ErrConflict, key)
+		}
 		if loaded && !jsonEqual(req, res.Request) {
 			return zero, false, fmt.Errorf("%w: request", ErrConflict)
 		}

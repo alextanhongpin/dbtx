@@ -260,4 +260,17 @@ func TestIdempotent(t *testing.T) {
 		is.False(loaded)
 		is.Empty(res)
 	})
+
+	t.Run("null", func(t *testing.T) {
+		// Given that the key holds null, for example from a Store of a nil
+		// value,
+		dto := CreateUserDto{IID: t.Name(), Name: t.Name()}
+		err := c.Store[*User](ctx, fmt.Sprintf("user:%s", dto.IID), nil, time.Minute)
+		is := assert.New(t)
+		is.NoError(err)
+
+		// It should return a conflict instead of panicking.
+		_, _, err = idp(ctx, dto)
+		is.ErrorIs(err, cache.ErrConflict)
+	})
 }
