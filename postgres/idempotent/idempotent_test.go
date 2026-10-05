@@ -634,3 +634,33 @@ func TestLongRunningStepFails(t *testing.T) {
 	is.Equal(string(idempotent.StatusRetryable), status)
 	is.Equal(wantErr.Error(), errText)
 }
+
+func TestStepFailureIsRecorded(t *testing.T) {
+	keyStatus := func(t *testing.T, key string) (status, errText string) {
+		t.Helper()
+		err := dbtest.DB(t).QueryRowContext(t.Context(),
+			`select status, error from dbtx.idempotency_keys where idempotency_key = $1`,
+			key).Scan(&status, &errText)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return status, errText
+	}
+
+	t.Run("cancelled context", func(t *testing.T) {
+		// The step fails because ctx is cancelled; the failure is still
+		// recorded, instead of the key waiting for its lease to expire.
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		_, err := newIdempotent(t).Do(ctx, keyOf(t), func(context.Context, idempotent.Params) (*idempotent.Result, error) {
+			cancel()
+			return nil, errors.New("boom")
+		}, req)
+		is := assert.New(t)
+		is.Error(err)
+
+		status, errText := keyStatus(t, keyOf(t))
+		is.Equal(string(idempotent.StatusRetryable), status)
+		is.Contains(errText, "boom")
+	})
+}

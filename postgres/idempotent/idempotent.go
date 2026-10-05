@@ -10,6 +10,9 @@ import (
 	"uuid"
 )
 
+// nackTimeout bounds recording a failure after ctx is done.
+const nackTimeout = 5 * time.Second
+
 const (
 	DefaultLease       = 30 * time.Second
 	DefaultMaxAttempts = 10
@@ -358,7 +361,16 @@ func (i *Idempotent) step(ctx context.Context, key string, fencingToken int64, p
 
 // nack releases the key so that other processes can retry it after the
 // backoff. The key fails once the attempts are exhausted.
+//
+// Outside the step transaction, ctx is detached from its cancellation: a
+// cancelled ctx is a common reason for the step to fail, and the failure must
+// still be recorded.
 func (i *Idempotent) nack(ctx context.Context, key string, fencingToken int64, cause error) error {
+	if !i.repo.IsTx(ctx) {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), nackTimeout)
+		defer cancel()
+	}
 	return i.repo.Nack(ctx, NackParams{
 		IdempotencyKey:     key,
 		FencingToken:       fencingToken,
