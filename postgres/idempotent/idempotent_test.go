@@ -663,4 +663,26 @@ func TestStepFailureIsRecorded(t *testing.T) {
 		is.Equal(string(idempotent.StatusRetryable), status)
 		is.Contains(errText, "boom")
 	})
+
+	t.Run("panic", func(t *testing.T) {
+		idp := newIdempotent(t)
+		func() {
+			defer func() {
+				assert.Equal(t, "boom", recover())
+			}()
+			_, _ = idp.Do(t.Context(), keyOf(t), func(context.Context, idempotent.Params) (*idempotent.Result, error) {
+				panic("boom")
+			}, req)
+		}()
+
+		status, errText := keyStatus(t, keyOf(t))
+		is := assert.New(t)
+		is.Equal(string(idempotent.StatusRetryable), status)
+		is.Equal("panic: boom", errText)
+
+		// The key can be retried right away, without waiting for the lease.
+		res, err := idp.Do(t.Context(), keyOf(t), greet, req)
+		is.NoError(err)
+		is.Equal(string(idempotent.StatusCompleted), res.Status)
+	})
 }

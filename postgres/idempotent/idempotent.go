@@ -271,6 +271,16 @@ type Result struct {
 }
 
 func (i *Idempotent) atomic(ctx context.Context, key string, fencingToken int64, params Params, fn fun) (*Result, error) {
+	// A panic in fn rolls back the step and propagates. Record it first, so
+	// that the key is retried after the backoff, instead of when the lease
+	// expires without an error.
+	defer func() {
+		if p := recover(); p != nil {
+			_ = i.nack(ctx, key, fencingToken, fmt.Errorf("panic: %v", p))
+			panic(p)
+		}
+	}()
+
 	var res *Result
 	var stepErr error
 	err := i.repo.RunInTx(ctx, func(ctx context.Context) error {
