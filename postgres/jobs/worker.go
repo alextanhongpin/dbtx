@@ -122,18 +122,21 @@ func (w *Worker) Run(ctx context.Context) error {
 			break // ctx cancelled while waiting for a free slot
 		}
 
+		if ctx.Err() != nil {
+			for range n {
+				<-sem
+			}
+			break
+		}
+
 		claimedAt := time.Now() // taken BEFORE the call: a conservative lease start
-		claimed, err := w.repo.FindAvailableJobs(ctx, FindAvailableJobsParams{
-			WorkerID:     w.cfg.WorkerID,
-			LeaseSeconds: w.cfg.LeaseDuration.Seconds(),
-			Limit:        int32(n),
-		})
+		claimed, err := w.claim(ctx, n)
 		for i := len(claimed); i < n; i++ {
 			<-sem // give back slots we did not use
 		}
 		if err != nil {
-			// If ctx was cancelled mid-call the claim may have committed; those
-			// jobs just wait out their lease and are picked up again.
+			// The claim may have committed anyway, e.g. on a timeout; those
+			// jobs wait out their lease and are picked up again.
 			claimFailures++
 			w.log.Error("claim failed", "err", err, "consecutive_failures", claimFailures)
 			sleepCtx(ctx, DefaultBackoff(int32(min(claimFailures, 6))))
@@ -164,6 +167,21 @@ func (w *Worker) Run(ctx context.Context) error {
 		<-done
 	}
 	return nil
+}
+
+// claim leases up to n jobs. It does not use ctx for the call: if ctx were
+// cancelled after the claim committed, the leased jobs would be lost, and each
+// would use up an attempt without running. Jobs claimed during shutdown run
+// like any other in-flight job, within ShutdownGrace.
+func (w *Worker) claim(ctx context.Context, n int) ([]Job, error) {
+	// A claim slower than this hands out jobs whose lease is mostly gone.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), w.cfg.LeaseDuration/3)
+	defer cancel()
+	return w.repo.FindAvailableJobs(ctx, FindAvailableJobsParams{
+		WorkerID:     w.cfg.WorkerID,
+		LeaseSeconds: w.cfg.LeaseDuration.Seconds(),
+		Limit:        int32(n),
+	})
 }
 
 // process runs one claimed job end to end.

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,7 +20,11 @@ type fakeRepo struct {
 	payloads map[string]string
 	hbErr    error // injected heartbeat error
 	hbHang   bool  // heartbeats block until their ctx is done
-	calls    map[string]int
+
+	// claimDelay delays FindAvailableJobs after it claims, like a driver
+	// waiting for the reply of a committed statement.
+	claimDelay time.Duration
+	calls      map[string]int
 }
 
 func newFake() *fakeRepo {
@@ -42,7 +47,19 @@ func (f *fakeRepo) Create(_ context.Context, p CreateParams) (CreateResult, erro
 	return r, nil
 }
 
-func (f *fakeRepo) FindAvailableJobs(_ context.Context, p FindAvailableJobsParams) ([]Job, error) {
+func (f *fakeRepo) FindAvailableJobs(ctx context.Context, p FindAvailableJobsParams) ([]Job, error) {
+	out := f.claim(p)
+	if f.claimDelay > 0 {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(f.claimDelay):
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeRepo) claim(p FindAvailableJobsParams) []Job {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []Job
@@ -57,7 +74,7 @@ func (f *fakeRepo) FindAvailableJobs(_ context.Context, p FindAvailableJobsParam
 			out = append(out, *j)
 		}
 	}
-	return out, nil
+	return out
 }
 
 func (f *fakeRepo) guard(id uuid.UUID, tok int64, worker string) (*Job, error) {
@@ -334,4 +351,32 @@ func TestWorkerHeartbeatsKeepHandlerRunning(t *testing.T) {
 	}, WorkerConfig{LeaseDuration: 150 * time.Millisecond})
 	defer stop()
 	waitFor(t, func() bool { return repo.status(r.ID) == StatusSuccess })
+}
+
+func TestWorkerShutdownDuringClaim(t *testing.T) {
+	repo := newFake()
+	repo.claimDelay = 200 * time.Millisecond
+	r, _ := repo.Create(context.Background(), CreateParams{IdempotencyKey: "k", Request: json.RawMessage(`{}`), MaxAttempts: 1})
+
+	var calls atomic.Int64
+	w := NewWorker(repo, func(context.Context, Job) (json.RawMessage, error) {
+		calls.Add(1)
+		return nil, nil
+	}, WorkerConfig{PollInterval: 10 * time.Millisecond}, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = w.Run(ctx); close(done) }()
+
+	// Shut down after the claim committed, while its reply is in flight.
+	waitFor(t, func() bool { return repo.status(r.ID) == StatusRunning })
+	cancel()
+	<-done
+
+	// The claimed job ran instead of being left to expire on its only attempt.
+	if s := repo.status(r.ID); s != StatusSuccess {
+		t.Fatalf("status = %s, want success", s)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("handler ran %d times, want 1", n)
+	}
 }
