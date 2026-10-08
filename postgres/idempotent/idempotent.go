@@ -271,18 +271,9 @@ type Result struct {
 }
 
 func (i *Idempotent) atomic(ctx context.Context, key string, fencingToken int64, params Params, fn fun) (*Result, error) {
-	// A panic in fn rolls back the step and propagates. Record it first, so
-	// that the key is retried after the backoff, instead of when the lease
-	// expires without an error.
-	defer func() {
-		if p := recover(); p != nil {
-			_ = i.nack(ctx, key, fencingToken, fmt.Errorf("panic: %v", p))
-			panic(p)
-		}
-	}()
-
 	var res *Result
 	var stepErr error
+	var panicValue any
 	err := i.repo.RunInTx(ctx, func(ctx context.Context) error {
 		err := i.repo.Lock(ctx, LockParams{
 			IdempotencyKey: key,
@@ -298,16 +289,25 @@ func (i *Idempotent) atomic(ctx context.Context, key string, fencingToken int64,
 		// lock is released, makes a Claim that waits on the lock see the
 		// backoff. After the transaction, the lease may have expired already,
 		// and the Claim would take over first.
-		stepErr = i.repo.RunInSubTx(ctx, func(ctx context.Context) error {
-			var err error
-			res, err = i.step(ctx, key, fencingToken, params, fn)
-			return err
-		})
+		func() {
+			defer func() { panicValue = recover() }()
+			stepErr = i.repo.RunInSubTx(ctx, func(ctx context.Context) error {
+				var err error
+				res, err = i.step(ctx, key, fencingToken, params, fn)
+				return err
+			})
+		}()
+		if panicValue != nil {
+			stepErr = fmt.Errorf("panic: %v", panicValue)
+		}
 		if stepErr == nil {
 			return nil
 		}
 		return i.nack(ctx, key, fencingToken, stepErr)
 	})
+	if panicValue != nil {
+		panic(panicValue)
+	}
 	switch {
 	case err == nil && stepErr == nil:
 		return res, nil

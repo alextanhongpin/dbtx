@@ -16,4 +16,4 @@
     where idempotency_key = sqlc.arg(idempotency_key)::text
       and fencing_token = sqlc.arg(fencing_token)::bigint
       and status = 'in_progress'
-returning *;
+returning fencing_token;

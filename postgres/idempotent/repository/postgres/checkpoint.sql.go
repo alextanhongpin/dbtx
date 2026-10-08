@@ -32,7 +32,7 @@ const checkpoint = `-- name: Checkpoint :one
     where idempotency_key = $4::text
       and fencing_token = $5::bigint
       and status = 'in_progress'
-returning checkpoint
+returning fencing_token
 `
 
 type CheckpointParams struct {
@@ -47,7 +47,7 @@ type CheckpointParams struct {
 // take over between steps. The previous checkpoint is appended to
 // checkpoint_logs, which keeps the last 100 entries, so that a long or
 // looping run does not rewrite an ever larger value on every step.
-func (q *Queries) Checkpoint(ctx context.Context, arg CheckpointParams) (string, error) {
+func (q *Queries) Checkpoint(ctx context.Context, arg CheckpointParams) (int64, error) {
 	row := q.db.QueryRowContext(ctx, checkpoint,
 		arg.Checkpoint,
 		arg.CheckpointData,
@@ -55,7 +55,7 @@ func (q *Queries) Checkpoint(ctx context.Context, arg CheckpointParams) (string,
 		arg.IdempotencyKey,
 		arg.FencingToken,
 	)
-	var checkpoint string
-	err := row.Scan(&checkpoint)
-	return checkpoint, err
+	var fencing_token int64
+	err := row.Scan(&fencing_token)
+	return fencing_token, err
 }

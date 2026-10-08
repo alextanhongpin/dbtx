@@ -9,23 +9,23 @@ import (
 )
 
 type Querier interface {
-	Ack(ctx context.Context, arg AckParams) (*DbtxIdempotencyKey, error)
+	Ack(ctx context.Context, arg AckParams) (int64, error)
 	// Extends the lease on commit, so a Claim blocked on the row lock does not
 	// take over between steps. The previous checkpoint is appended to
 	// checkpoint_logs, which keeps the last 100 entries, so that a long or
 	// looping run does not rewrite an ever larger value on every step.
-	Checkpoint(ctx context.Context, arg CheckpointParams) (string, error)
+	Checkpoint(ctx context.Context, arg CheckpointParams) (int64, error)
 	// Columns that do not apply to the outcome are null; they are coalesced to
 	// the Go zero values ('0001-01-01' scans to time.Time{}).
 	Claim(ctx context.Context, arg ClaimParams) (*ClaimRow, error)
-	Fail(ctx context.Context, arg FailParams) (*DbtxIdempotencyKey, error)
+	Fail(ctx context.Context, arg FailParams) (int64, error)
 	// Locks the row for the duration of the step transaction and extends the
 	// lease. While the row is locked, a concurrent Claim blocks until commit, so
 	// no separate heartbeat is needed.
 	Lock(ctx context.Context, arg LockParams) (int64, error)
 	// Exponential backoff: base * 2^(attempts-1), capped. `attempts` is the old
 	// row value, i.e. the attempt that just failed. Terminal when exhausted.
-	Nack(ctx context.Context, arg NackParams) (*DbtxIdempotencyKey, error)
+	Nack(ctx context.Context, arg NackParams) (int64, error)
 	Purge(ctx context.Context) (int64, error)
 }
 

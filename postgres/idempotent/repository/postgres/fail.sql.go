@@ -29,7 +29,7 @@ const fail = `-- name: Fail :one
     where idempotency_key = $4::text
       and fencing_token = $5::bigint
       and status = 'in_progress'
-returning idempotency_key, request, status, fencing_token, lease_owner, lease_expires_at, attempts, checkpoint, checkpoint_data, checkpoint_logs, response, error, created_at, updated_at, completed_at, retry_after, expires_at
+returning fencing_token
 `
 
 type FailParams struct {
@@ -40,7 +40,7 @@ type FailParams struct {
 	FencingToken   int64
 }
 
-func (q *Queries) Fail(ctx context.Context, arg FailParams) (*DbtxIdempotencyKey, error) {
+func (q *Queries) Fail(ctx context.Context, arg FailParams) (int64, error) {
 	row := q.db.QueryRowContext(ctx, fail,
 		arg.Response,
 		arg.Error,
@@ -48,25 +48,7 @@ func (q *Queries) Fail(ctx context.Context, arg FailParams) (*DbtxIdempotencyKey
 		arg.IdempotencyKey,
 		arg.FencingToken,
 	)
-	var i DbtxIdempotencyKey
-	err := row.Scan(
-		&i.IdempotencyKey,
-		&i.Request,
-		&i.Status,
-		&i.FencingToken,
-		&i.LeaseOwner,
-		&i.LeaseExpiresAt,
-		&i.Attempts,
-		&i.Checkpoint,
-		&i.CheckpointData,
-		&i.CheckpointLogs,
-		&i.Response,
-		&i.Error,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.CompletedAt,
-		&i.RetryAfter,
-		&i.ExpiresAt,
-	)
-	return &i, err
+	var fencing_token int64
+	err := row.Scan(&fencing_token)
+	return fencing_token, err
 }

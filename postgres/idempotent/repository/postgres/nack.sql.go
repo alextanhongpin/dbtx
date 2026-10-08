@@ -22,8 +22,21 @@ const nack = `-- name: Nack :one
           lease_expires_at = null,
           retry_after = case
                              when attempts >= $1::int
+                                  or $3::float8 <= 0
+                                  or $4::float8 <= 0
                              then null
-                             else clock_timestamp() + interval '1 second' * least($3::float8, $4::float8 * power(2::float8, (attempts - 1)::float8))
+                             else clock_timestamp() + interval '1 second' * case
+                                    when $4::float8 >= $3::float8
+                                    then $3::float8
+                                    else least(
+                                      $3::float8,
+                                      $4::float8
+                                        * power(2::float8, least(
+                                            attempts - 1,
+                                            ceil(log(2::numeric, $3::numeric / $4::numeric)
+                                          )::int)::float8)
+                                    )
+                                  end
                         end,
           completed_at = case
                               when attempts >= $1::int
@@ -38,7 +51,7 @@ const nack = `-- name: Nack :one
     where idempotency_key = $6::text
       and fencing_token = $7::bigint
       and status = 'in_progress'
-returning idempotency_key, request, status, fencing_token, lease_owner, lease_expires_at, attempts, checkpoint, checkpoint_data, checkpoint_logs, response, error, created_at, updated_at, completed_at, retry_after, expires_at
+returning fencing_token
 `
 
 type NackParams struct {
@@ -53,7 +66,7 @@ type NackParams struct {
 
 // Exponential backoff: base * 2^(attempts-1), capped. `attempts` is the old
 // row value, i.e. the attempt that just failed. Terminal when exhausted.
-func (q *Queries) Nack(ctx context.Context, arg NackParams) (*DbtxIdempotencyKey, error) {
+func (q *Queries) Nack(ctx context.Context, arg NackParams) (int64, error) {
 	row := q.db.QueryRowContext(ctx, nack,
 		arg.MaxAttempts,
 		arg.Error,
@@ -63,25 +76,7 @@ func (q *Queries) Nack(ctx context.Context, arg NackParams) (*DbtxIdempotencyKey
 		arg.IdempotencyKey,
 		arg.FencingToken,
 	)
-	var i DbtxIdempotencyKey
-	err := row.Scan(
-		&i.IdempotencyKey,
-		&i.Request,
-		&i.Status,
-		&i.FencingToken,
-		&i.LeaseOwner,
-		&i.LeaseExpiresAt,
-		&i.Attempts,
-		&i.Checkpoint,
-		&i.CheckpointData,
-		&i.CheckpointLogs,
-		&i.Response,
-		&i.Error,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.CompletedAt,
-		&i.RetryAfter,
-		&i.ExpiresAt,
-	)
-	return &i, err
+	var fencing_token int64
+	err := row.Scan(&fencing_token)
+	return fencing_token, err
 }
