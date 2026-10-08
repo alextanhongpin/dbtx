@@ -1,0 +1,3 @@
+interface:
+  display_name: "dbtx PostgreSQL Patterns"
+  short_description: "Integrate dbtx PostgreSQL messaging and utilities"

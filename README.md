@@ -78,6 +78,29 @@ func main() {
 - [API Reference](#api-reference)
 - [Contributing](#contributing)
 
+## Codex Skills
+
+This repository includes reusable skills for integrating dbtx into Go applications:
+
+- [dbtx-integrate](skills/dbtx-integrate/SKILL.md): repository wiring, transaction boundaries, sqlc, savepoints, and database tests.
+- [dbtx-postgres-patterns](skills/dbtx-postgres-patterns/SKILL.md): outbox, inbox, durable idempotency, jobs, locks, caching, and SQL helpers.
+
+Copy the complete skill folders into a consuming project's `.agents/skills/` directory for project-scoped use, or into `~/.codex/skills/` for personal use. From this checkout, for example:
+
+```bash
+mkdir -p /path/to/your-go-project/.agents/skills
+cp -R skills/dbtx-integrate skills/dbtx-postgres-patterns /path/to/your-go-project/.agents/skills/
+```
+
+Example prompts:
+
+```text
+Use $dbtx-integrate to integrate dbtx into this project's database/sql repositories.
+Use $dbtx-postgres-patterns to enqueue order events atomically with our business writes.
+```
+
+The skills instruct the agent to inspect the dependency version used by the consuming project. Installing a skill does not install Go dependencies or apply database migrations.
+
 ## Core Library
 
 ### Basic Usage
