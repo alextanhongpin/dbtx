@@ -165,6 +165,7 @@ Install each helper using its full module path, for example
 | Module | Purpose |
 | --- | --- |
 | [postgres/ab](postgres/ab/README.md) | Two-variant experiments, sticky assignment, conversion recording and result interpretation. |
+| [postgres/bandit](postgres/bandit/README.md) | Bandit policies, durable experiments, simulations and a local results dashboard. |
 | [postgres/cache](postgres/cache/README.md) | JSON cache, TTL, atomic operations and compute leases. |
 | [postgres/dbt](postgres/dbt/README.md) | Struct-driven PostgreSQL templates and scanning. |
 | [postgres/idempotent](postgres/idempotent/README.md) | Durable requests, checkpoints and cached outcomes. |

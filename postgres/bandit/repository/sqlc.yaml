@@ -1,0 +1,15 @@
+version: "2"
+sql:
+  - schema: "schema.sql"
+    queries: "queries"
+    engine: "postgresql"
+    gen:
+      go:
+        package: "postgres"
+        out: "postgres"
+        emit_empty_slices: true
+        overrides:
+          - db_type: "uuid"
+            go_type:
+              import: "uuid"
+              type: "UUID"
