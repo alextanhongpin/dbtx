@@ -1,255 +1,119 @@
 # dbtest
 
-`dbtest` is a Go package designed to simplify database testing in Go. It provides utilities for initializing databases, managing transactions, and ensuring clean test environments.
+PostgreSQL integration-test helpers using Docker. `DB(t)` returns a pooled
+`*sql.DB`; `Tx(t)` returns a `*sql.DB` backed by `go-txdb`, whose changes roll back
+when test cleanup closes it. Neither function returns a `dbtx.DB` or `dbtx.Tx`.
 
-## Features
+## Requirements and installation
 
-- Initialize a global database for all tests.
-- Initialize a database per test for isolation.
-- Support for both pooled connections (`dbtx.DB`) and transactional connections (`dbtx.Tx`).
-
-## Installation
-
-To install the package, run:
+Requires Go 1.27+, a running Docker daemon (`docker info`), and network access
+for image/dependency downloads. Register a SQL driver in your test package.
+The container uses a dynamically assigned port, so no local PostgreSQL or
+Compose setup is needed.
 
 ```bash
-go get github.com/alextanhongpin/dbtx/testing/dbtest
+go get github.com/alextanhongpin/dbtx/testing/dbtest github.com/lib/pq
 ```
 
-## Usage
+## Complete test example
 
-### 1. Initialize a Global Database
-
-You can initialize a global database that will be shared across all tests. This is useful for reducing setup overhead.
-
-```go
-package main
-
-import (
-	"testing"
-	"time"
-
-	"github.com/alextanhongpin/dbtx/testing/dbtest"
-)
-
-func TestMain(m *testing.M) {
-	// Initialize the global database.
-	close := dbtest.Init(dbtest.Options{
-		Driver:   "postgres",
-		Image:    "postgres:latest",
-		Duration: 10 * time.Minute,
-	})
-	defer close()
-
-	// Run tests.
-	m.Run()
-}
-
-func TestGlobalDB(t *testing.T) {
-	db := dbtest.DB(t) // Get a pooled connection.
-	_, err := db.Exec("CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT)")
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-```
-
-### 2. Initialize a Database Per Test
-
-For better test isolation, you can initialize a new database for each test.
+Create an application module (`go mod init example.com/dbtest-example`), install
+the dependencies above, and save this as `database_test.go`:
 
 ```go
-package main
-
-import (
-	"testing"
-	"time"
-
-	"github.com/alextanhongpin/dbtx/testing/dbtest"
-)
-
-func TestPerTestDB(t *testing.T) {
-	client := dbtest.New(t, dbtest.Options{
-		Driver:   "postgres",
-		Image:    "postgres:latest",
-		Duration: 10 * time.Minute,
-	})
-
-	db := client.DB(t) // Get a pooled connection.
-	_, err := db.Exec("CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT)")
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-```
-
-### 3. Using `dbtx.DB` and `dbtx.Tx`
-
-The `dbtest` package provides two types of database connections:
-
-- **`dbtest.DB(t)`**: Returns a pooled connection (`*sql.DB`). Use this for operations that do not require transactions.
-- **`dbtest.Tx(t)`**: Returns a transactional connection (`*sql.DB`) using `txdb`. Use this for operations that require transactions.
-
-#### Example:
-
-```go
-package main
-
-import (
-	"testing"
-
-	"github.com/alextanhongpin/dbtx/testing/dbtest"
-)
-
-func TestDBAndTx(t *testing.T) {
-	// Initialize the global database.
-	db := dbtest.DB(t) // Pooled connection.
-	_, err := db.Exec("CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT)")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Use a transactional connection.
-	tx := dbtest.Tx(t)
-	_, err = tx.Exec("INSERT INTO users (name) VALUES ($1)", "Alice")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Verify the data within the transaction.
-	row := tx.QueryRow("SELECT name FROM users WHERE id = $1", 1)
-	var name string
-	if err := row.Scan(&name); err != nil {
-		t.Fatal(err)
-	}
-	if name != "Alice" {
-		t.Fatalf("expected name to be Alice, got %s", name)
-	}
-}
-```
-
-### 4. Why Use `dbtx.Tx`?
-
-Using `dbtx.Tx` is particularly useful in testing scenarios where you want to isolate changes made during a test. Since `dbtx.Tx` uses `txdb`, a transactional database driver, all operations performed within the connection are automatically rolled back when the connection is closed. This eliminates the need to manually rollback transactions in every test, ensuring a clean database state for subsequent tests.
-
-#### Example:
-
-```go
-package main
-
-import (
-	"testing"
-
-	"github.com/alextanhongpin/dbtx/testing/dbtest"
-)
-
-func TestTxIsolation(t *testing.T) {
-	// Use a transactional connection.
-	tx := dbtest.Tx(t)
-
-	// Perform operations within the transaction.
-	_, err := tx.Exec("INSERT INTO users (name) VALUES ($1)", "Alice")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Verify the data within the transaction.
-	row := tx.QueryRow("SELECT name FROM users WHERE id = $1", 1)
-	var name string
-	if err := row.Scan(&name); err != nil {
-		t.Fatal(err)
-	}
-	if name != "Alice" {
-		t.Fatalf("expected name to be Alice, got %s", name)
-	}
-
-	// No need to manually rollback; the transaction will be rolled back automatically
-	// when the connection is closed at the end of the test.
-}
-```
-
-### Benefits of `dbtx.Tx`
-
-- **Automatic Rollback**: Transactions are automatically rolled back when the connection is closed, ensuring no changes persist beyond the test.
-- **Test Isolation**: Each test runs in its own isolated transaction, preventing interference between tests.
-- **Simplified Cleanup**: No need to write explicit rollback logic in your tests.
-
-### 5. Using `Hook` for Migrations
-
-The `Hook` option allows you to execute custom logic, such as running database migrations, immediately after the database is initialized. This ensures that the database schema is set up before running tests.
-
-#### Example:
-
-```go
-package main
+package example_test
 
 import (
 	"database/sql"
 	"testing"
-	"time"
 
 	"github.com/alextanhongpin/dbtx/testing/dbtest"
+	_ "github.com/lib/pq"
 )
 
 func TestMain(m *testing.M) {
-	// Initialize the global database with a migration hook.
-	close := dbtest.Init(dbtest.Options{
-		Driver:   "postgres",
-		Image:    "postgres:latest",
-		Duration: 10 * time.Minute,
+	stop := dbtest.Init(dbtest.Options{
+		Image: "postgres:17.4",
 		Hook: func(dsn string) error {
-			// Perform migrations here.
 			db, err := sql.Open("postgres", dsn)
 			if err != nil {
 				return err
 			}
 			defer db.Close()
-
-			_, err = db.Exec(`
-				CREATE TABLE IF NOT EXISTS users (
-					id SERIAL PRIMARY KEY,
-					name TEXT NOT NULL
-				);
-			`)
+			_, err = db.Exec(`CREATE TABLE users (
+                id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                name text NOT NULL
+            )`)
 			return err
 		},
 	})
-	defer close()
-
-	// Run tests.
+	defer stop()
 	m.Run()
 }
 
-func TestWithMigration(t *testing.T) {
-	db := dbtest.DB(t) // Get a pooled connection.
-
-	// Verify that the migration was applied.
-	_, err := db.Exec("INSERT INTO users (name) VALUES ($1)", "Alice")
+func TestInsert(t *testing.T) {
+	db := dbtest.Tx(t)
+	var name string
+	err := db.QueryRowContext(t.Context(),
+		"INSERT INTO users (name) VALUES ($1) RETURNING name", "Alice").Scan(&name)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if name != "Alice" {
+		t.Fatalf("got %q", name)
 	}
 }
 ```
 
-### Benefits of Using `Hook`
+Run `go test -v -count=1 ./...` in that application module. Expect `TestInsert` to
+pass; the inserted row rolls back at test cleanup. `m.Run()` lets the test
+runner preserve the exit status after deferred container cleanup. Do not call
+`os.Exit(m.Run())` before running cleanup.
 
-- **One-Time Setup**: Ensures that migrations or other setup logic are executed only once during database initialization.
-- **Customizable**: Allows you to define any logic required to prepare the database for testing.
-- **Simplifies Tests**: Reduces the need to repeat setup logic in individual tests.
+## Isolation and lifecycle
+
+- Call `Init` once from `TestMain` before global `DB`, `Tx`, or `DSN` helpers.
+  Initialization failures panic. The returned `func() error` stops the container.
+- `DB(t)` opens a pool in the shared container database; committed writes and
+  schema changes persist for later tests. Clean up data explicitly where needed.
+- `Tx(t)` opens a separate rollback-isolated test connection. It suits CRUD
+  checks, but use real pools for independent transactions, locking, and commit
+  visibility tests. Sequences are not rolled back by PostgreSQL.
+- `dbtest.New(t, opts...)` starts a separate container, automatically cleaned up
+  with `t.Cleanup`. Use `client.DB(t)`, `client.Tx(t)`, or `client.DSN()` on it.
+- `Hook` runs once after container initialization, before clients are returned.
+  Apply migrations there so rollback-isolated tests see a committed schema.
+- Wrap a returned pool with `dbtx.New(db)` when testing transaction-aware repositories.
 
 ## Options
 
-The `dbtest.Options` struct allows you to configure the database initialization:
+| Field | Default | Purpose |
+| --- | --- | --- |
+| `Driver` | `postgres` | Registered `database/sql` driver name. |
+| `Image` | `postgres:latest` | Container image; pin it for repeatable tests. |
+| `Duration` | 10 minutes | Container expiry safety limit; increase for longer suites. |
+| `Hook` | No-op | `func(dsn string) error` for migrations/setup. |
 
-```go
-type Options struct {
-	Driver   string        // Database driver (default: "postgres").
-	Duration time.Duration // Duration for the test container (default: 10 minutes).
-	Hook     func(dsn string) error // Optional hook to run after database initialization.
-	Image    string        // Docker image for the database (default: "postgres:latest").
-}
+Despite the driver option, the container helper starts PostgreSQL; this is not
+a generic MySQL/SQLite container launcher. For schemas using `uuidv7()`, choose
+PostgreSQL 18+.
+
+## Run the package tests
+
+Requires Go 1.27+ and a running Docker daemon (`docker info`). From the
+repository root:
+
+```bash
+cd testing/dbtest
+go test -race -count=1 ./...
+go vet ./...
 ```
+
+Tests start `postgres:17.4` on a dynamically assigned port and clean up their
+containers. They do not use the root Compose database or `DATABASE_URL`. The
+first run needs network access to download dependencies and the image. See the
+[root development guide](../../README.md#development-and-verification) for all-module checks.
 
 ## License
 
-This project is licensed under the MIT License. See the LICENSE file for details.
+[MIT](../../LICENSE).

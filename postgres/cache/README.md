@@ -1,171 +1,154 @@
-# Postgres Cache
+# PostgreSQL cache
 
-A PostgreSQL-backed, generic, typed cache built on [dbtx](https://github.com/alextanhongpin/dbtx).  
-The cache stores JSON values with an optional TTL, supports atomic operations, prefix namespacing, and negative caching.
+A typed JSON cache with TTLs, atomic compare/update operations, and leases for
+computing missing values. It uses the `dbtx` transaction context.
 
-The underlying table is `dbtx.cache`:
+## Requirements and installation
 
-```sql
-create schema if not exists dbtx;
-create UNLOGGED table if not exists dbtx.cache(
-  key text,
-  value jsonb not null,
-  digest text not null,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now(),
-  expires_at timestamptz,
-  primary key (key)
-);
-```
-
-## Install
+Requires Go 1.27+ and PostgreSQL. Tests use PostgreSQL 19 beta; see the exact
+image below. Start a local database with the [root quick start](../../README.md#run-a-complete-example),
+or use your own PostgreSQL DSN.
 
 ```bash
-go get github.com/alextanhongpin/dbtx/postgres/cache
+go get github.com/alextanhongpin/dbtx/postgres/cache github.com/lib/pq
 ```
 
-## Migration
+## Complete example
 
-The schema for `dbtx.cache` lives in [`repository/schema.sql`](repository/schema.sql) and is exported as `repository.Schema`. Run it once during app startup:
-
-```go
-_, err := db.ExecContext(ctx, repository.Schema)
-```
-
-This creates the `dbtx.cache` UNLOGGED table used by the cache.
-
-## Quick start
+Create an application module with `go mod init example.com/cache-example`, run
+`go get` above, and save the following as `main.go`:
 
 ```go
+package main
+
 import (
-    "github.com/alextanhongpin/dbtx/postgres/cache"
-    "github.com/alextanhongpin/dbtx/postgres/cache/repository"
+	"context"
+	"database/sql"
+	"fmt"
+	"log"
+	"os"
+	"time"
+
+	"github.com/alextanhongpin/dbtx/postgres/cache"
+	"github.com/alextanhongpin/dbtx/postgres/cache/repository"
+	_ "github.com/lib/pq"
 )
 
-c := cache.New(repository.New(db), cache.WithPrefix("books:"))
-
-// Store
-err := c.Store(ctx, id.String(), book, time.Minute)
-
-// Load
-book, err := c.Load[Book](ctx, id.String())
-if errors.Is(err, cache.ErrNotExist) { /* miss */ }
-
-// Load or store atomically
-val, loaded, err := c.LoadOrStore(ctx, key, value, ttl)
-```
-
-### Prefix
-
-All keys are prefixed with the `WithPrefix` option (read back with `Prefix`). No separator is added, so include one. Useful for multi-tenant repositories:
-
-```go
-c := cache.New(repo, cache.WithPrefix("books:"))
-```
-
-## API highlights
-
-* `Migrate(ctx)` – run embedded schema to create `dbtx.cache`
-* `Store(ctx, key, value, ttl)` – write value with TTL (`cache.NoExpiration` for none)
-* `StoreOnce(ctx, key, value, ttl)` – write only if absent → `cache.ErrExists`
-* `Load[T](ctx, key)` – typed read
-* `LoadAndDelete[T](ctx, key)` – get and remove
-* `Delete(ctx, key)` – remove
-* `Exists(ctx, key)` – existence check, auto-invalidates expired entries
-* `TTL(ctx, key)` – remaining time, `cache.NoExpiration` if none, `cache.ErrNotExist` if missing
-* `Expire(ctx, key, ttl)` – extend/lock TTL
-* `CompareAndSwap(ctx, key, old, value, ttl)` – write only if value matches → `cache.ErrConflict` on mismatch
-* `CompareAndDelete(ctx, key, old)` – delete only if value matches → `cache.ErrConflict` on mismatch
-* `LoadOrStore(ctx, key, value, ttl)` – atomic load-or-write
-* `LoadOrCreate(ctx, key, fn)` – load or compute via `fn`; the key is leased while `fn` runs, so concurrent callers get `cache.ErrRequestInFlight`
-* `Purge(ctx)` – delete expired rows (all prefixes)
-
-Errors: `ErrNotExist`, `ErrConflict`, `ErrExists`.
-
-Values are JSON marshalled with deterministic map ordering and hashed with xxh3 for CAS.
-
-## Example: repository with negative caching
-
-From `examples_test.go`:
-
-```go
-type BookRepository struct {
-    *cache.Cache
+type Book struct {
+	Title string `json:"title"`
 }
 
-func NewBookRepository(db *sql.DB) *BookRepository {
-    return &BookRepository{Cache: cache.New(db)}
-}
-
-func (r *BookRepository) Find(ctx context.Context, id uuid.UUID) (*Book, bool, error) {
-    key := id.String()
-    b, err := r.Load[*Book](ctx, key)
-    if err == nil {
-        if b.ID == uuid.Nil() {
-            return nil, true, ErrNegativeCacheHit
-        }
-        return b, true, nil
-    }
-
-    b, err = r.DB.RunInTx2(ctx, func(ctx context.Context) (*Book, error) {
-        if err := lock.Lock(ctx, lock.NewStrKey(key)); err != nil { return nil, err }
-        var title string
-        err = r.DBTx(ctx).QueryRowContext(ctx, `select title from books where id=$1`, id).Scan(&title)
-        if errors.Is(err, sql.ErrNoRows) {
-            // negative cache to avoid thundering herd
-            return &Book{}, nil
-        }
-        b := &Book{ID: id, Title: title}
-        _ = r.Store(ctx, key, b, time.Second)
-        return b, nil
-    })
-    ...
+func main() {
+	ctx := context.Background()
+	db, err := sql.Open("postgres", os.Getenv("DATABASE_URL"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.PingContext(ctx); err != nil {
+		log.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, repository.Schema); err != nil {
+		log.Fatal(err)
+	}
+	c := cache.New(repository.New(db), cache.WithPrefix("books:"))
+	if err := c.Store(ctx, "1", Book{Title: "Go"}, time.Minute); err != nil {
+		log.Fatal(err)
+	}
+	book, err := c.Load[Book](ctx, "1")
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(book.Title)
 }
 ```
 
-Create caches atomically in the same transaction:
-
-```go
-func (r *BookRepository) Create(ctx context.Context, title string) (*Book, error) {
-    return r.DB.RunInTx2(ctx, func(ctx context.Context) (*Book, error) {
-        var id uuid.UUID
-        err := r.DBTx(ctx).QueryRowContext(ctx,
-            `insert into books (title) values ($1) returning id`, title).Scan(&id)
-        b := &Book{ID: id, Title: title}
-        err = r.Store(ctx, b.ID.String(), b, time.Second)
-        return b, nil
-    })
-}
+```bash
+export DATABASE_URL='postgres://john:123456@127.0.0.1:5432/dev?sslmode=disable'
+go run .
 ```
 
-Delete invalidates cache:
+Expected output: `Go`.
+
+## Schema and durability
+
+[repository/schema.sql](repository/schema.sql), exported as `repository.Schema`,
+creates `dbtx.cache` and the `dbtx.live_cache` view. It can be reapplied. Use the
+actual schema rather than copying an older table definition: compute leases
+require the `lease` column. There is no `Cache.Migrate` method.
+
+The table is **UNLOGGED**: cache contents are disposable and can be lost after a
+database crash; they are not replicated to standbys. Keep authoritative data
+elsewhere. Store a zero value with a short TTL for manual negative caching;
+[examples_test.go](examples_test.go) shows repository integration.
+
+## Operations
+
+All methods take `ctx` first. Typed reads require a type argument, for example
+`c.Load[Book](ctx, key)`; writes infer it from the value.
+
+| Method | Behavior |
+| --- | --- |
+| `Store(ctx, key, value, ttl)` | Insert or replace. |
+| `StoreOnce(ctx, key, value, ttl)` | Write only when absent; otherwise `ErrExists`. |
+| `Load[T](ctx, key)` | Read JSON as `T`; missing/expired keys return `ErrNotExist`. |
+| `LoadAndDelete[T](ctx, key)` | Read and remove atomically. |
+| `LoadOrStore(ctx, key, value, ttl)` | Return `(value, loaded, error)`. |
+| `LoadOrCreate[T](ctx, key, fn)` | Lease a miss and compute it; callback returns `(T, time.Duration, error)`. |
+| `CompareAndSwap(ctx, key, old, value, ttl)` | Replace if JSON matches; otherwise `ErrConflict`. |
+| `CompareAndDelete(ctx, key, old)` | Delete if JSON matches; otherwise `ErrConflict`. |
+| `Delete(ctx, key)` | Remove a key. |
+| `Exists(ctx, key)` | Check for a live value. |
+| `TTL(ctx, key)` | Remaining TTL, `NoExpiration`, or `ErrNotExist`. |
+| `Expire(ctx, key, ttl)` | Set a new TTL. |
+| `Purge(ctx)` | Delete expired rows across all prefixes; returns count and error. |
+
+`cache.NoExpiration` (zero) means no expiry. Negative TTLs return
+`ErrNegativeTTL`. `WithPrefix` adds no separator; include one yourself.
+`WithLease` controls `LoadOrCreate`'s compute lease (default 30 seconds), renewed
+in the background. Concurrent callers observing that lease get
+`ErrRequestInFlight`; retry later. A failed computation releases the lease.
+
+Ordinary operations join a `dbtx` transaction with the repository's ID.
+`LoadOrCreate` coordinates its lease outside the caller's transaction so it is
+visible to other callers; its compute result is not an atomic business write
+in the caller's transaction. The callback still receives that transaction
+context: a value computed from uncommitted writes can remain cached even if
+the caller rolls back. Compute from committed data when that would be incorrect.
+See [cache.go](cache.go) for this boundary.
+
+## Function decorators
+
+Inside your application, with `c` initialized as above:
 
 ```go
-err = r.Cache.Delete(ctx, id.String())
-```
-
-## Function caching helpers
-
-`func.go` provides decorators:
-
-```go
-type FuncConfig[K,V] struct {
-    Cache *cache.Cache
-    KeyFn func(ctx context.Context, req K) (string, error)
+fetch := func(ctx context.Context, key string) (Book, time.Duration, error) {
+    return Book{Title: key}, time.Minute, nil
 }
-
-fnCached := cache.Func(fetch, &cache.FuncConfig{
+cached := cache.Func(fetch, &cache.FuncConfig[string, Book]{
     Cache: c,
-    KeyFn: func(ctx context.Context, req MyReq) (string, error) { return req.ID, nil },
+    KeyFn: func(ctx context.Context, key string) (string, error) { return key, nil },
 })
-
-res, loaded, err := fnCached(ctx, req)
+book, loaded, err := cached(ctx, "Go")
 ```
 
-`Idempotent` additionally ensures the cached response matches the request hash, returning `cache.ErrConflict` on mismatch.
+`cache.Idempotent` has the same signature and also compares the request against
+the cached request, returning `ErrConflict` on mismatch. Its guarantee lasts
+only as long as the cache entry survives; use the durable
+[idempotent package](../idempotent/README.md) for durable request records.
 
-## Notes
+## Run the package tests
 
-* Expired entries are lazily invalidated on access and can be purged with `Cleanup`.
-* Negative caching is manual – store a zero value with a short TTL as shown in the example.
-* All operations use `dbtx` transaction helpers, so they can be run inside `RunInTx`/`RunInTx2`.
+Requires Go 1.27+ and a running Docker daemon (`docker info`). From the
+repository root:
+
+```bash
+cd postgres/cache
+go test -race -count=1 ./...
+go vet ./...
+```
+
+Tests start `postgres:19beta3-alpine3.24` on a dynamically assigned port and clean up their
+containers. They do not use the root Compose database or `DATABASE_URL`. The
+first run needs network access to download dependencies and the image. See the
+[root development guide](../../README.md#development-and-verification) for all-module checks.

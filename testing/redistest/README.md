@@ -53,17 +53,14 @@ package yourpackage_test
 
 import (
 	"context"
-	"os"
 	"testing"
 
 	"github.com/alextanhongpin/dbtx/testing/redistest"
 )
 
-var stop func() error
-
 func TestMain(m *testing.M) {
 	// Initialize the global Redis instance
-	stop = redistest.Init()
+	stop := redistest.Init()
 	defer stop()
 
 	// Run tests
@@ -101,3 +98,28 @@ func TestGlobalRedis(t *testing.T) {
 ## License
 
 This package is licensed under the MIT License.
+
+## Requirements and running tests
+
+Requires Go 1.24.2+ and a running Docker daemon (`docker info`). In a new
+application module, run `go mod init example.com/redis-example`, install the
+dependency above, save either example as `redis_test.go`, and run
+`go test -v -count=1 ./...`. Expected result: a passing test. The first run needs
+network access for dependencies and the Docker image.
+
+To test this checkout, from the repository root:
+
+```bash
+cd testing/redistest
+go test -race -count=1 ./...
+go vet ./...
+```
+
+`New(t)` creates a container per call; `Init` creates a package-wide container
+and must run before global `Client(t)` or `Addr()`. Per-test clients and
+containers are closed through `t.Cleanup`. For global setup, defer the stop
+function before `m.Run()`; calling `os.Exit(m.Run())` would skip that cleanup.
+
+`Options{Image: "redis:latest", Expiry: 10 * time.Minute}` describes the defaults.
+Pass an options value to `New` or `Init` to pin the image or increase its expiry.
+Ports are assigned dynamically. No local Redis installation is required.

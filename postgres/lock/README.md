@@ -6,13 +6,23 @@ Advisory locks are application-defined locks stored in PostgreSQL. They are not 
 
 ## Installation
 
-This package is part of `github.com/alextanhongpin/dbtx`. Import the lock package:
+This is a separate Go module. Install it in your application module:
+
+```bash
+go get github.com/alextanhongpin/dbtx/postgres/lock github.com/lib/pq
+```
+
+Import the lock package:
 
 ```go
 import "github.com/alextanhongpin/dbtx/postgres/lock"
 ```
 
-Requires PostgreSQL 9.0+ and a `dbtx` transaction context.
+Requires Go 1.27+, PostgreSQL advisory lock support, and a `dbtx` transaction
+context. No schema migration is required. See the [root quick start](../../README.md#run-a-complete-example)
+for opening and pinging a database and running a complete program.
+The following fragments run inside that program: `myDB` is its `*sql.DB`, and
+`ctx` is its context.
 
 ## Usage
 
@@ -41,7 +51,7 @@ err := db.RunInTx(ctx, func(ctx context.Context) error {
 
 ### TryLock – non-blocking
 
-`TryLock` returns immediately. The second return value is `true` if the lock was acquired, `false` if it was already held by another transaction.
+`TryLock` returns immediately. The first return value is `true` if the lock was acquired, `false` if it was already held by another transaction.
 
 ```go
 err := db.RunInTx(ctx, func(ctx context.Context) error {
@@ -116,7 +126,7 @@ p := lock.Pair[string]{"Foo", "Bar"}
 
 ## Concurrency behavior
 
-* `Lock` blocks until the lock is granted or the transaction ends.
+* `Lock` blocks until the lock is granted or the operation fails (for example, context cancellation).
 * `TryLock` is non-blocking and returns `false` when the key is already held by another transaction in the same database.
 * Locks are per-database connection, and `*_xact_lock` variants are scoped to the transaction. They are not session locks.
 
@@ -125,3 +135,20 @@ p := lock.Pair[string]{"Foo", "Bar"}
 * Advisory locks do not prevent conflicting SQL statements; they are purely application-level coordination.
 * The lock is automatically released on `COMMIT` or `ROLLBACK`. Use `pg_advisory_lock` for session-scoped locks if you need different semantics – this package uses `*_xact_lock` intentionally.
 * Hash collisions are theoretically possible but extremely unlikely with FNV-1a for practical workloads.
+
+## Run the package tests
+
+Requires Go 1.27+, a C compiler for `-race`, and a running Docker daemon
+(`docker info`). From the repository root:
+
+```bash
+cd postgres/lock
+go test -race -count=1 ./...
+go vet ./...
+```
+
+Tests start `postgres:19beta3-alpine3.24` on a dynamically assigned port, apply
+their own schema, and clean up containers. The first run needs network access
+for dependencies and the image. Compose and `DATABASE_URL` are not used by the
+tests. See the [root guide](../../README.md#development-and-verification) for
+checks across all modules.

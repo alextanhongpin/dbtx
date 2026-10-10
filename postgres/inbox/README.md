@@ -41,6 +41,39 @@ The package expects PostgreSQL with `uuidv7()` support (18+).
 go get github.com/alextanhongpin/dbtx/postgres/inbox
 ```
 
+## Application setup
+
+Requires Go 1.27+. The snippets below belong inside your application; they are
+not standalone programs. For a full database connection and execution example,
+follow the [root quick start](../../README.md#run-a-complete-example). Install
+the package above plus `github.com/lib/pq`, and register the driver with a blank
+import. Open and ping `db`, create `ctx`, and apply the embedded schema once
+before enqueueing or processing work.
+
+Use these imports as needed by the snippets:
+
+```go
+import (
+    "context"
+    "database/sql"
+    "encoding/json/jsontext"
+    "errors"
+    "fmt"
+    "log"
+    "time"
+
+    "github.com/alextanhongpin/dbtx/postgres/inbox"
+    "github.com/alextanhongpin/dbtx/postgres/inbox/repository"
+    _ "github.com/lib/pq"
+)
+```
+
+Trim imports your application does not use. `db` is a connected `*sql.DB` and
+`ctx` is a `context.Context`. `evt` is your broker event with a stable string `ID` and JSON `Data`; `apply` is your handler function.
+
+Acknowledge the broker only after the enqueue transaction commits. When enqueue
+joins an outer transaction, its return does not mean that transaction committed.
+
 ## Quick start
 
 ```go
@@ -68,7 +101,7 @@ Enqueue joins the transaction in `ctx` when it was started by a `dbtx.DB` with t
 ### Dequeue worker
 
 ```go
-for {
+for ctx.Err() == nil {
     err := in.Dequeue(ctx, 10, func(ctx context.Context, msg *inbox.Message) error {
         // Write through ctx to join the transaction that acks the message.
         return apply(ctx, msg)
@@ -127,6 +160,7 @@ A panic in the handler rolls back its transaction and propagates. The message is
 
 ```go
 dead, err := in.DeadLetters(ctx, 100) // oldest first
+// After checking err == nil and len(dead) > 0:
 err = in.Requeue(ctx, dead[0].ID)     // reset attempts, visible now
 
 week := time.Now().Add(-7 * 24 * time.Hour)
@@ -146,3 +180,20 @@ n, err := in.Count(ctx) // visible, retryable messages
 
 * Side effects outside the database, such as HTTP calls, are not covered by the transaction. Keep them idempotent: they run again if the handler fails after making them, or if the lease expires.
 * `MessageID` must be stable across redeliveries, for example the outbox message ID or the event UUID, not a broker delivery tag.
+
+## Run the package tests
+
+Requires Go 1.27+, a C compiler for `-race`, and a running Docker daemon
+(`docker info`). From the repository root:
+
+```bash
+cd postgres/inbox
+go test -race -count=1 ./...
+go vet ./...
+```
+
+Tests start `postgres:19beta3-alpine3.24` on a dynamically assigned port, apply
+their own schema, and clean up containers. The first run needs network access
+for dependencies and the image. Compose and `DATABASE_URL` are not used by the
+tests. See the [root guide](../../README.md#development-and-verification) for
+checks across all modules.

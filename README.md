@@ -1,82 +1,229 @@
 # dbtx
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/alextanhongpin/dbtx.svg)](https://pkg.go.dev/github.com/alextanhongpin/dbtx)
-[![Go Report Card](https://goreportcard.com/badge/github.com/alextanhongpin/dbtx)](https://goreportcard.com/report/github.com/alextanhongpin/dbtx)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A comprehensive Go library that provides unified database transaction management across multiple database drivers and ORM libraries. `dbtx` simplifies transaction handling, provides testing utilities, and implements common database patterns like outbox and distributed locking.
+`dbtx` manages `database/sql` transactions through context. Repositories use
+`DBTx(ctx)` to join the caller's transaction, or use the connection pool when no
+transaction is present. PostgreSQL helpers and Docker-backed test utilities live
+in separate Go modules.
 
-## 🚀 Quick Start
+## Requirements
+
+- Go **1.27.0 or newer** for the root module and PostgreSQL packages in this checkout.
+  See each module's `go.mod` for its declared minimum.
+- Docker with a running daemon for database integration tests and the local
+  PostgreSQL quick start. Check connectivity with `docker info`.
+- A C compiler and `CGO_ENABLED=1` for `postgres/dbt` and race tests. On macOS,
+  install the Command Line Tools; on Linux, install your distribution's C build tools.
+- Network access for the first dependency download and Docker image pull.
+
+This is a library repository; it has no application server or CLI to start.
+Examples below are application code. Package READMEs link to executable tests.
+
+## Run a complete example
+
+From the repository root, start the database defined in [compose.yaml](compose.yaml):
 
 ```bash
-go get github.com/alextanhongpin/dbtx
+docker compose up -d db
+docker compose exec db pg_isready -U john -d dev
 ```
+
+Wait until `pg_isready` reports that the database accepts connections. Compose
+uses `postgres:19beta3-alpine3.24`, exposes `127.0.0.1:5432`, and stores data in
+`./tmp`. This setup and its credentials are for local development.
+
+Create a separate application directory outside this repository:
+
+```bash
+mkdir dbtx-example
+cd dbtx-example
+go mod init example.com/dbtx-example
+go get github.com/alextanhongpin/dbtx github.com/lib/pq
+```
+
+Save this as `main.go`:
 
 ```go
 package main
 
 import (
-    "context"
-    "database/sql"
-    "log"
-    
-    "github.com/alextanhongpin/dbtx"
-    _ "github.com/lib/pq"
+	"context"
+	"database/sql"
+	"fmt"
+	"log"
+	"os"
+
+	"github.com/alextanhongpin/dbtx"
+	_ "github.com/lib/pq"
 )
 
 func main() {
-    db, err := sql.Open("postgres", "postgres://user:pass@localhost/db?sslmode=disable")
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer db.Close()
-    
-    atomic := dbtx.New(db)
-    
-    // Execute in transaction
-    err = atomic.RunInTx(context.Background(), func(ctx context.Context) error {
-        tx := atomic.DBTx(ctx)
-        _, err := tx.ExecContext(ctx, "INSERT INTO users (name) VALUES ($1)", "John Doe")
-        return err
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
+	ctx := context.Background()
+	db, err := sql.Open("postgres", os.Getenv("DATABASE_URL"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.PingContext(ctx); err != nil {
+		log.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS dbtx_example_users (
+        id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        name text NOT NULL
+    )`); err != nil {
+		log.Fatal(err)
+	}
+
+	atomic := dbtx.New(db)
+	var id int64
+	err = atomic.RunInTx(ctx, func(ctx context.Context) error {
+		return atomic.DBTx(ctx).QueryRowContext(ctx,
+			"INSERT INTO dbtx_example_users (name) VALUES ($1) RETURNING id",
+			"Alice").Scan(&id)
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("committed user %d\n", id)
 }
 ```
 
-## ✨ Status
+Run it from the application directory:
 
-- **Current Version:** 0.0.7 (Latest)
-- **Focus:** Unified transaction management and advanced patterns (Outbox, Locking, Cache, DBT).
-- **Development:** Active development for support with new database drivers.
+```bash
+export DATABASE_URL='postgres://john:123456@127.0.0.1:5432/dev?sslmode=disable'
+go run .
+```
 
-- **🔄 Unified Transaction Interface**: Common interface for `*sql.DB` and `*sql.Tx`
-- **🎯 Multiple Database Support**: Works with `database/sql`, `pgx`, `bun`, and `sqlx`
-- **🔒 Transaction Safety**: Automatic rollback on errors and panic recovery
-- **🧪 Comprehensive Testing**: Built-in testing utilities with Docker containers
-- **📦 Outbox Pattern**: Transactional outbox implementation for reliable messaging
-- **🗄️ PostgreSQL Cache**: Typed cache with TTL, atomic operations, and negative caching
-- **🔐 Distributed Locking**: PostgreSQL-based advisory locks
-- **🎭 Middleware Support**: Customizable database operation wrappers
-- **🏗️ Nested Transactions**: Safe handling of nested transaction contexts
+Each run inserts a row and prints `committed user <id>`. To use the current
+checkout instead of the downloaded root module, run
+`go mod edit -replace github.com/alextanhongpin/dbtx=/absolute/path/to/dbtx`
+followed by `go mod tidy` in the application directory. Nested modules require
+separate replacements when you want to use their local source.
 
-## 📚 Table of Contents
+Stop the local database from the repository root with `docker compose down`.
+The bind-mounted `tmp` directory is retained.
 
-- [Core Library](#core-library)
-  - [Basic Usage](#basic-usage)
-  - [Transaction Management](#transaction-management)
-  - [Custom Wrappers](#custom-wrappers)
-- [Database Adapters](#database-adapters)
-  - [pgx Support](#pgx-support)
-  - [Bun ORM Support](#bun-orm-support)
-  - [SQLx Support](#sqlx-support)
-- [Advanced Features](#advanced-features)
-  - [Outbox Pattern](#outbox-pattern)
-  - [Distributed Locking](#distributed-locking)
-- [Testing Utilities](#testing-utilities)
-- [API Reference](#api-reference)
-- [Contributing](#contributing)
+## Transactions
+
+| Method | Behavior |
+| --- | --- |
+| `DB()` | Returns the wrapped connection pool. |
+| `DBTx(ctx)` | Returns the transaction in context, otherwise the pool. |
+| `Tx(ctx)` | Requires a transaction in context; panics with `ErrNotTransaction` otherwise. |
+| `RunInTx(ctx, fn)` | Starts and commits a transaction; rolls back on error or panic, then re-panics. Joins an existing transaction with the same ID. |
+| `RunInSubTx(ctx, fn)` | Uses a savepoint inside an existing transaction; returns `ErrOutOfTx` without one. |
+| `RunInTx2(ctx, fn)` | Like `RunInTx`, with a typed result and error. |
+| `RunInSubTx2(ctx, fn)` | Like `RunInSubTx`, with a typed result and error. |
+
+Always pass the callback's `ctx` to repositories and queries. Nested `RunInTx`
+calls join the outer transaction; only its owner commits. Handle an inner
+savepoint error inside the outer callback if you want the outer work to commit.
+Returning that error from the outer callback rolls back the whole transaction.
+
+```go
+err := atomic.RunInTx(ctx, func(ctx context.Context) error {
+    err := atomic.RunInSubTx(ctx, func(ctx context.Context) error {
+        _, err := atomic.DBTx(ctx).ExecContext(ctx, query, args...)
+        return err
+    })
+    if err != nil {
+        // Decide whether this failure is recoverable before continuing.
+        return err
+    }
+    return nil
+})
+```
+
+Here `atomic`, `ctx`, `query`, and `args` come from your application. Configure
+isolation with `dbtx.WithTxOptions(ctx, &sql.TxOptions{...})`. For multiple
+databases, call `SetID` with a distinct ID per database before sharing clients;
+repositories joining the same database must use the same ID. Context lookup is
+by ID, not by connection identity.
+
+## Query wrappers
+
+`dbtx.New(db, wrappers...)` accepts `func(dbtx.DBTX) dbtx.DBTX` middleware.
+The bundled logger implements this wrapper:
+
+```go
+atomic := dbtx.New(db, dbtx.WithLogger(logger))
+```
+
+`logger` must provide `Log(ctx context.Context, method, query string, args ...any)`
+as required by [WithLogger](logger.go). See [dbtx_test.go](dbtx_test.go)
+for a complete implementation. The `DBTX` interface contains `ExecContext`,
+`PrepareContext`, `QueryContext`, and `QueryRowContext`; it deliberately omits
+commit and rollback so repositories cannot finish the caller's transaction.
+
+## Modules
+
+Install each helper using its full module path, for example
+`go get github.com/alextanhongpin/dbtx/postgres/outbox`.
+
+| Module | Purpose |
+| --- | --- |
+| [postgres/cache](postgres/cache/README.md) | JSON cache, TTL, atomic operations and compute leases. |
+| [postgres/dbt](postgres/dbt/README.md) | Struct-driven PostgreSQL templates and scanning. |
+| [postgres/idempotent](postgres/idempotent/README.md) | Durable requests, checkpoints and cached outcomes. |
+| [postgres/inbox](postgres/inbox/README.md) | Deduplicated transactional message consumption. |
+| [postgres/outbox](postgres/outbox/README.md) | Transactional event enqueueing and at-least-once publishing. |
+| [postgres/jobs](postgres/jobs/README.md) | Background jobs with leases, retries and maintenance. |
+| [postgres/jsonb](postgres/jsonb/README.md) | Typed scanning of JSON query results. |
+| [postgres/lock](postgres/lock/README.md) | Transaction-scoped advisory locks. |
+| [postgres/violations](postgres/violations/README.md) | Classify PostgreSQL errors from `lib/pq`. |
+| [engine/sqlite](engine/sqlite/README.md) | SQLite pool defaults and JSON containment function. |
+| [testing/dbtest](testing/dbtest/README.md) | PostgreSQL containers, pools and rollback-isolated tests. |
+| [testing/redistest](testing/redistest/README.md) | Redis containers and test clients. |
+| [testing/testcontainer](testing/testcontainer/README.md) | Low-level PostgreSQL container lifecycle. |
+
+There are no `pgxtx`, `buntx`, or `sqlxtx` adapters in this checkout.
+
+## Development and verification
+
+```bash
+git clone https://github.com/alextanhongpin/dbtx.git
+cd dbtx
+go test -race -count=1 ./...
+go vet ./...
+```
+
+Root tests automatically start PostgreSQL 17.4 containers. Most PostgreSQL
+helper suites start `postgres:19beta3-alpine3.24`; Redis tests use `redis:latest`.
+They apply their own schemas and use dynamically assigned ports. You do not
+need Compose, `DATABASE_URL`, or an `integration` build tag for these tests.
+Even a filtered test may start Docker because the package has a `TestMain`.
+
+The root `go test ./...` does **not** include nested modules. To test every
+module from the repository root, stopping on the first failure:
+
+```bash
+set -e
+for module in $(find . -name go.mod -not -path './tmp/*' | sort); do
+    (cd "$(dirname "$module")" && go test -race -count=1 ./... && go vet ./...)
+done
+```
+
+Each module resolves the dependency versions in its own `go.mod`; without
+explicit replacements, tests use released dependencies rather than sibling
+checkouts. `make test` also visits modules, writes coverage files, and opens an
+HTML report, but use the loop above when you need failures to stop the run.
+
+| Target | What it does |
+| --- | --- |
+| `make test` | Tests modules with race/coverage flags, then opens root coverage in a browser. |
+| `make lint` | Formats SQL files in place using `go tool sqlfmt`; it is not a Go linter. |
+| `make sqlc` | Regenerates repositories using a `sqlc` executable on `PATH`. |
+| `make install` | Updates sqlfmt/sqlc tool dependencies in the current module. |
+
+For a repository with `sqlc.yaml`, run `go tool sqlc generate` in that repository
+directory to use the tool registered in its parent module. Generated code is
+checked in; regeneration is not required to execute examples or tests.
+
+If a test cannot connect to Docker, check `docker info` and the active Docker
+context. Missing image or dependency downloads require network access. A
+`uuidv7()` error means the database used for that schema must be PostgreSQL 18+.
 
 ## Codex Skills
 
@@ -101,422 +248,6 @@ Use $dbtx-postgres-patterns to enqueue order events atomically with our business
 
 The skills instruct the agent to inspect the dependency version used by the consuming project. Installing a skill does not install Go dependencies or apply database migrations.
 
-## Core Library
-
-### Basic Usage
-
-The core `dbtx` package provides a unified interface for database operations:
-
-```go
-import (
-    "database/sql"
-    "github.com/alextanhongpin/dbtx"
-    _ "github.com/lib/pq"
-)
-
-// Initialize with database connection
-db, err := sql.Open("postgres", "postgres://user:pass@localhost/db?sslmode=disable")
-if err != nil {
-    log.Fatal(err)
-}
-
-atomic := dbtx.New(db)
-
-// Execute queries directly
-result, err := atomic.DB().ExecContext(ctx, "INSERT INTO users (name) VALUES ($1)", "Alice")
-if err != nil {
-    log.Fatal(err)
-}
-```
-
-### Transaction Management
-
-`dbtx` provides automatic transaction management with rollback on errors:
-
-```go
-err := atomic.RunInTx(context.Background(), func(ctx context.Context) error {
-    tx := atomic.DBTx(ctx)
-    
-    // Both operations will be rolled back if either fails
-    _, err := tx.ExecContext(ctx, "INSERT INTO users (name) VALUES ($1)", "Jane Doe")
-    if err != nil {
-        return err
-    }
-    
-    _, err = tx.ExecContext(ctx, "INSERT INTO orders (user_id, amount) VALUES ($1, $2)", 1, 100)
-    return err
-})
-if err != nil {
-    log.Fatal(err)
-}
-```
-
-For nested savepoint transactions, use `RunInSubTx` which creates a PostgreSQL SAVEPOINT inside an existing transaction. Inner failures roll back only to the savepoint, allowing the outer transaction to continue.
-
-```go
-err := atomic.RunInTx(ctx, func(ctx context.Context) error {
-    // outer work
-    return atomic.RunInSubTx(ctx, func(ctx context.Context) error {
-        // inner savepoint work, can be rolled back independently
-        return nil
-    })
-})
-```
-
-### Custom Wrappers
-
-Add middleware to database operations for logging, metrics, or other cross-cutting concerns:
-
-```go
-// Custom logger wrapper
-logger := func(dbtx dbtx.DBTX) dbtx.DBTX {
-    return &LoggingDBTX{dbtx: dbtx}
-}
-
-// Metrics wrapper
-metrics := func(dbtx dbtx.DBTX) dbtx.DBTX {
-    return &MetricsDBTX{dbtx: dbtx}
-}
-
-atomic := dbtx.New(db, logger, metrics)
-```
-
-## Database Adapters
-
-### pgx Support
-
-For applications using the high-performance `pgx` driver:
-
-```go
-import "github.com/alextanhongpin/dbtx/pgxtx"
-
-conn, err := pgx.Connect(context.Background(), "postgres://user:pass@localhost/db")
-if err != nil {
-    log.Fatal(err)
-}
-
-atomic := pgxtx.New(conn)
-
-err = atomic.RunInTx(context.Background(), func(ctx context.Context) error {
-    tx := atomic.DBTx(ctx)
-    _, err := tx.Exec(ctx, "INSERT INTO users (name) VALUES ($1)", "John")
-    return err
-})
-```
-
-### Bun ORM Support
-
-Integration with the modern Bun ORM:
-
-```go
-import "github.com/alextanhongpin/dbtx/buntx"
-
-db := bun.NewDB(sqldb, pgdialect.New())
-atomic := buntx.New(db)
-
-err = atomic.RunInTx(context.Background(), func(ctx context.Context) error {
-    tx := atomic.DBTx(ctx)
-    _, err := tx.NewInsert().Model(&User{Name: "Alice"}).Exec(ctx)
-    return err
-})
-```
-
-### SQLx Support
-
-For projects using the popular `sqlx` extension:
-
-```go
-import "github.com/alextanhongpin/dbtx/sqlxtx"
-
-db, err := sqlx.Connect("postgres", "postgres://user:pass@localhost/db")
-if err != nil {
-    log.Fatal(err)
-}
-
-atomic := sqlxtx.New(db)
-
-err = atomic.RunInTx(context.Background(), func(ctx context.Context) error {
-    tx := atomic.DBTx(ctx)
-    _, err := tx.ExecContext(ctx, "INSERT INTO users (name) VALUES ($1)", "Bob")
-    return err
-})
-```
-
-## Advanced Features
-
-### Outbox Pattern
-
-Implement reliable messaging with the transactional outbox pattern:
-
-```go
-import "github.com/alextanhongpin/dbtx/postgres/outbox"
-
-// Setup outbox table (run this SQL once)
-const schema = `
-CREATE TABLE outbox (
-    id bigint GENERATED ALWAYS AS IDENTITY,
-    aggregate_id text NOT NULL,
-    aggregate_type text NOT NULL,
-    type text NOT NULL,
-    payload jsonb NOT NULL DEFAULT '{}',
-    created_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (id)
-);`
-
-// Create outbox instance
-atomic := dbtx.New(db)
-ob := outbox.New(atomic)
-
-// Enqueue message in transaction
-err := ob.RunInTx(ctx, func(txCtx context.Context) error {
-    // Your business logic
-    _, err := ob.DBTx(txCtx).ExecContext(txCtx, "INSERT INTO orders (...) VALUES (...)")
-    if err != nil {
-        return err
-    }
-    
-    // Enqueue outbox message
-    return ob.Create(txCtx, outbox.Message{
-        AggregateID:   "order-123",
-        AggregateType: "order",
-        Type:          "order.created",
-        Payload:       json.RawMessage(`{"order_id": "123"}`),
-    })
-})
-
-// Process outbox messages
-err = ob.RunInTx(ctx, func(txCtx context.Context) error {
-    event, err := ob.LoadAndDelete(txCtx)
-    if err != nil {
-        if errors.Is(err, sql.ErrNoRows) {
-            return nil // No messages to process
-        }
-        return err
-    }
-    
-    // Process event...
-    fmt.Printf("Processing event: %s\n", event.Type)
-    return nil
-})
-```
-
-### Distributed Locking
-
-PostgreSQL advisory locks for distributed coordination:
-
-```go
-import "github.com/alextanhongpin/dbtx/postgres/lock"
-
-err = atomic.RunInTx(ctx, func(ctx context.Context) error {
-    tx := atomic.DBTx(ctx)
-    
-    // Acquire lock
-    acquired, err := lock.TryLock(ctx, tx, "my-resource")
-    if err != nil {
-        return err
-    }
-    if !acquired {
-        return errors.New("could not acquire lock")
-    }
-    
-    // Critical section - only one process can execute this
-    // Lock is automatically released when transaction ends
-    
-    return nil
-})
-```
-
-## Testing Utilities
-
-Comprehensive testing support with Docker containers and test databases:
-
-```go
-import (
-    "github.com/alextanhongpin/dbtx/testing/dbtest"
-    "github.com/alextanhongpin/dbtx/testing/testcontainer"
-)
-
-func TestWithDatabase(t *testing.T) {
-    // Start PostgreSQL container
-    db := testcontainer.MustPostgres(t, testcontainer.PostgresConfig{
-        Database: "testdb",
-        Username: "test",
-        Password: "test",
-    })
-    defer db.Close()
-    
-    // Use test utilities
-    dbtest.MustExec(t, db, "CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT)")
-    
-    atomic := dbtx.New(db)
-    
-    // Your tests...
-}
-```
-
-## API Reference
-
-### Core Interface
-
-The `DBTX` interface provides a unified abstraction over database operations:
-
-```go
-type DBTX interface {
-    ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
-    PrepareContext(ctx context.Context, query string) (*sql.Stmt, error)
-    QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-    QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
-}
-```
-
-### UnitOfWork Interface
-
-The main interface for transaction management:
-
-```go
-type UnitOfWork interface {
-    DB() DBTX                                                              // Direct database access
-    DBTx(ctx context.Context) DBTX                                        // Context-aware database access
-    Tx(ctx context.Context) DBTX                                          // Transaction-only access (panics if not in tx)
-    RunInTx(ctx context.Context, fn func(txCtx context.Context) error) error // Execute function in transaction
-}
-```
-
-### Method Differences
-
-| Method | Description | Use Case |
-|--------|-------------|----------|
-| `DB()` | Returns wrapped `*sql.DB` | Non-transactional operations |
-| `DBTx(ctx)` | Returns transaction if in context, otherwise DB | Context-aware operations |
-| `Tx(ctx)` | Returns transaction, panics if not in transaction context | Transaction-required operations |
-
-### Error Handling
-
-- `ErrNotTransaction`: Returned when `Tx(ctx)` is called outside a transaction context
-
-## Package Structure
-
-```
-dbtx/
-├── dbtx.go              # Core transaction management
-├── context.go           # Context utilities
-├── logger.go            # Logging utilities
-├── buntx/              # Bun ORM adapter
-├── pgxtx/              # pgx driver adapter  
-├── sqlxtx/             # sqlx adapter
-├── engine/
-│   └── sqlite/         # SQLite engine with sqlite-vec support
-├── postgres/
-│   ├── cache/          # PostgreSQL-backed typed cache
-│   ├── dbt/            # Type-safe query builder
-│   ├── jsonb/          # JSONB helpers
-│   ├── lock/           # Advisory locks
-│   ├── outbox/         # Transactional outbox pattern
-│   └── violations/     # Constraint violation handling
-└── testing/
-    ├── dbtest/         # Database testing utilities
-    ├── buntest/        # Bun-specific test utilities
-    ├── pgxtest/        # pgx-specific test utilities
-    ├── redistest/      # Redis testing utilities
-    └── testcontainer/  # Docker container management
-```
-
-## Best Practices
-
-### 1. Always Use Context
-
-```go
-// ✅ Good
-err := atomic.RunInTx(ctx, func(txCtx context.Context) error {
-    tx := atomic.DBTx(txCtx)
-    return tx.ExecContext(txCtx, query, args...)
-})
-
-// ❌ Avoid
-err := atomic.RunInTx(ctx, func(txCtx context.Context) error {
-    tx := atomic.DBTx(txCtx)
-    return tx.Exec(query, args...) // No context
-})
-```
-
-### 2. Handle Errors Properly
-
-```go
-err := atomic.RunInTx(ctx, func(txCtx context.Context) error {
-    tx := atomic.DBTx(txCtx)
-    
-    if _, err := tx.ExecContext(txCtx, query1, args1...); err != nil {
-        return fmt.Errorf("failed to execute query1: %w", err)
-    }
-    
-    if _, err := tx.ExecContext(txCtx, query2, args2...); err != nil {
-        return fmt.Errorf("failed to execute query2: %w", err)
-    }
-    
-    return nil
-})
-```
-
-### 3. Use Appropriate Method
-
-```go
-// For operations that might or might not be in a transaction
-tx := atomic.DBTx(ctx)
-
-// For operations that MUST be in a transaction
-tx := atomic.Tx(ctx) // Will panic if not in transaction
-
-// For operations that should NOT be in a transaction
-db := atomic.DB()
-```
-
-## Contributing
-
-We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details.
-
-### Development Setup
-
-```bash
-# Clone the repository
-git clone https://github.com/alextanhongpin/dbtx.git
-cd dbtx
-
-# Run tests
-make test
-
-# Run tests with Docker containers
-make test-integration
-
-# Lint code
-make lint
-```
-
-### Running Tests
-
-```bash
-# Unit tests
-go test ./...
-
-# Integration tests (requires Docker)
-go test -tags=integration ./...
-
-# Specific package tests
-go test ./buntx/
-go test ./pgxtx/
-go test ./testing/dbtest/
-```
-
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- Inspired by the need for consistent transaction management across different Go database libraries
-- Built with lessons learned from production database applications
-- Thanks to the Go community for excellent database libraries like `pgx`, `bun`, and `sqlx`
-
----
-
-**Made with ❤️ for the Go community**
-````
+[MIT](LICENSE).

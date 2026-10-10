@@ -14,11 +14,15 @@ The outbox pattern lets you write business data and domain events in the same da
 
 ## Schema
 
-The schema lives in [`repository/schema.sql`](repository/schema.sql) and is exported as `repository.Schema`. It is idempotent, so you can run it at startup or copy it into your migrations:
+The schema lives in [`repository/schema.sql`](repository/schema.sql) and is exported as `repository.Schema`. Apply it once through your migration system:
 
 ```go
 _, err := db.ExecContext(ctx, repository.Schema)
 ```
+
+The enum uses `CREATE TYPE` without a duplicate guard, so running this schema
+twice fails. Existing installations need explicit versioned migrations;
+`CREATE TABLE IF NOT EXISTS` does not upgrade existing tables.
 
 A message moves through these statuses:
 
@@ -36,6 +40,36 @@ The package expects PostgreSQL with `uuidv7()` support (18+).
 ```bash
 go get github.com/alextanhongpin/dbtx/postgres/outbox
 ```
+
+## Application setup
+
+Requires Go 1.27+. The snippets below belong inside your application; they are
+not standalone programs. For a full database connection and execution example,
+follow the [root quick start](../../README.md#run-a-complete-example). Install
+the package above plus `github.com/lib/pq`, and register the driver with a blank
+import. Open and ping `db`, create `ctx`, and apply the embedded schema once
+before enqueueing or processing work.
+
+Use these imports as needed by the snippets:
+
+```go
+import (
+    "context"
+    "database/sql"
+    "encoding/json/jsontext"
+    "errors"
+    "fmt"
+    "log"
+    "time"
+
+    "github.com/alextanhongpin/dbtx/postgres/outbox"
+    "github.com/alextanhongpin/dbtx/postgres/outbox/repository"
+    _ "github.com/lib/pq"
+)
+```
+
+Trim imports your application does not use. `db` is a connected `*sql.DB` and
+`ctx` is a `context.Context`. `publish` is your broker publishing function and must return any publication error.
 
 ## Quick start
 
@@ -66,7 +100,7 @@ The transaction is found by ID only. If your application uses several databases,
 ### Dequeue worker
 
 ```go
-for {
+for ctx.Err() == nil {
     err := o.Dequeue(ctx, 10, func(ctx context.Context, msg *outbox.Message) error {
         return publish(ctx, msg)
     })
@@ -114,6 +148,7 @@ Consumers must tolerate reordering, for example by giving each event the aggrega
 
 ```go
 dead, err := o.DeadLetters(ctx, 100) // oldest first
+// After checking err == nil and len(dead) > 0:
 err = o.Requeue(ctx, dead[0].ID)     // reset attempts, visible now
 
 week := time.Now().Add(-7 * 24 * time.Hour)
@@ -133,3 +168,20 @@ n, err := o.Count(ctx) // visible, retryable messages
 
 * Keep processing idempotent – the same message may be redelivered if a worker crashes after publishing but before commit, or if its lease expires.
 * Messages are not delivered in order, not even per aggregate. See [Ordering](#ordering).
+
+## Run the package tests
+
+Requires Go 1.27+, a C compiler for `-race`, and a running Docker daemon
+(`docker info`). From the repository root:
+
+```bash
+cd postgres/outbox
+go test -race -count=1 ./...
+go vet ./...
+```
+
+Tests start `postgres:19beta3-alpine3.24` on a dynamically assigned port, apply
+their own schema, and clean up containers. The first run needs network access
+for dependencies and the image. Compose and `DATABASE_URL` are not used by the
+tests. See the [root guide](../../README.md#development-and-verification) for
+checks across all modules.

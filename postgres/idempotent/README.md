@@ -1,6 +1,6 @@
 # idempotent
 
-A PostgreSQL-backed idempotency helper for Go, built on [dbtx](https://github.com/alextanhongpin/dbtx). `Idempotent.Do` runs a function at most once to completion per idempotency key, even with concurrent retries and crashed workers. Later calls with the same key and request get the stored response. Calls with a different request for the same key return `ErrRequestMismatch`.
+A PostgreSQL-backed idempotency helper for Go, built on [dbtx](https://github.com/alextanhongpin/dbtx). `Idempotent.Do` stores a final response per idempotency key and replays it on later calls. Handler attempts can run again after errors or crashes. Later calls with the same key and request get the stored response. Calls with a different request for the same key return `ErrRequestMismatch`.
 
 Work is protected by a **lease** and a **fencing token**. Long tasks can be split into **checkpointed steps**, so a retry continues from the last finished step instead of starting over.
 
@@ -50,6 +50,36 @@ worker crash, lease expired:     in_progress ──Claim──▶ in_progress (n
 
 `completed` and `failed` are final. A key stays until `expires_at` (`TTL`, 24 hours by default, extended on each claim and outcome) and is then removed by `Purge`.
 
+## Application setup
+
+Requires Go 1.27+. The snippets below belong inside your application; they are
+not standalone programs. For a full database connection and execution example,
+follow the [root quick start](../../README.md#run-a-complete-example). Install
+the package above plus `github.com/lib/pq`, and register the driver with a blank
+import. Open and ping `db`, create `ctx`, and apply the embedded schema once
+before enqueueing or processing work.
+
+Use these imports as needed by the snippets:
+
+```go
+import (
+    "context"
+    "database/sql"
+    "encoding/json/jsontext"
+    "errors"
+    "fmt"
+    "log"
+    "time"
+
+    "github.com/alextanhongpin/dbtx/postgres/idempotent"
+    "github.com/alextanhongpin/dbtx/postgres/idempotent/repository"
+    _ "github.com/lib/pq"
+)
+```
+
+Trim imports your application does not use. `db` is a connected `*sql.DB` and
+`ctx` is a `context.Context`. Use `repo.DBTx(ctx)` for SQL in the handler to commit business writes with the outcome.
+
 ## Quick start
 
 ```go
@@ -62,8 +92,8 @@ import (
     "github.com/alextanhongpin/dbtx/postgres/idempotent/repository"
 )
 
-db, _ := sql.Open("postgres", dsn)
-idp := idempotent.New(repository.New(db))
+repo := repository.New(db) // db was opened and checked as described below
+idp := idempotent.New(repo)
 
 fn := func(ctx context.Context, p idempotent.Params) (*idempotent.Result, error) {
     // ctx carries the transaction. Writes made through dbtx with this ctx
@@ -179,14 +209,23 @@ Errors:
 - `idempotent_test.go`: integration tests against a PostgreSQL container.
 - `repository/`: schema, queries, sqlc-generated code and the PostgreSQL implementation of `idempotent.Repository`.
 
-## Running tests
-
-```bash
-go test ./...
-```
-
-Tests start a PostgreSQL container via `dbtest` and apply the embedded schema.
-
 ## Contributing
 
 Contributions are welcome. Please open an issue or submit a Pull Request.
+
+## Run the package tests
+
+Requires Go 1.27+, a C compiler for `-race`, and a running Docker daemon
+(`docker info`). From the repository root:
+
+```bash
+cd postgres/idempotent
+go test -race -count=1 ./...
+go vet ./...
+```
+
+Tests start `postgres:19beta3-alpine3.24` on a dynamically assigned port, apply
+their own schema, and clean up containers. The first run needs network access
+for dependencies and the image. Compose and `DATABASE_URL` are not used by the
+tests. See the [root guide](../../README.md#development-and-verification) for
+checks across all modules.

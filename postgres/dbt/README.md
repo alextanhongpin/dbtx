@@ -10,7 +10,29 @@ A tiny Go helper for type-safe PostgreSQL queries using struct tags and `text/te
 go get github.com/alextanhongpin/dbtx/postgres/dbt
 ```
 
-Requires Go 1.22+. The package uses `pg_query_go` (cgo) to validate and normalize SQL when a query is compiled, so it is PostgreSQL-specific.
+Requires Go 1.27+. The package uses `pg_query_go` (cgo) to validate and normalize SQL when a query is compiled, so it is PostgreSQL-specific.
+
+## Run the examples
+
+The snippets below are application fragments. Use the [root quick start](../../README.md#run-a-complete-example)
+to open and ping a `*sql.DB` with a registered PostgreSQL driver. Import
+`github.com/alextanhongpin/dbtx/postgres/dbt`, `fmt`, and `time` as needed, and
+create a context before calling the query. For the user examples, create this
+table once in your application database:
+
+```sql
+CREATE TABLE users (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name text NOT NULL,
+    email text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+```
+
+`P`, `R`, `q`, and `tmpl` in the API fragments stand for your parameter type,
+row type, compiled query, and SQL template. The aggregate example additionally
+needs `books` and `user_books` tables; [dbt_test.go](dbt_test.go) contains their
+schema and executable usage.
 
 ## Quick start
 
@@ -249,3 +271,20 @@ For fully dynamic queries, use a query builder, or the `sqlc` codegen flow.
 ## License
 
 MIT
+
+## Run the package tests
+
+Requires Go 1.27+, a C compiler for `-race`, and a running Docker daemon
+(`docker info`). From the repository root:
+
+```bash
+cd postgres/dbt
+go test -race -count=1 ./...
+go vet ./...
+```
+
+Tests start `postgres:19beta3-alpine3.24` on a dynamically assigned port, apply
+their own schema, and clean up containers. The first run needs network access
+for dependencies and the image. Compose and `DATABASE_URL` are not used by the
+tests. See the [root guide](../../README.md#development-and-verification) for
+checks across all modules.
