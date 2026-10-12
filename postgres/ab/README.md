@@ -106,3 +106,31 @@ Run `go test -race ./...` and `go vet ./...` from this module. Repository tests 
 the shared Docker-backed `dbtest` utility with PostgreSQL and cover persistence,
 exact per-variant counts, concurrent duplicate enrollment/recording, both closure
 lock orderings, transaction rollback, validation, and error propagation.
+
+## Results dashboard
+
+Run the read-only UI from this module:
+
+```bash
+go run ./cmd/ab -demo
+# Open http://127.0.0.1:8092/?experiment=checkout-v1
+```
+
+Demo mode uses labeled sample results and never connects to PostgreSQL. To view
+stored experiments, apply the existing schema through your migrations, then run:
+
+```bash
+DATABASE_URL='postgres://john:123456@127.0.0.1:5432/dev?sslmode=disable' go run ./cmd/ab
+```
+
+Enter your experiment ID. The view shows counts, conversion rates, relative lift,
+and the treatment-minus-control confidence interval. Select 90%, 95%, or 99%
+confidence; active experiments are marked provisional. Missing denominators and
+insufficient samples display unavailable metrics rather than fabricated intervals.
+The command binds to loopback only and performs no migrations or data writes.
+
+Embed the dashboard in an existing application with `dashboard.New(repo)` (import
+`github.com/alextanhongpin/dbtx/postgres/ab/dashboard`). It accepts only a `Results`
+reader and owns no database resources. Mount it at `/` or use `http.StripPrefix`
+with a trailing-slash mount; place it behind your application's access controls
+when sharing private results. Assets are embedded; no frontend build is needed.
