@@ -1,9 +1,9 @@
 # postgres/durable TODO
 
-Plan for the module described in [docs/durable-design.md](../../docs/durable-design.md).
-Decisions are `D*`/`Q*` in [durable-decisions.md](../../docs/durable-decisions.md),
-failure tests are `FM-*` in [durable-failure-modes.md](../../docs/durable-failure-modes.md),
-scenarios are `S*` in [durable-scenarios.md](../../docs/durable-scenarios.md).
+Plan for the module described in [docs/design.md](docs/design.md).
+Decisions are `D*`/`Q*` in [decisions.md](docs/decisions.md),
+failure tests are `FM-*` in [failure-modes.md](docs/failure-modes.md),
+scenarios are `S*` in [scenarios.md](docs/scenarios.md).
 
 Status: phases 0–8 implemented and tested (`go test -race ./...` against
 PostgreSQL 16; 9 packages, 68 test functions). Remaining work is under

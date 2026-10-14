@@ -1,9 +1,9 @@
 # Durable module: decisions
 
-Companion to the [design](durable-design.md). Each entry records what was
+Companion to the [design](design.md). Each entry records what was
 decided, why, and what follows from it. All entries are decided; D12–D22 were
 made while implementing. Open follow-ups are tracked in the
-[TODO](../postgres/durable/TODO.md).
+[TODO](../TODO.md).
 
 ## Architecture
 
@@ -15,7 +15,7 @@ the existing modules.
 **Why.** Shared engine code needs one module (nested modules cannot share
 `internal`), and one token domain, expiry policy and error vocabulary cannot be
 retrofitted onto modules whose contracts differ
-([reuse limits](postgres-lease-module-reuse.md)).
+([reuse limits](../../../docs/postgres-lease-module-reuse.md)).
 
 **Consequences.** Behaviour proven in `lease`, `idempotent`, `jobs`, `inbox`
 and `outbox` is reimplemented; their READMEs and tests are the reference.

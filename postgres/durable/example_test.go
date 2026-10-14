@@ -1,7 +1,7 @@
 package durable_test
 
 // These examples compile with the package and show the main scenarios from
-// docs/durable-scenarios.md. They need a database, so they have no Output
+// docs/scenarios.md. They need a database, so they have no Output
 // comment and are not run by go test.
 
 import (

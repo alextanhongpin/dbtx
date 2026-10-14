@@ -20,10 +20,10 @@ one fencing-token sequence and one error vocabulary:
 | `cache` | Typed cache with stampede protection, stale-while-revalidate and versioned writes |
 | `durabletest` | Test helpers: isolated database per test, pause gates for fault injection, recording publisher |
 
-Design and rationale: [design](../../docs/durable-design.md),
-[decisions](../../docs/durable-decisions.md),
-[failure modes](../../docs/durable-failure-modes.md),
-[scenarios](../../docs/durable-scenarios.md), [TODO](TODO.md).
+Docs, in `docs/`: [learning guide](docs/learning-guide.md) (start here),
+[design](docs/design.md), [decisions](docs/decisions.md),
+[failure modes](docs/failure-modes.md), [scenarios](docs/scenarios.md).
+Plan and follow-ups: [TODO](TODO.md).
 
 ## Requirements and setup
 
@@ -164,7 +164,7 @@ go vet ./...
 exact point; `durable.Hooks` names the points (before heartbeat, before
 complete, after a remote call, after publish before advance, between steps).
 The failure-mode tests use them; see
-[failure modes](../../docs/durable-failure-modes.md#test-coverage).
+[failure modes](docs/failure-modes.md#test-coverage).
 
 ## Limits
 

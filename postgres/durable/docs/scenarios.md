@@ -1,11 +1,11 @@
 # Durable module: usage scenarios
 
-Companion to the [design](durable-design.md). These scenarios came from writing
+Companion to the [design](design.md). These scenarios came from writing
 client code against an early interface sketch and recording every missing API
 and unanswered question. Each row names the API that covers it in the design
 and the decision or failure-mode test that pins its behaviour. The main ones
 are written out in
-[example_test.go](../postgres/durable/example_test.go), which compiles with
+[example_test.go](../example_test.go), which compiles with
 the module.
 
 ## Locks and leases

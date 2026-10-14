@@ -1,8 +1,8 @@
 # Durable module: failure modes
 
-Companion to the [design](durable-design.md). Each row is a required test in the
+Companion to the [design](design.md). Each row is a required test in the
 fault-injection suite (`FM-n` IDs are referenced from the
-[TODO](../postgres/durable/TODO.md)). [Test coverage](#test-coverage) at the end
+[TODO](../TODO.md)). [Test coverage](#test-coverage) at the end
 lists which ones are automated. Tests assert on resource contents,
 receipts and broker records, not only on metadata.
 

@@ -1,14 +1,15 @@
 # PostgreSQL durable execution module design
 
 Status: implemented (experimental). See the
-[module README](../postgres/durable/README.md) for usage, and
-[TODO](../postgres/durable/TODO.md) for what is done and what remains. Where the
+[module README](../README.md) for usage, and
+[TODO](../TODO.md) for what is done and what remains. Where the
 implementation differs from the original plan, the
-[decisions](durable-decisions.md) record why (D12–D21).
+[decisions](decisions.md) record why (D12–D22). The [learning guide](learning-guide.md) explains the
+same material from first principles.
 
-Related: [decisions and open questions](durable-decisions.md),
-[failure modes](durable-failure-modes.md), [usage scenarios](durable-scenarios.md),
-[lease plan](distributed-lock-plan.md), and [lease reuse limits](postgres-lease-module-reuse.md).
+Related: [decisions](decisions.md),
+[failure modes](failure-modes.md), [usage scenarios](scenarios.md),
+[lease plan](../../../docs/distributed-lock-plan.md), and [lease reuse limits](../../../docs/postgres-lease-module-reuse.md).
 
 ## Purpose
 
@@ -28,7 +29,7 @@ are; see [Coexistence](#coexistence-with-existing-modules).
 
 ### Why one module instead of reusing the siblings
 
-The [lease reuse document](postgres-lease-module-reuse.md) found that separate
+The [lease reuse document](../../../docs/postgres-lease-module-reuse.md) found that separate
 nested modules cannot share an `internal` package, that token domains differ
 (per-key generation, per-job counter, global sequence), and that expiry policies
 differ (jobs may complete after expiry; leases may not). One module lets every
@@ -58,13 +59,13 @@ already works elsewhere; the existing modules' tests are the reference for what
 | Driver | Any `database/sql` driver; tests use `lib/pq`. The library itself only depends on `database/sql` (D3). |
 | PostgreSQL | 16+; `transaction_timeout` is set on 17+. IDs are UUIDv7 generated in Go |
 | Schema | Dedicated PostgreSQL schema `durable`, so tables never collide with the existing `dbtx.*` tables |
-| Queries | Hand-written SQL for now (D12); `repository/schema.sql` exported as `Schema` |
+| Queries | Generated with sqlc v1.31.1 from `repository/queries/*.sql` into `repository/postgres` (D12); `repository/schema.sql` exported as `Schema` |
 | Status columns | `text` with `CHECK` constraints instead of enum types, so the schema can be reapplied (the existing modules cannot) |
 | Installation | Constructors never run DDL. Versioned migration files are embedded and exported for the application's migration tool. |
 | Clocks | PostgreSQL decides expiry (`clock_timestamp()` after taking the row lock). Go's monotonic clock bounds local deadlines. |
 
 SQLSTATE codes are read through a small interface, so the library imports no
-driver. See [decisions](durable-decisions.md#d3-driver).
+driver. See [decisions](decisions.md#d3-driver).
 
 ## Package layout
 
@@ -82,10 +83,13 @@ postgres/durable/               package durable: errors, Permanent/RetryAfter/Ba
   cache/                        typed cache, compute leases, versioned writes
   durabletest/                  per-test database, pause gate, recording publisher
   internal/engine/              lease keeper: heartbeat, watchdog, supervision
-  internal/pg/                  SQL helpers: SQLSTATE, timeouts, UUID scanning
+  internal/pg/                  SQL helpers: SQLSTATE, timeouts, IDs, nullable JSON
   repository/
-    schema.sql                  full schema (also exported as Schema)
+    schema.sql                  full schema, incl. durable.lease_* (exported as Schema)
     migrations/                 0001_init.sql (embed.FS)
+    queries/                    sqlc input, one file per feature
+    postgres/                   sqlc output (generated, do not edit)
+  docs/                         design, decisions, failure modes, scenarios, learning guide
 ```
 
 Feature packages depend on `internal/engine` and the generated queries; they do
@@ -95,39 +99,53 @@ example the inbox's store-and-forward mode submits a job).
 ## Building blocks
 
 Every feature is assembled from the same eight primitives, implemented once in
-`internal/engine` and `internal/retry`:
+the shared `durable.lease_*` SQL functions, `internal/engine` and the root
+package (retry policy):
 
 | # | Primitive | Behaviour |
 | --- | --- | --- |
 | P1 | Lease | Owner ID, fencing token and expiry on a row; heartbeat every TTL/3; local watchdog at request start + TTL − TTL/6; loss cancels the work context with a cause |
-| P2 | Fenced write | Every mutation after a claim matches owner and token and requires an unexpired lease, in the same statement |
+| P2 | Fenced write | Every mutation after a claim goes through `durable.lease_lock` or `lease_finish`: owner, token and an unexpired lease; owner and token suffice while the writer holds the row lock (D7, D20) |
 | P3 | Dedup key | `INSERT … ON CONFLICT DO NOTHING`, then read; request equality compared as `jsonb`; stored outcome replayed |
 | P4 | Retry state machine | `status`, `attempts` (counted at claim), `max_attempts`, `run_at`, `last_error`; backoff with jitter; error classification |
-| P5 | Claim next | `FOR UPDATE SKIP LOCKED` selection and lease grant in one statement |
+| P5 | Claim next | The feature selects candidates with `FOR UPDATE SKIP LOCKED`; `durable.lease_grant` takes them in the same statement |
 | P6 | Steps | Named checkpoints and remote steps with saved request, stable remote key and saved response |
-| P7 | Wakeup | `NOTIFY` on commit with a polling fallback |
+| P7 | Wakeup | Polling; `LISTEN/NOTIFY` with a polling fallback is a follow-up (Q10) |
 | P8 | Retention | Batched purge per table with per-feature windows |
 
-### Queue-row contract
+### Lease column contract
 
-Any table processed by the engine carries these columns, so claim, heartbeat,
-complete and fail logic is written once:
+Every table whose rows are claimed (executions, outbox events, outbox streams,
+in-flight idempotency keys) has these fixed column names, so claim, heartbeat,
+finish and expiry are written once as PostgreSQL functions (D20):
 
 ```text
-status            text      -- feature-specific set, always including the terminal states
-attempts          int       -- incremented at claim, so crashes consume attempts
-max_attempts      int
-run_at            timestamptz
-owner_id          uuid      -- random per claim; authorizes heartbeat/complete
-token             bigint    -- fencing token; see "Fencing tokens"
-lease_expires_at  timestamptz
-last_error        text
+id                uuid
+status            text         -- feature-specific set, always including the terminal states
+owner_id          text         -- random per claim; NULL when nobody owns the row
+token             bigint       -- fencing token; see "Fencing tokens"
+lease_expires_at  timestamptz  -- NULL means no lease (D21)
 updated_at        timestamptz
+run_at            timestamptz  -- when used
+attempts          int          -- when used; incremented at claim, so crashes consume attempts
+max_attempts      int          -- when used
+last_error        text         -- when used
 ```
 
-Each table has its own claim/renew/finish SQL with the same shape; the shared
-`internal/engine` keeper owns heartbeats, the local deadline and loss handling,
-and every feature passes it a renew function for its table.
+| Function | Does |
+| --- | --- |
+| `durable.lease_grant(table, ids, owner, ttl, ready, running, count_attempt)` | Takes candidate rows, gives each a new token, optionally counts an attempt |
+| `durable.lease_renew(...)` | Heartbeat: owner, token and an unexpired lease |
+| `durable.lease_lock(...)` | Locks the row and checks ownership before the feature writes its own columns in the same transaction |
+| `durable.lease_finish(...)` | Ends the lease with a new status; optional `run_at` delay, error and attempt adjustment |
+| `durable.lease_expire(...)` | Reaper: takes over rows whose lease expired |
+
+Features choose candidates and write their own columns in sqlc queries; the
+functions decide ownership. `durable.lease_contract(table)` lists missing
+columns. In Go, `internal/engine.Row` wraps the calls, and the
+`internal/engine` keeper owns heartbeats, the local deadline and loss
+handling. Resource leases and cache compute leases keep their own functions
+because their token domains differ (D5).
 
 ### Fencing tokens
 
@@ -138,7 +156,7 @@ and every feature passes it a renew function for its table.
 
 After a failover or restore, `durable.advance_fencing()` moves both domains
 past anything that may have been issued (see
-[D6](durable-decisions.md#d6-fencing-after-failover-or-restore)). Resource tables written
+[D6](decisions.md#d6-fencing-after-failover-or-restore)). Resource tables written
 under a lease store the token and accept `token >= stored` for repeat writes by
 the same owner and reject anything older.
 
@@ -167,21 +185,20 @@ and split work with checkpoints. Remote steps (`RunStep`) are only allowed in
 
 ## Tables
 
-All tables live in schema `durable`. Columns marked *queue* are the queue-row
-contract above.
+All tables live in schema `durable`. Rows marked *lease* carry the lease column contract above.
 
 | Table | Key | Purpose |
 | --- | --- | --- |
 | `leases` | `(namespace, key)` | Resource leases; generation retained forever |
-| `fencing` | singleton | Current epoch; `fencing_seq` sequence beside it |
-| `idempotency_keys` | `(scope, key)` | Request JSON, status, short lease for in-flight synchronous work, stored response envelope, optional `execution_id`, `expires_at` |
-| `executions` | `id` (uuidv7) | Kind, queue, payload, payload version, mode, output, cancel flag, *queue* |
+| `fencing_seq` | sequence | Global fencing tokens; `durable.advance_fencing()` moves it past a failover (D6) |
+| `idempotency_keys` | `(scope, key)` | Request JSON, status, short lease for in-flight synchronous work, stored response envelope, optional `execution_id`, `expires_at`, *lease* |
+| `executions` | `id` (uuidv7) | Kind, queue, payload, payload version, mode, output, cancel flag, *lease* |
 | `execution_steps` | `(execution_id, name)` | Checkpoint data or remote step request/response/remote key, status |
 | `execution_attempts` | `(execution_id, attempt)` | Optional audit: owner, token, start, finish, error |
-| `outbox_events` | `id`; unique `(aggregate_key, seq)` | Topic, type, headers, payload, `published_at`; *queue* used only by unordered events |
-| `outbox_heads` | `aggregate_key` | Producer-side `head_seq` counter (row lock serializes producers) |
-| `outbox_streams` | `aggregate_key` | Relay-side `last_published_seq`, policy state, *queue* |
-| `inbox_messages` | `(source, message_id)` | Dedup record, optional aggregate key, seq or version, payload, *queue* for store-and-forward |
+| `outbox_events` | `id`; unique `(topic, aggregate_key, seq)` | Topic, type, headers, payload, `published_at`; *lease* used only by unordered events |
+| `outbox_heads` | `(topic, aggregate_key)` | Producer-side `head_seq` counter (row lock serializes producers) |
+| `outbox_streams` | `(topic, aggregate_key)` | Relay-side `last_published_seq`, policy state, *lease* |
+| `inbox_messages` | `(source, message_id)` | Dedup record, optional aggregate key, seq or version, status, and the `execution_id` of a store-and-forward job |
 | `inbox_streams` | `(source, aggregate_key)` | `last_applied_seq` or `last_version`; never purged while the stream lives |
 | `inbox_pending` | `(source, aggregate_key, seq)` | Out-of-order messages waiting for a gap to fill |
 | `schedules` | `name` | Spec, time zone, kind, input, next tick, missed-run and overlap policies, paused flag |
@@ -208,7 +225,7 @@ contract above.
 Synchronous API for HTTP or RPC handlers:
 
 ```text
-claim, err := keys.Begin(ctx, Request{Scope, Key, Body, Retention, InFlightTTL})
+claim, err := k.Begin(ctx, keys.Request{Scope, Key, Body})   // InFlightTTL, Retention in keys.Config
   → ErrRequestMismatch | claim.State ∈ {Acquired, InFlight, Completed}
 Completed → replay claim.Response (status, headers, body)
 InFlight  → caller returns 409 with Retry-After
@@ -218,7 +235,7 @@ Acquired  → do work; then, inside the business transaction:
             or claim.Release(ctx)                 transient: allow immediate retry
 ```
 
-The key row carries its own short lease (`InFlightTTL`), so a request that
+The key row carries its own short lease (`Config.InFlightTTL`), renewed while held, so a request that
 crashes does not leave the key in flight forever. `Begin` joins no transaction;
 `Complete` must run inside the caller's transaction (it returns `ErrNotInTx`
 otherwise). Scope is mandatory, fixing the global-key limitation of
@@ -233,7 +250,8 @@ otherwise). Scope is mandatory, fixing the global-key limitation of
   retry policy, lease TTL, max attempts, payload decoder.
 - `Execution` exposes the job, the lease, `Checkpoint`, `RunStep`, `Finalize`,
   and typed payload access.
-- `RunStep[Req, Resp](ctx, exec, name, build, call)`: on first run, builds the
+- `x.RunStep(ctx, name, build, call)`, a generic method with `Req` and `Resp`
+  inferred from `build` and `call` (D22): on first run, builds the
   request once, saves it with remote key `execution_id:name`, calls, saves the
   response; on retry, resends the saved request with the same key; when done,
   returns the saved response without calling.
@@ -291,18 +309,19 @@ the stream is live.
 
 ### Scheduler (`schedule`)
 
-Each tick submits a job keyed `schedule:<name>:<tick time>`, so several scheduler
+Each tick submits a job keyed `schedule:<name>@<tick, RFC3339Nano>`, so several scheduler
 instances dedup to one job. Missed-run policy (`All`, `Latest`, `None`) and
 overlap policy (`Skip`, `Queue`, `Allow`) are per schedule. Time zones use IANA
 names. Schedules can be paused.
 
 ### Cache (`cache`)
 
-Typed `GetOrCompute` with TTL plus stale-while-revalidate: one caller computes
-under a compute lease while others get the stale value or wait (configurable).
-Writes carry the compute token and are rejected if a newer version exists.
-`InvalidateTx` deletes inside the caller's transaction so invalidation commits
-with the change that caused it. The table is UNLOGGED; contents are disposable.
+Generic methods `c.Get[T]`, `c.Set` and `c.GetOrCompute` (D22) with TTL plus
+stale-while-revalidate: one caller computes under a compute lease while others
+get the stale value or wait (configurable). Writes carry the compute token and
+are rejected if a newer version exists. `Delete` and `InvalidateTx` leave a
+versioned tombstone (D17); `InvalidateTx` runs inside the caller's transaction
+so invalidation commits with the change that caused it. The table is UNLOGGED; contents are disposable.
 
 ## Cross-cutting
 
@@ -338,7 +357,7 @@ with the change that caused it. The table is UNLOGGED; contents are disposable.
   and modules are untouched and keep working.
 - Each feature reaches parity against the matching module's documented
   behaviour and tests before it is recommended; differences are recorded in
-  [decisions](durable-decisions.md).
+  [decisions](decisions.md).
 - A migration guide per module (in-flight work, token history, retention) is a
   separate, later deliverable. No automatic migration is planned.
 - The root README module table and the repository skills are updated only when
