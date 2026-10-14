@@ -86,7 +86,7 @@ func execute(ctx context.Context, args []string, out, errOut io.Writer) error {
 		}
 		if *probabilities != "" {
 			p := []float64{}
-			for _, s := range strings.Split(*probabilities, ",") {
+			for s := range strings.SplitSeq(*probabilities, ",") {
 				v, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
 				if err != nil {
 					return errors.New("invalid probability")
@@ -115,7 +115,7 @@ func execute(ctx context.Context, args []string, out, errOut io.Writer) error {
 			}
 		}
 		seen := map[string]bool{}
-		for _, name := range strings.Split(*policies, ",") {
+		for name := range strings.SplitSeq(*policies, ",") {
 			name = strings.TrimSpace(name)
 			if name == "" {
 				return errors.New("policy name must be nonempty")
