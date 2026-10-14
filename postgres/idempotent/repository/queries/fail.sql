@@ -1,19 +1,11 @@
 -- name: Fail :one
-   update dbtx.idempotency_keys
-      set status = 'failed',
-          response = sqlc.arg(response)::jsonb,
-          error = sqlc.arg(error)::text,
-          lease_owner = null,
-          lease_expires_at = null,
-          retry_after = null,
-          completed_at = clock_timestamp(),
-          expires_at = greatest(
-            expires_at,
-            clock_timestamp()
-          + interval '1 second' * sqlc.arg(ttl_seconds)::float8
-          ),
-          updated_at = clock_timestamp()
-    where idempotency_key = sqlc.arg(idempotency_key)::text
-      and fencing_token = sqlc.arg(fencing_token)::bigint
-      and status = 'in_progress'
-returning fencing_token;
+with retry_args as (
+    select sqlc.arg(response)::jsonb as response,
+           sqlc.arg(error)::text as error,
+           sqlc.arg(ttl_seconds)::float8 as ttl_seconds,
+           sqlc.arg(idempotency_key)::text as idempotency_key,
+           sqlc.arg(fencing_token)::bigint as fencing_token
+)
+select fencing_token::bigint from dbtx.idempotent_retry(
+    (select idempotency_key from retry_args), 'fail', (select fencing_token from retry_args),
+    jsonb_build_object('response', (select response from retry_args), 'error', (select error from retry_args), 'ttl_seconds', (select ttl_seconds from retry_args)));

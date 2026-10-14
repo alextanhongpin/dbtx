@@ -16,11 +16,15 @@ The inbox pattern is the receiving side of the outbox. Incoming messages are sto
 
 ## Schema
 
-The schema lives in [`repository/schema.sql`](repository/schema.sql) and is exported as `repository.Schema`. Apply it once, or copy it into your migrations:
+`repository.Schema` includes the [base tables](repository/schema.sql), shared retry functions and [lifecycle adapter](repository/retry.sql). Apply it once, or copy it into your migrations:
 
 ```go
 _, err := db.ExecContext(ctx, repository.Schema)
 ```
+
+For existing tables, apply `repository.Migrations` in one transaction before
+deploying new workers. It installs the [shared lifecycle](../retry/README.md)
+without rewriting work rows; see that guide for permissions and rollout.
 
 The table and indexes are created with `if not exists`, but the `dbtx.inbox_status` enum is not: Postgres has no `create type if not exists`, and sqlc cannot parse the `DO` block that would emulate it. Running the schema twice fails on that statement.
 

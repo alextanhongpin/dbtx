@@ -12,13 +12,12 @@ import (
 )
 
 const lock = `-- name: Lock :execrows
-update dbtx.inbox
-   set available_at = now()
-     + interval '1 second' * $1::float8,
-       updated_at = now()
- where id = $2::uuid
-   and locked_by = $3::text
-   and status = 'processing'
+with retry_args as (
+    select $1::float8 as lease_seconds,
+           $2::uuid as id,
+           $3::text as locked_by
+)
+select 1 from dbtx.inbox_retry((select id from retry_args), 'renew', (select locked_by from retry_args), jsonb_build_object('lease_seconds', (select lease_seconds from retry_args)))
 `
 
 type LockParams struct {

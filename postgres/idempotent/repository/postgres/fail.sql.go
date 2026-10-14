@@ -12,24 +12,16 @@ import (
 )
 
 const fail = `-- name: Fail :one
-   update dbtx.idempotency_keys
-      set status = 'failed',
-          response = $1::jsonb,
-          error = $2::text,
-          lease_owner = null,
-          lease_expires_at = null,
-          retry_after = null,
-          completed_at = clock_timestamp(),
-          expires_at = greatest(
-            expires_at,
-            clock_timestamp()
-          + interval '1 second' * $3::float8
-          ),
-          updated_at = clock_timestamp()
-    where idempotency_key = $4::text
-      and fencing_token = $5::bigint
-      and status = 'in_progress'
-returning fencing_token
+with retry_args as (
+    select $1::jsonb as response,
+           $2::text as error,
+           $3::float8 as ttl_seconds,
+           $4::text as idempotency_key,
+           $5::bigint as fencing_token
+)
+select fencing_token::bigint from dbtx.idempotent_retry(
+    (select idempotency_key from retry_args), 'fail', (select fencing_token from retry_args),
+    jsonb_build_object('response', (select response from retry_args), 'error', (select error from retry_args), 'ttl_seconds', (select ttl_seconds from retry_args)))
 `
 
 type FailParams struct {

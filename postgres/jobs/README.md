@@ -13,8 +13,9 @@ Requires Go 1.27+ and PostgreSQL 18+ (`uuidv7()` is used by the schema). Use
 go get github.com/alextanhongpin/dbtx/postgres/jobs github.com/lib/pq
 ```
 
-Apply [repository/schema.sql](repository/schema.sql), exported as
-`repository.Schema`, through your migration system before submitting jobs:
+Apply `repository.Schema` through your migration system before submitting jobs.
+It includes the base [tables](repository/schema.sql), shared retry functions and
+[lifecycle adapter](repository/retry.sql):
 
 ```go
 if _, err := db.ExecContext(ctx, repository.Schema); err != nil {
@@ -26,6 +27,10 @@ Here `db` is a connected `*sql.DB` and `ctx` is a context. The schema guards
 repeat creation of its enum; existing installations still need migrations for
 schema changes. Queries and worker operations use autocommit; do not run a
 worker or janitor inside a `dbtx` transaction.
+
+Existing installations should apply `repository.Migrations` in one transaction
+before deploying new workers. It installs the [shared lifecycle](../retry/README.md)
+without rewriting work rows; see that guide for permissions and rollout.
 
 ## Submit and process jobs
 

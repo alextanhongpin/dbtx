@@ -11,26 +11,24 @@ import (
 )
 
 const poll = `-- name: Poll :many
-with next as (
+with retry_args as (
+    select $1::text as locked_by,
+           $2::float8 as lease_seconds,
+           $3::int as batch_size
+), next as (
     select id
       from dbtx.outbox
      where status in ('pending', 'processing')
        and available_at <= now()
        and attempts < max_attempts
   order by available_at, id
-     limit $3
+     limit (select batch_size from retry_args)
        for update skip locked
 )
-   update dbtx.outbox o
-      set status = 'processing'::dbtx.outbox_status,
-          locked_by = $1,
-          updated_at = now(),
-          available_at = now()
-        + interval '1 second' * $2::float8,
-          attempts = o.attempts + 1
-     from next
-    where o.id = next.id
-returning o.id, o.aggregate_type, o.aggregate_id, o.event_type, o.payload, o.status, o.attempts, o.max_attempts, o.available_at, o.locked_by, o.last_error, o.created_at, o.updated_at, o.processed_at
+select claimed.id, claimed.aggregate_type, claimed.aggregate_id, claimed.event_type, claimed.payload, claimed.status, claimed.attempts, claimed.max_attempts, claimed.available_at, claimed.locked_by, claimed.last_error, claimed.created_at, claimed.updated_at, claimed.processed_at
+  from next
+ cross join lateral dbtx.outbox_retry(next.id, 'claim', (select locked_by from retry_args),
+     jsonb_build_object('lease_seconds', (select lease_seconds from retry_args))) claimed
 `
 
 type PollParams struct {

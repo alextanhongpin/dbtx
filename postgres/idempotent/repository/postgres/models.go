@@ -96,3 +96,17 @@ type DbtxIdempotencyKey struct {
 	RetryAfter     sql.NullTime
 	ExpiresAt      time.Time
 }
+
+type DbtxIdempotentRetryState struct {
+	RetryKey       string
+	Status         DbtxIdempotencyKeyStatus
+	Attempts       int32
+	MaxAttempts    sql.NullInt32
+	LeaseOwner     sql.NullString
+	FencingToken   int64
+	RetryAt        sql.NullTime
+	LeaseExpiresAt sql.NullTime
+	LastError      sql.NullString
+	CompletedAt    sql.NullTime
+	UpdatedAt      time.Time
+}

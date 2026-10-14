@@ -13,16 +13,14 @@ import (
 )
 
 const nack = `-- name: Nack :execrows
-update dbtx.outbox
-   set status = (case when $1::bool then 'dead' else 'pending' end)::dbtx.outbox_status,
-       available_at = now()
-     + interval '1 second' * $2::float8,
-       locked_by = null,
-       last_error = $3,
-       updated_at = now()
- where id = $4
-   and locked_by = $5
-   and status = 'processing'
+with retry_args as (
+    select $1::bool as dead,
+           $2::float8 as delay_seconds,
+           $3::text as last_error,
+           $4::uuid as id,
+           $5::text as locked_by
+)
+select 1 from dbtx.outbox_retry((select id from retry_args), 'nack', (select locked_by from retry_args), jsonb_build_object('force', (select dead from retry_args), 'error', (select last_error from retry_args), 'delay_seconds', (select delay_seconds from retry_args)))
 `
 
 type NackParams struct {

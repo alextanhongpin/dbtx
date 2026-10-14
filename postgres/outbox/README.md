@@ -14,11 +14,15 @@ The outbox pattern lets you write business data and domain events in the same da
 
 ## Schema
 
-The schema lives in [`repository/schema.sql`](repository/schema.sql) and is exported as `repository.Schema`. Apply it once through your migration system:
+`repository.Schema` includes the [base tables](repository/schema.sql), shared retry functions and [lifecycle adapter](repository/retry.sql). Apply it once through your migration system:
 
 ```go
 _, err := db.ExecContext(ctx, repository.Schema)
 ```
+
+For existing tables, apply `repository.Migrations` in one transaction before
+deploying new workers. It installs the [shared lifecycle](../retry/README.md)
+without rewriting work rows; see that guide for permissions and rollout.
 
 The enum uses `CREATE TYPE` without a duplicate guard, so running this schema
 twice fails. Existing installations need explicit versioned migrations;

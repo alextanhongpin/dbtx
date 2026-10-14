@@ -1,11 +1,7 @@
 -- name: Release :execrows
 -- Returns a leased message that was never handled, and refunds its attempt.
-update dbtx.inbox
-   set status = 'pending'::dbtx.inbox_status,
-       attempts = attempts - 1,
-       locked_by = null,
-       available_at = now(),
-       updated_at = now()
- where id = sqlc.arg(id)::uuid
-   and locked_by = sqlc.arg(locked_by)::text
-   and status = 'processing';
+with retry_args as (
+    select sqlc.arg(id)::uuid as id,
+           sqlc.arg(locked_by)::text as locked_by
+)
+select 1 from dbtx.inbox_retry((select id from retry_args), 'release', (select locked_by from retry_args), '{}'::jsonb);

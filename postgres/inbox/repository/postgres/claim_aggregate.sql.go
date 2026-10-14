@@ -10,7 +10,11 @@ import (
 )
 
 const claimByAggregateID = `-- name: ClaimByAggregateID :many
-with next as (
+with retry_args as (
+    select $1::int as "limit",
+           $2::text as locked_by,
+           $3::float8 as lease_seconds
+), next as (
     select i.id
       from dbtx.inbox i
      where i.status in ('pending', 'processing')
@@ -34,19 +38,13 @@ with next as (
                 and busy.available_at > now()
            )
   order by i.available_at, i.id
-     limit $1
+     limit (select "limit" from retry_args)
        for update SKIP LOCKED
 )
-   update dbtx.inbox i
-      set status = 'processing'::dbtx.inbox_status,
-          locked_by = $2::text,
-          available_at = now()
-        + interval '1 second' * $3::float8,
-          attempts = i.attempts + 1,
-          updated_at = now()
-     from next
-    where i.id = next.id
-returning i.id, i.source, i.message_id, i.message_type, i.aggregate_id, i.payload, i.status, i.attempts, i.max_attempts, i.available_at, i.locked_by, i.last_error, i.received_at, i.processed_at, i.updated_at
+select claimed.id, claimed.source, claimed.message_id, claimed.message_type, claimed.aggregate_id, claimed.payload, claimed.status, claimed.attempts, claimed.max_attempts, claimed.available_at, claimed.locked_by, claimed.last_error, claimed.received_at, claimed.processed_at, claimed.updated_at
+  from next
+ cross join lateral dbtx.inbox_retry(next.id, 'claim', (select locked_by from retry_args),
+     jsonb_build_object('lease_seconds', (select lease_seconds from retry_args))) claimed
 `
 
 type ClaimByAggregateIDParams struct {

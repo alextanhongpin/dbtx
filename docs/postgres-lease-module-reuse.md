@@ -1,6 +1,8 @@
 # Lease reuse across PostgreSQL modules
 
-Status: design constraints and future options; no implementation or migration is authorized by this document.
+Status: resource-lease design constraints and future options. The [shared retry
+lifecycle](../postgres/retry/README.md) now implements retry transitions over
+module-owned rows; it does not introduce a shared resource-lease table.
 
 Related: [lease implementation plan](distributed-lock-plan.md) and [integration scenarios](postgres-lease-examples.md).
 

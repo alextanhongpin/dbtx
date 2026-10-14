@@ -12,15 +12,7 @@ import (
 )
 
 const requeue = `-- name: Requeue :execrows
-update dbtx.outbox
-   set status = 'pending'::dbtx.outbox_status,
-       attempts = 0,
-       available_at = now(),
-       locked_by = null,
-       last_error = null,
-       updated_at = now()
- where id = $1
-   and status = 'dead'
+select 1 from dbtx.outbox_retry($1::uuid, 'requeue', null::text, '{}'::jsonb)
 `
 
 func (q *Queries) Requeue(ctx context.Context, id uuid.UUID) (int64, error) {

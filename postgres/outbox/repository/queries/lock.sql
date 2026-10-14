@@ -3,10 +3,9 @@
 -- the handler's transaction ends. Poll skips locked rows, and Dead waits for
 -- them, so the message is not delivered again while it is being handled, even
 -- if the lease expires meanwhile.
-update dbtx.outbox
-   set available_at = now()
-     + interval '1 second' * sqlc.arg(lease_seconds)::float8,
-       updated_at = now()
- where id = sqlc.arg(id)
-   and locked_by = sqlc.arg(locked_by)::text
-   and status = 'processing';
+with retry_args as (
+    select sqlc.arg(lease_seconds)::float8 as lease_seconds,
+           sqlc.arg(id)::uuid as id,
+           sqlc.arg(locked_by)::text as locked_by
+)
+select 1 from dbtx.outbox_retry((select id from retry_args), 'renew', (select locked_by from retry_args), jsonb_build_object('lease_seconds', (select lease_seconds from retry_args)));

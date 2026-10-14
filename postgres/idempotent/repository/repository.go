@@ -13,7 +13,20 @@ import (
 )
 
 //go:embed schema.sql
-var Schema string
+var baseSchema string
+
+//go:embed shared_retry.sql
+var sharedRetrySchema string
+
+//go:embed retry.sql
+var lifecycleSchema string
+
+// Schema installs the module and the shared retry lifecycle.
+var Schema = sharedRetrySchema + baseSchema + lifecycleSchema
+
+// Migrations upgrades an existing module without rewriting its work rows.
+// Apply with workers stopped, in one transaction, before deploying new workers.
+var Migrations = sharedRetrySchema + lifecycleSchema
 
 var _ idempotent.Repository = (*Repository)(nil)
 

@@ -10,48 +10,18 @@ import (
 )
 
 const nack = `-- name: Nack :one
-   update dbtx.idempotency_keys
-      set status = (
-  case
-       when attempts >= $1::int
-       then 'failed'
-       else 'retryable'
-  end)::dbtx.idempotency_key_status,
-          error = $2::text,
-          lease_owner = null,
-          lease_expires_at = null,
-          retry_after = case
-                             when attempts >= $1::int
-                                  or $3::float8 <= 0
-                                  or $4::float8 <= 0
-                             then null
-                             else clock_timestamp() + interval '1 second' * case
-                                    when $4::float8 >= $3::float8
-                                    then $3::float8
-                                    else least(
-                                      $3::float8,
-                                      $4::float8
-                                        * power(2::float8, least(
-                                            attempts - 1,
-                                            ceil(log(2::numeric, $3::numeric / $4::numeric)
-                                          )::int)::float8)
-                                    )
-                                  end
-                        end,
-          completed_at = case
-                              when attempts >= $1::int
-                              then clock_timestamp()
-                         end,
-          expires_at = greatest(
-            expires_at,
-            clock_timestamp()
-          + interval '1 second' * $5::float8
-          ),
-          updated_at = clock_timestamp()
-    where idempotency_key = $6::text
-      and fencing_token = $7::bigint
-      and status = 'in_progress'
-returning fencing_token
+with retry_args as (
+    select $1::int as max_attempts,
+           $2::text as error,
+           $3::float8 as max_backoff_seconds,
+           $4::float8 as base_backoff_seconds,
+           $5::float8 as ttl_seconds,
+           $6::text as idempotency_key,
+           $7::bigint as fencing_token
+)
+select fencing_token::bigint from dbtx.idempotent_retry(
+    (select idempotency_key from retry_args), 'nack', (select fencing_token from retry_args),
+    jsonb_build_object('error', (select error from retry_args), 'max_attempts', (select max_attempts from retry_args), 'base_backoff_seconds', (select base_backoff_seconds from retry_args), 'max_backoff_seconds', (select max_backoff_seconds from retry_args), 'ttl_seconds', (select ttl_seconds from retry_args)))
 `
 
 type NackParams struct {

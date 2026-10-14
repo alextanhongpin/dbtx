@@ -61,18 +61,15 @@ func (q *Queries) ArchiveOldJobs(ctx context.Context, arg ArchiveOldJobsParams) 
 }
 
 const complete = `-- name: Complete :one
-UPDATE dbtx.jobs
-SET status       = 'success',
-    response     = $1::jsonb,
-    error        = NULL,
-    worker_id    = NULL,
-    visible_at   = clock_timestamp(),
-    processed_at = clock_timestamp()
-WHERE id            = $2
-  AND status        = 'running'
-  AND fencing_token = $3
-  AND worker_id     = $4::text
-RETURNING id, idempotency_key, request, response, status, worker_id, fencing_token, attempts, max_attempts, error, visible_at, processed_at, created_at, updated_at
+with retry_args as (
+    select $1::jsonb as response,
+           $2::uuid as id,
+           $3::bigint as fencing_token,
+           $4::text as worker_id
+)
+SELECT transitioned.id, transitioned.idempotency_key, transitioned.request, transitioned.response, transitioned.status, transitioned.worker_id, transitioned.fencing_token, transitioned.attempts, transitioned.max_attempts, transitioned.error, transitioned.visible_at, transitioned.processed_at, transitioned.created_at, transitioned.updated_at FROM dbtx.jobs_retry((select id from retry_args), 'complete',
+    (select worker_id from retry_args), (select fencing_token from retry_args),
+    jsonb_build_object('response', (select response from retry_args))) transitioned
 `
 
 type CompleteParams struct {
@@ -167,17 +164,15 @@ func (q *Queries) Create(ctx context.Context, arg CreateParams) (*CreateRow, err
 }
 
 const fail = `-- name: Fail :one
-UPDATE dbtx.jobs
-SET status       = 'failed',
-    error        = $1::text,
-    worker_id    = NULL,
-    visible_at   = clock_timestamp(),
-    processed_at = clock_timestamp()
-WHERE id            = $2
-  AND status        = 'running'
-  AND fencing_token = $3
-  AND worker_id     = $4::text
-RETURNING id, idempotency_key, request, response, status, worker_id, fencing_token, attempts, max_attempts, error, visible_at, processed_at, created_at, updated_at
+with retry_args as (
+    select $1::text as error,
+           $2::uuid as id,
+           $3::bigint as fencing_token,
+           $4::text as worker_id
+)
+SELECT transitioned.id, transitioned.idempotency_key, transitioned.request, transitioned.response, transitioned.status, transitioned.worker_id, transitioned.fencing_token, transitioned.attempts, transitioned.max_attempts, transitioned.error, transitioned.visible_at, transitioned.processed_at, transitioned.created_at, transitioned.updated_at FROM dbtx.jobs_retry((select id from retry_args), 'fail',
+    (select worker_id from retry_args), (select fencing_token from retry_args),
+    jsonb_build_object('error', (select error from retry_args))) transitioned
 `
 
 type FailParams struct {
@@ -217,27 +212,23 @@ func (q *Queries) Fail(ctx context.Context, arg FailParams) (*DbtxJob, error) {
 }
 
 const findAvailableJobs = `-- name: FindAvailableJobs :many
-WITH picked AS MATERIALIZED (
+with retry_args as (
+    select $1::text as worker_id,
+           $2::float8 as lease_seconds,
+           $3::int as "limit"
+), picked AS MATERIALIZED (
     SELECT sub.id
     FROM dbtx.jobs sub
     WHERE sub.status IN ('queued', 'running', 'error')   -- 'running' here = expired lease
       AND sub.visible_at <= NOW()
       AND sub.attempts < sub.max_attempts
     ORDER BY sub.visible_at
-    LIMIT $3::int
+    LIMIT (select "limit" from retry_args)
     FOR UPDATE SKIP LOCKED
 )
-UPDATE dbtx.jobs
-SET status        = 'running',
-    fencing_token = jobs.fencing_token + 1,   -- new owner => older tokens are now invalid
-    worker_id     = $1::text,
-    visible_at    = clock_timestamp() + (INTERVAL '1 second' * $2::float8),
-    attempts      = jobs.attempts + 1
-    -- error is intentionally NOT cleared: if this attempt's worker crashes, the
-    -- previous failure reason is still available. Complete clears it on success.
-FROM picked
-WHERE jobs.id = picked.id
-RETURNING jobs.id, jobs.idempotency_key, jobs.request, jobs.response, jobs.status, jobs.worker_id, jobs.fencing_token, jobs.attempts, jobs.max_attempts, jobs.error, jobs.visible_at, jobs.processed_at, jobs.created_at, jobs.updated_at
+SELECT claimed.id, claimed.idempotency_key, claimed.request, claimed.response, claimed.status, claimed.worker_id, claimed.fencing_token, claimed.attempts, claimed.max_attempts, claimed.error, claimed.visible_at, claimed.processed_at, claimed.created_at, claimed.updated_at FROM picked
+CROSS JOIN LATERAL dbtx.jobs_retry(picked.id, 'claim', (select worker_id from retry_args), null::bigint,
+    jsonb_build_object('lease_seconds', (select lease_seconds from retry_args))) claimed
 `
 
 type FindAvailableJobsParams struct {
@@ -296,13 +287,15 @@ func (q *Queries) FindAvailableJobs(ctx context.Context, arg FindAvailableJobsPa
 }
 
 const heartbeat = `-- name: Heartbeat :one
-UPDATE dbtx.jobs
-SET visible_at = clock_timestamp() + (INTERVAL '1 second' * $1::float8)
-WHERE id            = $2
-  AND status        = 'running'
-  AND fencing_token = $3
-  AND worker_id     = $4::text
-RETURNING id, idempotency_key, request, response, status, worker_id, fencing_token, attempts, max_attempts, error, visible_at, processed_at, created_at, updated_at
+with retry_args as (
+    select $1::float8 as lease_seconds,
+           $2::uuid as id,
+           $3::bigint as fencing_token,
+           $4::text as worker_id
+)
+SELECT transitioned.id, transitioned.idempotency_key, transitioned.request, transitioned.response, transitioned.status, transitioned.worker_id, transitioned.fencing_token, transitioned.attempts, transitioned.max_attempts, transitioned.error, transitioned.visible_at, transitioned.processed_at, transitioned.created_at, transitioned.updated_at FROM dbtx.jobs_retry((select id from retry_args), 'renew',
+    (select worker_id from retry_args), (select fencing_token from retry_args),
+    jsonb_build_object('lease_seconds', (select lease_seconds from retry_args))) transitioned
 `
 
 type HeartbeatParams struct {
@@ -374,14 +367,16 @@ func (q *Queries) PurgeOldJobKeys(ctx context.Context, arg PurgeOldJobKeysParams
 }
 
 const reapExhausted = `-- name: ReapExhausted :execrows
-UPDATE dbtx.jobs
-SET status       = 'failed',
-    worker_id    = NULL,
-    processed_at = clock_timestamp(),
-    error        = COALESCE(error, 'lease expired; max attempts exceeded')
-WHERE status IN ('running', 'error')
-  AND visible_at <= NOW() - (INTERVAL '1 second' * $1::float8)
-  AND attempts >= max_attempts
+WITH exhausted AS MATERIALIZED (
+    SELECT id FROM dbtx.jobs
+     WHERE status IN ('running', 'error')
+       AND visible_at <= NOW() - (INTERVAL '1 second' * $1::float8)
+       AND attempts >= max_attempts
+       FOR UPDATE
+)
+SELECT 1 FROM exhausted
+CROSS JOIN LATERAL dbtx.jobs_retry(exhausted.id, 'expire', null::text, null::bigint,
+    jsonb_build_object('keep_error', true, 'error', 'lease expired; max attempts exceeded')) transitioned
 `
 
 // -----------------------------------------------------------------------------
@@ -402,19 +397,16 @@ func (q *Queries) ReapExhausted(ctx context.Context, graceSeconds float64) (int6
 }
 
 const retry = `-- name: Retry :one
-UPDATE dbtx.jobs
-SET status       = CASE WHEN attempts >= max_attempts
-                        THEN 'failed'::dbtx.job_status
-                        ELSE 'error'::dbtx.job_status END,
-    visible_at   = clock_timestamp() + (INTERVAL '1 second' * $1::float8),
-    processed_at = CASE WHEN attempts >= max_attempts THEN clock_timestamp() END,
-    worker_id    = NULL,
-    error        = $2::text
-WHERE id            = $3
-  AND status        = 'running'
-  AND fencing_token = $4
-  AND worker_id     = $5::text
-RETURNING id, idempotency_key, request, response, status, worker_id, fencing_token, attempts, max_attempts, error, visible_at, processed_at, created_at, updated_at
+with retry_args as (
+    select $1::float8 as backoff_seconds,
+           $2::text as error,
+           $3::uuid as id,
+           $4::bigint as fencing_token,
+           $5::text as worker_id
+)
+SELECT transitioned.id, transitioned.idempotency_key, transitioned.request, transitioned.response, transitioned.status, transitioned.worker_id, transitioned.fencing_token, transitioned.attempts, transitioned.max_attempts, transitioned.error, transitioned.visible_at, transitioned.processed_at, transitioned.created_at, transitioned.updated_at FROM dbtx.jobs_retry((select id from retry_args), 'nack',
+    (select worker_id from retry_args), (select fencing_token from retry_args),
+    jsonb_build_object('error', (select error from retry_args), 'delay_seconds', (select backoff_seconds from retry_args))) transitioned
 `
 
 type RetryParams struct {

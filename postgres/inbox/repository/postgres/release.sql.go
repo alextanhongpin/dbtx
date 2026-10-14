@@ -12,15 +12,11 @@ import (
 )
 
 const release = `-- name: Release :execrows
-update dbtx.inbox
-   set status = 'pending'::dbtx.inbox_status,
-       attempts = attempts - 1,
-       locked_by = null,
-       available_at = now(),
-       updated_at = now()
- where id = $1::uuid
-   and locked_by = $2::text
-   and status = 'processing'
+with retry_args as (
+    select $1::uuid as id,
+           $2::text as locked_by
+)
+select 1 from dbtx.inbox_retry((select id from retry_args), 'release', (select locked_by from retry_args), '{}'::jsonb)
 `
 
 type ReleaseParams struct {
