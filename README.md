@@ -174,6 +174,7 @@ Install each helper using its full module path, for example
 | [postgres/jobs](postgres/jobs/README.md) | Background jobs with leases, retries and maintenance. |
 | [postgres/jsonb](postgres/jsonb/README.md) | Typed scanning of JSON query results. |
 | [postgres/lock](postgres/lock/README.md) | Transaction-scoped advisory locks. |
+| [postgres/lease](postgres/lease/README.md) | Renewable PostgreSQL ownership, activities, and fenced transactions. |
 | [postgres/violations](postgres/violations/README.md) | Classify PostgreSQL errors from `lib/pq`. |
 | [engine/sqlite](engine/sqlite/README.md) | SQLite pool defaults and JSON containment function. |
 | [testing/dbtest](testing/dbtest/README.md) | PostgreSQL containers, pools and rollback-isolated tests. |

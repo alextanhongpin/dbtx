@@ -1,0 +1,10 @@
+version: "2"
+sql:
+  - schema: schema.sql
+    queries: queries
+    engine: postgresql
+    gen:
+      go:
+        package: postgres
+        out: postgres
+        emit_interface: true
