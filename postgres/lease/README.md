@@ -187,6 +187,14 @@ storage, aggregate ordering, or dead-letter policy. See the design documents:
 [integration scenarios](../../docs/postgres-lease-examples.md) and
 [module reuse limitations](../../docs/postgres-lease-module-reuse.md).
 
+## Composition with durable modules
+
+See [tested composition patterns](../../docs/postgres-lease-composition.md) for
+outbox/inbox enqueue, transactional job submission, resource guards in job
+handlers, and transaction nesting limitations. The separate
+[integration module](integration/README.md) tests these combinations without
+adding durable-module dependencies to the lease library.
+
 ## Generate and verify
 
 Queries in [repository/queries/lease.sql](repository/queries/lease.sql) generate

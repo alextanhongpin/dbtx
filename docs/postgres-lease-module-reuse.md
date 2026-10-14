@@ -6,11 +6,11 @@ Strict resource expiry, permissive queue ownership, fencing token domains,
 transaction admission and cleanup remain module-specific. Shared dynamic SQL
 packages and their compatibility APIs have been removed.
 
-Related: [lease implementation plan](distributed-lock-plan.md) and [integration scenarios](postgres-lease-examples.md).
+Related: [lease implementation plan](distributed-lock-plan.md), [integration scenarios](postgres-lease-examples.md), and [tested cross-module composition](postgres-lease-composition.md).
 
 ## Scope and recommendation
 
-The proposed `postgres/lease` module supplies ownership, renewal, fencing, and short guarded transactions. It does not replace durable requests, queues, message deduplication, or delivery protocols.
+The implemented `postgres/lease` module supplies ownership, renewal, fencing, and short guarded transactions. It does not replace durable requests, queues, message deduplication, or delivery protocols.
 
 Initially keep `postgres/idempotent`, `postgres/jobs`, `postgres/outbox`, and `postgres/inbox` intact. Prefer sharing lifecycle code where contracts match, while keeping ownership fields in each module's own rows. Evaluate a common lease table separately, with explicit atomicity, retention, performance, and migration requirements. Do not force an extra generic lease around operations that already own their work through a module-specific claim.
 
