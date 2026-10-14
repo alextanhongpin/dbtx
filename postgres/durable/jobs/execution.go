@@ -168,24 +168,24 @@ func (e *Execution) RemoteKey(step string) string { return e.ID.String() + ":" +
 // API that honours idempotency keys. The first time, build creates the
 // request, which is saved before call runs with RemoteKey(name). A retry
 // resends the saved request with the same key; once the response is saved,
-// later attempts return it without calling. Activity mode only.
-func RunStep[Req, Resp any](
+// later attempts return it without calling. Activity mode only. Req and Resp
+// are inferred from build and call.
+func (e *Execution) RunStep[Req, Resp any](
 	ctx context.Context,
-	exec *Execution,
 	name string,
 	build func(ctx context.Context) (Req, error),
 	call func(ctx context.Context, idempotencyKey string, req Req) (Resp, error),
 ) (Resp, error) {
 	var zero Resp
-	if exec.Mode != ModeActivity {
+	if e.Mode != ModeActivity {
 		return zero, durable.ErrRemoteStepInTx
 	}
 	if name == "" || build == nil || call == nil {
 		return zero, durable.ErrInvalidArgument
 	}
-	db := exec.db()
+	db := e.db()
 	q := postgres.New(db.DB())
-	step, err := q.GetStep(ctx, postgres.GetStepParams{ExecutionID: exec.ID, Name: name})
+	step, err := q.GetStep(ctx, postgres.GetStepParams{ExecutionID: e.ID, Name: name})
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		r, err := build(ctx)
@@ -196,9 +196,9 @@ func RunStep[Req, Resp any](
 		if err != nil {
 			return zero, durable.Permanent(fmt.Errorf("jobs: step %s request: %w", name, err))
 		}
-		err = exec.locked(ctx, func(txCtx context.Context, q *postgres.Queries) error {
+		err = e.locked(ctx, func(txCtx context.Context, q *postgres.Queries) error {
 			_, err := q.InsertStep(txCtx, postgres.InsertStepParams{
-				ExecutionID: exec.ID, Name: name, RemoteKey: exec.RemoteKey(name), Request: reqBytes,
+				ExecutionID: e.ID, Name: name, RemoteKey: e.RemoteKey(name), Request: reqBytes,
 			})
 			return err
 		})
@@ -207,7 +207,7 @@ func RunStep[Req, Resp any](
 		}
 		// A stale attempt may have saved the request first: always continue
 		// from what is stored.
-		if step, err = q.GetStep(ctx, postgres.GetStepParams{ExecutionID: exec.ID, Name: name}); err != nil {
+		if step, err = q.GetStep(ctx, postgres.GetStepParams{ExecutionID: e.ID, Name: name}); err != nil {
 			return zero, err
 		}
 	case err != nil:
@@ -224,8 +224,8 @@ func RunStep[Req, Resp any](
 	if err := json.Unmarshal(step.Request, &r); err != nil {
 		return zero, durable.Permanent(fmt.Errorf("jobs: step %s saved request: %w", name, err))
 	}
-	out, err := call(ctx, exec.RemoteKey(name), r)
-	exec.w.cfg.Hooks.CallAfterRemoteCall(ctx, exec.ID.String(), name)
+	out, err := call(ctx, e.RemoteKey(name), r)
+	e.w.cfg.Hooks.CallAfterRemoteCall(ctx, e.ID.String(), name)
 	if err != nil {
 		return zero, err
 	}
@@ -233,14 +233,14 @@ func RunStep[Req, Resp any](
 	if err != nil {
 		return zero, durable.Permanent(fmt.Errorf("jobs: step %s response: %w", name, err))
 	}
-	err = exec.locked(ctx, func(txCtx context.Context, q *postgres.Queries) error {
-		_, err := q.FinishStep(txCtx, postgres.FinishStepParams{ExecutionID: exec.ID, Name: name, Response: respB})
+	err = e.locked(ctx, func(txCtx context.Context, q *postgres.Queries) error {
+		_, err := q.FinishStep(txCtx, postgres.FinishStepParams{ExecutionID: e.ID, Name: name, Response: respB})
 		return err
 	})
 	if err != nil {
 		return zero, err
 	}
-	exec.w.cfg.Hooks.CallBetweenSteps(ctx, exec.ID.String(), name)
+	e.w.cfg.Hooks.CallBetweenSteps(ctx, e.ID.String(), name)
 	return out, nil
 }
 

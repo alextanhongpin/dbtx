@@ -86,7 +86,7 @@ err := atomic.RunInTx(ctx, func(txCtx context.Context) error {
 
 worker, _ := jobs.NewWorker(jobs.WorkerConfig{DB: atomic})
 worker.Register("order.fulfil", func(ctx context.Context, x *jobs.Execution) (jobs.Result, error) {
-    charge, err := jobs.RunStep(ctx, x, "charge", buildChargeRequest, payments.Charge)
+    charge, err := x.RunStep(ctx, "charge", buildChargeRequest, payments.Charge)
     if err != nil {
         return jobs.Result{}, err // retried; return durable.Permanent(err) to stop
     }

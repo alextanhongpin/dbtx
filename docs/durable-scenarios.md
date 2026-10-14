@@ -39,7 +39,7 @@ same holder write repeatedly.
 | S11 | Submit and wait briefly for the result | `jobs.Await` with timeout, distinguishes timeout from failure | Q10 |
 | S12 | Create an order and its job atomically | `Submit` joins the `dbtx` transaction in `ctx`; `RequireTx` | FM-18 |
 | S13 | Local-only handler completing with its business writes | `Tx` mode, or `Activity` + `exec.Finalize` | FM-5, FM-7 |
-| S14 | Handler calling two remote idempotent APIs (charge, ship) | `jobs.RunStep` with saved request and remote key | FM-2 |
+| S14 | Handler calling two remote idempotent APIs (charge, ship) | `Execution.RunStep` with saved request and remote key | FM-2 |
 | S15 | Remote adapter mapping 409/429/422/5xx | `RetryAfter`, `Permanent`, default retryable | — |
 | S16 | Delayed reminder cancelled after an upgrade | `RunAt`, `jobs.Cancel` | — |
 | S17 | Job touching a wallet that other jobs also touch | `txlock` inside a `Tx`-mode step (same transaction as completion) | — |
@@ -71,7 +71,7 @@ same holder write repeatedly.
 | # | Scenario | Design coverage | Pinned by |
 | --- | --- | --- | --- |
 | S30 | Nightly report in `Asia/Singapore`, many instances | Schedule keyed by tick; missed-run and overlap policies | FM-27, FM-28, Q5 |
-| S31 | Expensive top-50 chart read very often | `cache.GetOrCompute` with stale-while-revalidate | FM-29, FM-30, Q6 |
+| S31 | Expensive top-50 chart read very often | `Cache.GetOrCompute` with stale-while-revalidate | FM-29, FM-30, Q6 |
 | S32 | Invalidate the chart when stats change | `cache.InvalidateTx` in the inbox handler's transaction | — |
 
 ## Operations and testing

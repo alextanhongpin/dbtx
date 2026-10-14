@@ -229,7 +229,7 @@ func TestRunStepRejectedInTxMode(t *testing.T) {
 	e := newEnv(t, "x")
 	w := e.worker(t, jobs.WorkerConfig{})
 	_ = w.Register("x", func(ctx context.Context, x *jobs.Execution) (jobs.Result, error) {
-		_, err := jobs.RunStep(ctx, x, "call",
+		_, err := x.RunStep(ctx, "call",
 			func(context.Context) (int, error) { return 1, nil },
 			func(context.Context, string, int) (int, error) { return 1, nil })
 		return jobs.Result{}, err
@@ -279,7 +279,7 @@ func TestRunStepSurvivesLostLeaseAfterRemoteCall(t *testing.T) {
 	}})
 	var built atomic.Int32
 	_ = w.Register("charge", func(ctx context.Context, x *jobs.Execution) (jobs.Result, error) {
-		id, err := jobs.RunStep(ctx, x, "charge",
+		id, err := x.RunStep(ctx, "charge",
 			func(context.Context) (int, error) { built.Add(1); return 100, nil },
 			remote.charge)
 		if err != nil {

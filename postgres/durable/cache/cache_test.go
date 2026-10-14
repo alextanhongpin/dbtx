@@ -34,7 +34,7 @@ func TestStampedeComputesOnce(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 50 {
 		wg.Go(func() {
-			v, err := cache.GetOrCompute(ctx, c, "chart:sg", cache.Options{TTL: time.Minute},
+			v, err := c.GetOrCompute(ctx, "chart:sg", cache.Options{TTL: time.Minute},
 				func(context.Context) (chart, error) {
 					calls.Add(1)
 					time.Sleep(150 * time.Millisecond)
@@ -55,7 +55,7 @@ func TestStampedeComputesOnce(t *testing.T) {
 func TestServesStaleWhileRecomputing(t *testing.T) {
 	ctx := t.Context()
 	c, _ := setup(t)
-	if err := cache.Set(ctx, c, "k", chart{Items: []string{"old"}}, 10*time.Millisecond, time.Minute); err != nil {
+	if err := c.Set(ctx, "k", chart{Items: []string{"old"}}, 10*time.Millisecond, time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(20 * time.Millisecond)
@@ -63,7 +63,7 @@ func TestServesStaleWhileRecomputing(t *testing.T) {
 	opts := cache.Options{TTL: time.Minute, StaleFor: time.Minute}
 	done := make(chan chart)
 	go func() {
-		v, _ := cache.GetOrCompute(ctx, c, "k", opts, func(context.Context) (chart, error) {
+		v, _ := c.GetOrCompute(ctx, "k", opts, func(context.Context) (chart, error) {
 			close(started)
 			<-release
 			return chart{Items: []string{"new"}}, nil
@@ -71,7 +71,7 @@ func TestServesStaleWhileRecomputing(t *testing.T) {
 		done <- v
 	}()
 	<-started
-	v, err := cache.GetOrCompute(ctx, c, "k", opts, func(context.Context) (chart, error) {
+	v, err := c.GetOrCompute(ctx, "k", opts, func(context.Context) (chart, error) {
 		t.Error("second caller must not compute")
 		return chart{}, nil
 	})
@@ -82,7 +82,7 @@ func TestServesStaleWhileRecomputing(t *testing.T) {
 	if v := <-done; v.Items[0] != "new" {
 		t.Fatalf("recompute returned %v", v)
 	}
-	if v, ok, _ := cache.Get[chart](ctx, c, "k"); !ok || v.Items[0] != "new" {
+	if v, ok, _ := c.Get[chart](ctx, "k"); !ok || v.Items[0] != "new" {
 		t.Fatalf("stored %v %v", v, ok)
 	}
 }
@@ -96,7 +96,7 @@ func TestSlowComputeDoesNotOverwriteNewer(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, _ = cache.GetOrCompute(ctx, c, "k", opts, func(context.Context) (chart, error) {
+		_, _ = c.GetOrCompute(ctx, "k", opts, func(context.Context) (chart, error) {
 			close(started)
 			<-release
 			return chart{Items: []string{"slow"}}, nil
@@ -104,14 +104,14 @@ func TestSlowComputeDoesNotOverwriteNewer(t *testing.T) {
 	}()
 	<-started
 	time.Sleep(150 * time.Millisecond) // the slow caller's compute lease expires
-	if _, err := cache.GetOrCompute(ctx, c, "k", opts, func(context.Context) (chart, error) {
+	if _, err := c.GetOrCompute(ctx, "k", opts, func(context.Context) (chart, error) {
 		return chart{Items: []string{"fast"}}, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	close(release)
 	<-done
-	if v, _, _ := cache.Get[chart](ctx, c, "k"); v.Items[0] != "fast" {
+	if v, _, _ := c.Get[chart](ctx, "k"); v.Items[0] != "fast" {
 		t.Fatalf("stored %v", v)
 	}
 }
@@ -120,7 +120,7 @@ func TestSlowComputeDoesNotOverwriteNewer(t *testing.T) {
 func TestInvalidateTx(t *testing.T) {
 	ctx := t.Context()
 	c, db := setup(t)
-	_ = cache.Set(ctx, c, "k", 1, time.Minute, 0)
+	_ = c.Set(ctx, "k", 1, time.Minute, 0)
 	if err := c.InvalidateTx(ctx, "k"); !errors.Is(err, durable.ErrNotInTx) {
 		t.Fatalf("want ErrNotInTx, got %v", err)
 	}
@@ -128,11 +128,11 @@ func TestInvalidateTx(t *testing.T) {
 		_ = c.InvalidateTx(txCtx, "k")
 		return errors.New("rollback")
 	})
-	if _, ok, _ := cache.Get[int](ctx, c, "k"); !ok {
+	if _, ok, _ := c.Get[int](ctx, "k"); !ok {
 		t.Fatal("rolled-back invalidation removed the value")
 	}
 	_ = db.RunInTx(ctx, func(txCtx context.Context) error { return c.InvalidateTx(txCtx, "k") })
-	if _, ok, _ := cache.Get[int](ctx, c, "k"); ok {
+	if _, ok, _ := c.Get[int](ctx, "k"); ok {
 		t.Fatal("value still cached")
 	}
 }
@@ -141,12 +141,12 @@ func TestComputeErrorReleasesLease(t *testing.T) {
 	ctx := t.Context()
 	c, _ := setup(t)
 	opts := cache.Options{TTL: time.Minute}
-	if _, err := cache.GetOrCompute(ctx, c, "k", opts, func(context.Context) (int, error) {
+	if _, err := c.GetOrCompute(ctx, "k", opts, func(context.Context) (int, error) {
 		return 0, errors.New("upstream down")
 	}); err == nil {
 		t.Fatal("want error")
 	}
-	v, err := cache.GetOrCompute(ctx, c, "k", opts, func(context.Context) (int, error) { return 7, nil })
+	v, err := c.GetOrCompute(ctx, "k", opts, func(context.Context) (int, error) { return 7, nil })
 	if err != nil || v != 7 {
 		t.Fatalf("%v %v", v, err)
 	}
@@ -161,7 +161,7 @@ func TestInvalidateDuringCompute(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, _ = cache.GetOrCompute(ctx, c, "k", cache.Options{TTL: time.Minute}, func(context.Context) (int, error) {
+		_, _ = c.GetOrCompute(ctx, "k", cache.Options{TTL: time.Minute}, func(context.Context) (int, error) {
 			close(started)
 			<-release
 			return 1, nil // computed from data that is now outdated
@@ -173,7 +173,7 @@ func TestInvalidateDuringCompute(t *testing.T) {
 	}
 	close(release)
 	<-done
-	if v, ok, _ := cache.Get[int](ctx, c, "k"); ok {
+	if v, ok, _ := c.Get[int](ctx, "k"); ok {
 		t.Fatalf("stale value %d stored after invalidation", v)
 	}
 }

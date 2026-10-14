@@ -68,8 +68,10 @@ func (c *Cache) load(ctx context.Context, key string) (postgres.LoadCacheEntryRo
 	return r, err
 }
 
-// Get returns a fresh value, or found=false.
-func Get[T any](ctx context.Context, c *Cache, key string) (v T, found bool, err error) {
+// Get returns a fresh value, or found=false. T cannot be inferred, so name it:
+//
+//	v, ok, err := c.Get[Chart](ctx, "chart:sg")
+func (c *Cache) Get[T any](ctx context.Context, key string) (v T, found bool, err error) {
 	r, err := c.load(ctx, key)
 	if err != nil || !r.Fresh {
 		return v, false, err
@@ -77,8 +79,8 @@ func Get[T any](ctx context.Context, c *Cache, key string) (v T, found bool, err
 	return v, true, json.Unmarshal(r.Value, &v)
 }
 
-// Set stores v unconditionally with a new version.
-func Set[T any](ctx context.Context, c *Cache, key string, v T, ttl, staleFor time.Duration) error {
+// Set stores v unconditionally with a new version. T is inferred from v.
+func (c *Cache) Set[T any](ctx context.Context, key string, v T, ttl, staleFor time.Duration) error {
 	if ttl <= 0 || staleFor < 0 {
 		return fmt.Errorf("%w: positive TTL and non-negative StaleFor", durable.ErrInvalidArgument)
 	}
@@ -129,8 +131,9 @@ func (c *Cache) releaseCompute(ctx context.Context, key, owner string) error {
 // GetOrCompute returns a fresh value, or computes it with fn. Only one caller
 // computes at a time; others get the stale value (within StaleFor) or follow
 // OnContention. A computation that finishes after a newer value was written
-// returns its own result but does not overwrite the newer one.
-func GetOrCompute[T any](ctx context.Context, c *Cache, key string, o Options, fn func(ctx context.Context) (T, error)) (T, error) {
+// returns its own result but does not overwrite the newer one. T is inferred
+// from fn.
+func (c *Cache) GetOrCompute[T any](ctx context.Context, key string, o Options, fn func(ctx context.Context) (T, error)) (T, error) {
 	var zero T
 	if o.TTL <= 0 || o.StaleFor < 0 || fn == nil {
 		return zero, fmt.Errorf("%w: positive TTL, non-negative StaleFor and fn are required", durable.ErrInvalidArgument)
@@ -143,10 +146,6 @@ func GetOrCompute[T any](ctx context.Context, c *Cache, key string, o Options, f
 	}
 	if o.PollInterval <= 0 {
 		o.PollInterval = 50 * time.Millisecond
-	}
-	decode := func(b []byte) (T, error) {
-		var v T
-		return v, json.Unmarshal(b, &v)
 	}
 	compute := func(token int64, owner string) (T, error) {
 		v, err := fn(ctx)
@@ -177,7 +176,7 @@ func GetOrCompute[T any](ctx context.Context, c *Cache, key string, o Options, f
 			return zero, err
 		}
 		if r.Fresh {
-			return decode(r.Value)
+			return decode[T](r.Value)
 		}
 		owner := rand.Text()
 		token, err := c.claim(ctx, key, owner, o.ComputeTTL)
@@ -188,7 +187,7 @@ func GetOrCompute[T any](ctx context.Context, c *Cache, key string, o Options, f
 			return compute(token, owner)
 		}
 		if r.StaleOk {
-			return decode(r.Value)
+			return decode[T](r.Value)
 		}
 		if o.OnContention == ComputeAnyway || !time.Now().Before(deadline) {
 			return compute(0, "")
@@ -227,4 +226,9 @@ func (c *Cache) Purge(ctx context.Context, limit int) (int64, error) {
 		limit = 1000
 	}
 	return postgres.New(c.cfg.DB.DB()).PurgeCache(ctx, int32(limit))
+}
+
+func decode[T any](b []byte) (T, error) {
+	var v T
+	return v, json.Unmarshal(b, &v)
 }

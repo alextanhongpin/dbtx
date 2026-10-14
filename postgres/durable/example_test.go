@@ -80,7 +80,7 @@ func Example_jobs() {
 
 	worker, _ := jobs.NewWorker(jobs.WorkerConfig{DB: db})
 	_ = worker.Register("order.fulfil", func(ctx context.Context, x *jobs.Execution) (jobs.Result, error) {
-		charge, err := jobs.RunStep(ctx, x, "charge",
+		charge, err := x.RunStep(ctx, "charge",
 			func(context.Context) (chargeReq, error) { return chargeReq{Amount: 100}, nil },
 			func(ctx context.Context, idempotencyKey string, r chargeReq) (chargeResp, error) {
 				return chargeResp{ID: "ch_1"}, nil // the payment API call
@@ -134,6 +134,6 @@ func Example_schedule() {
 func Example_cache() {
 	ctx := context.Background()
 	c, _ := cache.New(cache.Config{DB: db, Prefix: "charts:"})
-	_, _ = cache.GetOrCompute(ctx, c, "top50:sg", cache.Options{TTL: 5 * time.Minute, StaleFor: time.Minute},
+	_, _ = c.GetOrCompute(ctx, "top50:sg", cache.Options{TTL: 5 * time.Minute, StaleFor: time.Minute},
 		func(ctx context.Context) ([]string, error) { return []string{"track-1"}, nil })
 }

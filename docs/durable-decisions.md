@@ -1,7 +1,7 @@
 # Durable module: decisions
 
 Companion to the [design](durable-design.md). Each entry records what was
-decided, why, and what follows from it. All entries are decided; D12–D21 were
+decided, why, and what follows from it. All entries are decided; D12–D22 were
 made while implementing. Open follow-ups are tracked in the
 [TODO](../postgres/durable/TODO.md).
 
@@ -257,3 +257,20 @@ a `[]byte` type that scans and writes NULL.
 **Why.** `lib/pq` cannot scan infinite timestamps into `time.Time`, and Go's
 `json.RawMessage` cannot scan NULL. NULL is also the honest value: comparisons
 with it are false, so an absent lease is never live and never "expired".
+
+### D22. Generic methods for typed operations
+
+**Decision.** `Get`, `Set` and `GetOrCompute` are generic methods on `*Cache`
+(Go 1.27): `c.Get[Chart](ctx, key)`, `c.Set(ctx, key, v, ttl, staleFor)`,
+`c.GetOrCompute(ctx, key, opts, fn)`. `Set` and `GetOrCompute` infer `T`
+from their arguments; `Get` needs it named. Likewise `RunStep` is a method on
+`*jobs.Execution`: `x.RunStep(ctx, "charge", build, call)`, with `Req` and
+`Resp` inferred from `build` and `call`.
+
+**Why.** They were package functions taking the cache or execution as an
+argument (`cache.GetOrCompute(ctx, c, ...)`, `jobs.RunStep(ctx, x, ...)`) only
+because methods could not have type parameters. As methods they read like the
+rest of the API.
+
+**Consequences.** Generic methods do not satisfy interfaces, so code that
+mocks the cache or an execution wraps it in its own interface with concrete types.
