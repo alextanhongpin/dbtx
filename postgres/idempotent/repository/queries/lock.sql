@@ -3,9 +3,9 @@
 -- lease. While the row is locked, a concurrent Claim blocks until commit, so
 -- no separate heartbeat is needed.
    update dbtx.idempotency_keys
-      set lease_expires_at = now()
+      set lease_expires_at = clock_timestamp()
         + interval '1 second' * sqlc.arg(lease_seconds)::float8,
-          updated_at = now()
+          updated_at = clock_timestamp()
     where idempotency_key = sqlc.arg(idempotency_key)::text
       and fencing_token = sqlc.arg(fencing_token)::bigint
       and status = 'in_progress'

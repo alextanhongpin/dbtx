@@ -349,6 +349,7 @@ func (w *Worker) heartbeatLoop(ctx context.Context, cancel context.CancelCauseFu
 	}
 }
 
+
 func (w *Worker) safeHandle(ctx context.Context, job Job, log *slog.Logger) (resp json.RawMessage, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -411,3 +412,4 @@ func sleepCtx(ctx context.Context, d time.Duration) {
 func jitter(d time.Duration) time.Duration {
 	return d/2 + time.Duration(rand.Int64N(int64(d)/2+1))
 }
+

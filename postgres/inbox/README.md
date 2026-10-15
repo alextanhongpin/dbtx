@@ -16,7 +16,7 @@ The inbox pattern is the receiving side of the outbox. Incoming messages are sto
 
 ## Schema
 
-The schema lives in [`repository/schema.sql`](repository/schema.sql) and is exported as `repository.Schema`. Apply it once, or copy it into your migrations:
+`repository.Schema` includes the [base tables](repository/schema.sql), native module functions. Apply it once, or copy it into your migrations:
 
 ```go
 _, err := db.ExecContext(ctx, repository.Schema)

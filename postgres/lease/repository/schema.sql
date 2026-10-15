@@ -21,6 +21,9 @@ DECLARE
     v_row dbtx.leases%ROWTYPE;
     v_now timestamptz;
 BEGIN
+    IF p_owner IS NULL OR p_ttl_us IS NULL THEN
+        RAISE EXCEPTION 'lease: acquire needs owner and TTL' USING ERRCODE = '22023';
+    END IF;
     IF NOT pg_try_advisory_xact_lock(hashtextextended(
         json_build_array(p_namespace, p_key)::text, 726184921)) THEN
         RETURN 0;
@@ -62,7 +65,7 @@ BEGIN
     SELECT * INTO v_row FROM dbtx.leases
     WHERE namespace = p_namespace AND key = p_key FOR UPDATE;
     v_now := clock_timestamp();
-    IF NOT FOUND OR v_row.owner_id IS DISTINCT FROM p_owner
+    IF NOT FOUND OR p_owner IS NULL OR p_token IS NULL OR v_row.owner_id IS DISTINCT FROM p_owner
         OR v_row.fencing_token <> p_token OR v_row.expires_at <= v_now THEN
         RETURN false;
     END IF;

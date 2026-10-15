@@ -1,6 +1,10 @@
 # Lease reuse across PostgreSQL modules
 
-Status: design constraints and future options; no implementation or migration is authorized by this document.
+Status: each module uses native static SQL over its own rows. Jobs and leases
+share timer scheduling and conservative deadline helpers in `internal/renew`.
+Strict resource expiry, permissive queue ownership, fencing token domains,
+transaction admission and cleanup remain module-specific. Shared dynamic SQL
+packages and their compatibility APIs have been removed.
 
 Related: [lease implementation plan](distributed-lock-plan.md) and [integration scenarios](postgres-lease-examples.md).
 

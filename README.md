@@ -157,6 +157,9 @@ for a complete implementation. The `DBTX` interface contains `ExecContext`,
 `PrepareContext`, `QueryContext`, and `QueryRowContext`; it deliberately omits
 commit and rollback so repositories cannot finish the caller's transaction.
 
+The inbox, outbox, jobs and idempotency repositories use native static SQL over
+their own rows. Their Go APIs and table ownership remain separate.
+
 ## Modules
 
 Install each helper using its full module path, for example

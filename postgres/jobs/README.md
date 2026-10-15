@@ -13,8 +13,8 @@ Requires Go 1.27+ and PostgreSQL 18+ (`uuidv7()` is used by the schema). Use
 go get github.com/alextanhongpin/dbtx/postgres/jobs github.com/lib/pq
 ```
 
-Apply [repository/schema.sql](repository/schema.sql), exported as
-`repository.Schema`, through your migration system before submitting jobs:
+Apply `repository.Schema` through your migration system before submitting jobs.
+It includes the base [tables and native functions](repository/schema.sql):
 
 ```go
 if _, err := db.ExecContext(ctx, repository.Schema); err != nil {

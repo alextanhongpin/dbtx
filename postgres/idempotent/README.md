@@ -23,7 +23,7 @@ Requires Go 1.27+ (for the standard library `uuid` and `encoding/json/jsontext` 
 
 ## Schema
 
-The schema lives in [`repository/schema.sql`](repository/schema.sql) and is exported as `repository.Schema`:
+`repository.Schema` includes the [base tables](repository/schema.sql), native module functions:
 
 ```go
 _, err := db.ExecContext(ctx, repository.Schema)

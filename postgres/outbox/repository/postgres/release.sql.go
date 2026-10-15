@@ -14,7 +14,7 @@ import (
 const release = `-- name: Release :execrows
 update dbtx.outbox
    set status = 'pending'::dbtx.outbox_status,
-       attempts = attempts - 1,
+       attempts = greatest(attempts - 1, 0),
        locked_by = null,
        available_at = now(),
        updated_at = now()

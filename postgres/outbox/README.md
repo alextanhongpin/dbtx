@@ -14,7 +14,7 @@ The outbox pattern lets you write business data and domain events in the same da
 
 ## Schema
 
-The schema lives in [`repository/schema.sql`](repository/schema.sql) and is exported as `repository.Schema`. Apply it once through your migration system:
+`repository.Schema` includes the [base tables](repository/schema.sql), native module functions. Apply it once through your migration system:
 
 ```go
 _, err := db.ExecContext(ctx, repository.Schema)
