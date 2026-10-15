@@ -24,8 +24,13 @@ if _, err := db.ExecContext(ctx, repository.Schema); err != nil {
 
 Here `db` is a connected `*sql.DB` and `ctx` is a context. The schema guards
 repeat creation of its enum; existing installations still need migrations for
-schema changes. Queries and worker operations use autocommit; do not run a
-worker or janitor inside a `dbtx` transaction.
+schema changes. Workers and janitors use autocommit; do not run them inside a `dbtx` transaction.
+With the concrete repository, `Submit` joins a transaction in context when its
+`dbtx.DB` ID matches, so submission can commit with business writes. Share the
+same unit of work with the producer repositories. A mismatched ID submits on
+the pool independently. When joining a transaction, a successful `Submit` return
+does not mean the enclosing transaction has committed. See the [lease composition checks](../../docs/postgres-lease-composition.md)
+for fenced transactions and submission/rollback examples.
 
 ## Submit and process jobs
 

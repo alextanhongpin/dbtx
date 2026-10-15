@@ -1,0 +1,34 @@
+version: "2"
+sql:
+  - schema: "schema.sql"
+    queries: "queries"
+    engine: "postgresql"
+    gen:
+      go:
+        package: "postgres"
+        out: "postgres"
+        emit_empty_slices: true
+        emit_interface: true
+        emit_result_struct_pointers: false
+        overrides:
+          - db_type: "uuid"
+            nullable: false
+            go_type:
+              import: "uuid"
+              type: "UUID"
+          - db_type: "uuid"
+            nullable: true
+            go_type:
+              import: "database/sql"
+              type: "Null[uuid.UUID]"
+          # json.RawMessage cannot scan NULL; pg.JSON can (nil means NULL).
+          - db_type: "jsonb"
+            nullable: false
+            go_type:
+              import: "github.com/alextanhongpin/dbtx/postgres/durable/internal/pg"
+              type: "JSON"
+          - db_type: "jsonb"
+            nullable: true
+            go_type:
+              import: "github.com/alextanhongpin/dbtx/postgres/durable/internal/pg"
+              type: "JSON"

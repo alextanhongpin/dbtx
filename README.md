@@ -171,6 +171,7 @@ Install each helper using its full module path, for example
 | [postgres/bandit](postgres/bandit/README.md) | Bandit policies, durable experiments, simulations and a local results dashboard. |
 | [postgres/cache](postgres/cache/README.md) | JSON cache, TTL, atomic operations and compute leases. |
 | [postgres/dbt](postgres/dbt/README.md) | Struct-driven PostgreSQL templates and scanning. |
+| [postgres/durable](postgres/durable/README.md) | Experimental: leases, idempotency keys, jobs, ordered outbox/inbox, scheduler and cache on one engine. |
 | [postgres/idempotent](postgres/idempotent/README.md) | Durable requests, checkpoints and cached outcomes. |
 | [postgres/inbox](postgres/inbox/README.md) | Deduplicated transactional message consumption. |
 | [postgres/outbox](postgres/outbox/README.md) | Transactional event enqueueing and at-least-once publishing. |
