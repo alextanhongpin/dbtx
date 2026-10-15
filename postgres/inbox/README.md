@@ -22,11 +22,6 @@ The inbox pattern is the receiving side of the outbox. Incoming messages are sto
 _, err := db.ExecContext(ctx, repository.Schema)
 ```
 
-When upgrading from shared SQL adapters, stop older workers and apply
-`repository.Migrations` in one transaction. It removes this module's obsolete
-adapter and view without rewriting work rows. Native queries preserve the
-existing ownership and retry rules. See the [migration guide](../../docs/postgres-native-transitions.md).
-
 The table and indexes are created with `if not exists`, but the `dbtx.inbox_status` enum is not: Postgres has no `create type if not exists`, and sqlc cannot parse the `DO` block that would emulate it. Running the schema twice fails on that statement.
 
 A message moves through these statuses:

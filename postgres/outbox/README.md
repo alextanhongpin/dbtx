@@ -20,11 +20,6 @@ The outbox pattern lets you write business data and domain events in the same da
 _, err := db.ExecContext(ctx, repository.Schema)
 ```
 
-When upgrading from shared SQL adapters, stop older workers and apply
-`repository.Migrations` in one transaction. It removes this module's obsolete
-adapter and view without rewriting work rows. Native queries preserve the
-existing ownership and retry rules. See the [migration guide](../../docs/postgres-native-transitions.md).
-
 The enum uses `CREATE TYPE` without a duplicate guard, so running this schema
 twice fails. Existing installations need explicit versioned migrations;
 `CREATE TABLE IF NOT EXISTS` does not upgrade existing tables.

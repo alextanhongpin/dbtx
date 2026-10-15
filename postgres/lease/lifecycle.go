@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/alextanhongpin/dbtx"
-	"github.com/alextanhongpin/dbtx/internal/renew"
 	"github.com/alextanhongpin/dbtx/postgres/lease/repository/postgres"
 )
 
@@ -108,12 +107,25 @@ func (h *heldLease) endOp() {
 
 func (h *heldLease) monitor() {
 	defer close(h.monitorDone)
-	_ = renew.Watch(context.Background(), h.wake, func() (time.Time, error) {
+	timer := time.NewTimer(time.Hour)
+	defer timer.Stop()
+	for {
 		h.mu.Lock()
-		defer h.mu.Unlock()
 		h.expireLocked()
-		return h.effectiveDeadlineLocked(), h.terminal
-	})
+		if h.terminal != nil {
+			h.mu.Unlock()
+			return
+		}
+		wait := time.Until(h.effectiveDeadlineLocked())
+		h.mu.Unlock()
+		timer.Reset(wait)
+		select {
+		case <-h.done:
+			return
+		case <-h.wake:
+		case <-timer.C:
+		}
+	}
 }
 
 func (h *heldLease) Renew(ctx context.Context) error { return h.renew(ctx, false) }
@@ -156,7 +168,7 @@ func (h *heldLease) renew(ctx context.Context, automatic bool) error {
 		return h.terminal
 	}
 	// A late renewal response must never resurrect local ownership.
-	next := renew.Deadline(sent, h.ttl)
+	next := sent.Add(h.ttl - h.ttl/6)
 	if !time.Now().Before(next) {
 		h.terminalLocked(ErrLeaseLost)
 		return ErrLeaseLost

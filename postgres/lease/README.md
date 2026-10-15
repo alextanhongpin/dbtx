@@ -12,8 +12,6 @@ across failover. Constructors do not install schema or own/close your pool.
 ## Setup
 
 Apply `repository.Schema` through migrations. It installs the lease table and native resource ownership functions.
-For an existing installation, stop workers and apply
-`repository.OwnershipMigrations` in one transaction before deploying new callers.
 Rows retain fencing history permanently; do not purge expired rows. Reapplying
 Schema does not migrate an existing table definition.
 

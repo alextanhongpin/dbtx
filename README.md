@@ -158,13 +158,7 @@ for a complete implementation. The `DBTX` interface contains `ExecContext`,
 commit and rollback so repositories cannot finish the caller's transaction.
 
 The inbox, outbox, jobs and idempotency repositories use native static SQL over
-their own rows. Jobs and resource leases share conservative timer scheduling
-through `internal/renew`; ownership and finalization policies remain local.
-See the [migration guide](docs/postgres-native-transitions.md).
-
-The checked-in Go workspace resolves the affected modules to local sources.
-For independent releases, publish a root dbtx version containing `internal/renew`
-and update the jobs and lease dependency pins before publishing those modules.
+their own rows. Their Go APIs and table ownership remain separate.
 
 ## Modules
 

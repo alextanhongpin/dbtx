@@ -27,11 +27,6 @@ repeat creation of its enum; existing installations still need migrations for
 schema changes. Queries and worker operations use autocommit; do not run a
 worker or janitor inside a `dbtx` transaction.
 
-When upgrading from shared SQL adapters, stop older workers and apply
-`repository.Migrations` in one transaction. It removes this module's obsolete
-adapter and view without rewriting work rows. Native queries preserve the
-existing ownership and retry rules. See the [migration guide](../../docs/postgres-native-transitions.md).
-
 ## Submit and process jobs
 
 These fragments run inside an application after opening and pinging `db`,

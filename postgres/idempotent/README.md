@@ -29,11 +29,6 @@ Requires Go 1.27+ (for the standard library `uuid` and `encoding/json/jsontext` 
 _, err := db.ExecContext(ctx, repository.Schema)
 ```
 
-When upgrading from shared SQL adapters, stop older workers and apply
-`repository.Migrations` in one transaction. It removes this module's obsolete
-adapter and view without rewriting work rows. Native queries preserve the
-existing ownership and retry rules. See the [migration guide](../../docs/postgres-native-transitions.md).
-
 > **Note:** `create type` has no `if not exists`, so the schema cannot be run twice yet. Copy it into your migrations instead of running it at every startup.
 
 A key moves through these statuses:

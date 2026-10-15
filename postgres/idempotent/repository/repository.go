@@ -13,17 +13,7 @@ import (
 )
 
 //go:embed schema.sql
-var baseSchema string
-
-// Schema installs this module's native tables and functions.
-var Schema = baseSchema
-
-// Migrations removes this module's obsolete SQL adapter without rewriting rows.
-// Stop older workers and apply in one transaction before deploying new workers.
-// Shared functions remain because other applications may still use them.
-//
-//go:embed migrations.sql
-var Migrations string
+var Schema string
 
 var _ idempotent.Repository = (*Repository)(nil)
 
