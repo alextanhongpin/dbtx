@@ -1,2 +1,10 @@
 -- name: Requeue :execrows
-select 1 from dbtx.outbox_retry(sqlc.arg(id)::uuid, 'requeue', null::text, '{}'::jsonb);
+update dbtx.outbox
+   set status = 'pending'::dbtx.outbox_status,
+       attempts = 0,
+       available_at = now(),
+       locked_by = null,
+       last_error = null,
+       updated_at = now()
+ where id = $1
+   and status = 'dead';

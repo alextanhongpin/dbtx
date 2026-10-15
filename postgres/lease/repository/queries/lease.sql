@@ -8,16 +8,9 @@ SELECT dbtx.renew_lease(sqlc.arg(namespace)::text, sqlc.arg(key)::text,
     sqlc.arg(ttl_us)::bigint)::boolean AS renewed;
 
 -- name: ReleaseLease :execrows
-with ownership_args as (
-    select sqlc.arg(namespace)::text as "namespace",
-           sqlc.arg(key)::text as "key",
-           sqlc.narg(owner_id)::text as "owner_id",
-           sqlc.arg(token)::bigint as "token"
-)
-select 1 where dbtx.ownership_release('dbtx.resource_ownership'::regclass,
-    (select "key" from ownership_args), (select "namespace" from ownership_args),
-    (select "owner_id" from ownership_args), (select "token" from ownership_args),
-    null::text, false, true, true, '-infinity'::timestamptz, false, null::timestamptz);
+UPDATE dbtx.leases SET owner_id = NULL, expires_at = '-infinity'
+WHERE namespace = sqlc.arg(namespace) AND key = sqlc.arg(key)
+  AND owner_id = sqlc.arg(owner_id) AND fencing_token = sqlc.arg(token);
 
 -- name: LockLeaseRow :one
 SELECT fencing_token FROM dbtx.leases
@@ -25,16 +18,12 @@ WHERE namespace = sqlc.arg(namespace) AND key = sqlc.arg(key)
 FOR UPDATE;
 
 -- name: ValidateLease :one
-with ownership_args as (
-    select sqlc.arg(namespace)::text as "namespace",
-           sqlc.arg(key)::text as "key",
-           sqlc.narg(owner_id)::text as "owner_id",
-           sqlc.arg(token)::bigint as "token"
-)
-select dbtx.ownership_lock('dbtx.resource_ownership'::regclass,
-    (select "key" from ownership_args), (select "namespace" from ownership_args),
-    (select "owner_id" from ownership_args), (select "token" from ownership_args),
-    null::text, true, true, true)::boolean as valid;
+SELECT EXISTS (
+    SELECT 1 FROM dbtx.leases
+    WHERE namespace = sqlc.arg(namespace) AND key = sqlc.arg(key)
+      AND owner_id = sqlc.arg(owner_id) AND fencing_token = sqlc.arg(token)
+      AND expires_at > clock_timestamp()
+)::boolean AS valid;
 
 -- name: SetTransactionTimeouts :exec
 SELECT set_config('statement_timeout', sqlc.arg(timeout)::text, true),
@@ -44,12 +33,6 @@ SELECT set_config('statement_timeout', sqlc.arg(timeout)::text, true),
 
 -- name: ReleaseOwner :execrows
 -- Used only after an ambiguous acquisition whose token was not received.
-with ownership_args as (
-    select sqlc.arg(namespace)::text as "namespace",
-           sqlc.arg(key)::text as "key",
-           sqlc.narg(owner_id)::text as "owner_id"
-)
-select 1 where dbtx.ownership_release('dbtx.resource_ownership'::regclass,
-    (select "key" from ownership_args), (select "namespace" from ownership_args),
-    (select "owner_id" from ownership_args), null::bigint,
-    null::text, false, true, false, '-infinity'::timestamptz, false, null::timestamptz);
+UPDATE dbtx.leases SET owner_id = NULL, expires_at = '-infinity'
+WHERE namespace = sqlc.arg(namespace) AND key = sqlc.arg(key)
+  AND owner_id = sqlc.arg(owner_id);

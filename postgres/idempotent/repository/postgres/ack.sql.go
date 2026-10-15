@@ -12,15 +12,23 @@ import (
 )
 
 const ack = `-- name: Ack :one
-with retry_args as (
-    select $1::jsonb as response,
-           $2::float8 as ttl_seconds,
-           $3::text as idempotency_key,
-           $4::bigint as fencing_token
-)
-select fencing_token::bigint from dbtx.idempotent_retry(
-    (select idempotency_key from retry_args), 'complete', (select fencing_token from retry_args),
-    jsonb_build_object('response', (select response from retry_args), 'ttl_seconds', (select ttl_seconds from retry_args)))
+   update dbtx.idempotency_keys
+      set status = 'completed',
+          response = $1::jsonb,
+          lease_owner = null,
+          lease_expires_at = null,
+          retry_after = null,
+          completed_at = clock_timestamp(),
+          expires_at = greatest(
+            expires_at,
+            clock_timestamp()
+          + interval '1 second' * $2::float8
+          ),
+          updated_at = clock_timestamp()
+    where idempotency_key = $3::text
+      and fencing_token = $4::bigint
+      and status = 'in_progress'
+returning fencing_token
 `
 
 type AckParams struct {

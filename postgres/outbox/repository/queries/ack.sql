@@ -1,6 +1,10 @@
 -- name: Ack :execrows
-with retry_args as (
-    select sqlc.arg(id)::uuid as id,
-           sqlc.narg(locked_by)::text as locked_by
-)
-select 1 from dbtx.outbox_retry((select id from retry_args), 'complete', (select locked_by from retry_args), '{}'::jsonb);
+update dbtx.outbox
+   set status = 'done'::dbtx.outbox_status,
+       processed_at = now(),
+       locked_by = null,
+       last_error = null,
+       updated_at = now()
+ where id = $1
+   and locked_by = $2
+   and status = 'processing';

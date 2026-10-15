@@ -95,17 +95,3 @@ type DbtxInbox struct {
 	ProcessedAt sql.NullTime
 	UpdatedAt   time.Time
 }
-
-type DbtxInboxRetryState struct {
-	RetryKey       uuid.UUID
-	Status         DbtxInboxStatus
-	Attempts       int32
-	MaxAttempts    int32
-	LeaseOwner     sql.NullString
-	FencingToken   sql.NullInt64
-	RetryAt        time.Time
-	LeaseExpiresAt time.Time
-	LastError      sql.NullString
-	CompletedAt    sql.NullTime
-	UpdatedAt      time.Time
-}

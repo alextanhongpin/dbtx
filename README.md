@@ -157,11 +157,14 @@ for a complete implementation. The `DBTX` interface contains `ExecContext`,
 `PrepareContext`, `QueryContext`, and `QueryRowContext`; it deliberately omits
 commit and rollback so repositories cannot finish the caller's transaction.
 
-The inbox, outbox, jobs and idempotency repositories share [PostgreSQL retry
-lifecycle functions](postgres/retry/README.md) through updatable views over their
-existing tables. Ownership primitives come from
-[`postgres/lease/ownership`](postgres/lease/ownership/README.md).
-Their Go APIs and table ownership remain separate.
+The inbox, outbox, jobs and idempotency repositories use native static SQL over
+their own rows. Jobs and resource leases share conservative timer scheduling
+through `internal/renew`; ownership and finalization policies remain local.
+See the [migration guide](docs/postgres-native-transitions.md).
+
+The checked-in Go workspace resolves the affected modules to local sources.
+For independent releases, publish a root dbtx version containing `internal/renew`
+and update the jobs and lease dependency pins before publishing those modules.
 
 ## Modules
 

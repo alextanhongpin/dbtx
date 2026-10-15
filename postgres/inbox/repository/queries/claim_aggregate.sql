@@ -8,11 +8,7 @@
 -- live lease, whatever their order: an earlier message can become pending
 -- after a later one was claimed, when it is requeued or when the transaction
 -- that enqueued it commits late.
-with retry_args as (
-    select sqlc.arg('limit')::int as "limit",
-           sqlc.arg(locked_by)::text as locked_by,
-           sqlc.arg(lease_seconds)::float8 as lease_seconds
-), next as (
+with next as (
     select i.id
       from dbtx.inbox i
      where i.status in ('pending', 'processing')
@@ -36,10 +32,16 @@ with retry_args as (
                 and busy.available_at > now()
            )
   order by i.available_at, i.id
-     limit (select "limit" from retry_args)
+     limit $1
        for update SKIP LOCKED
 )
-select claimed.*
-  from next
- cross join lateral dbtx.inbox_retry(next.id, 'claim', (select locked_by from retry_args),
-     jsonb_build_object('lease_seconds', (select lease_seconds from retry_args))) claimed;
+   update dbtx.inbox i
+      set status = 'processing'::dbtx.inbox_status,
+          locked_by = sqlc.arg(locked_by)::text,
+          available_at = now()
+        + interval '1 second' * sqlc.arg(lease_seconds)::float8,
+          attempts = i.attempts + 1,
+          updated_at = now()
+     from next
+    where i.id = next.id
+returning i.*;

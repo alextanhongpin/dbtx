@@ -9,14 +9,14 @@ import (
 	_ "github.com/lib/pq"
 )
 
-func TestSharedOwnershipMigrationPreservesResourceHistory(t *testing.T) {
+func TestNativeMigrationPreservesResourceHistory(t *testing.T) {
 	client := dbtest.New(t, dbtest.Options{Image: "postgres:17.4", Hook: func(dsn string) error {
 		db, err := sql.Open("postgres", dsn)
 		if err != nil {
 			return err
 		}
 		defer db.Close()
-		_, err = db.Exec(baseSchema)
+		_, err = db.Exec(baseSchema + `CREATE VIEW dbtx.resource_ownership AS SELECT * FROM dbtx.leases;`)
 		return err
 	}})
 	db := client.DB(t)

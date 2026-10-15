@@ -1,7 +1,7 @@
 ---
 version: "2"
 sql:
-  - schema: ["shared_retry.sql", "schema.sql", "retry.sql"]
+  - schema: "schema.sql"
     queries: "queries"
     engine: "postgresql"
     gen:

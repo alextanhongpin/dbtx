@@ -1,12 +1,10 @@
 # Lease reuse across PostgreSQL modules
 
-Status: shared ownership SQL is implemented in
-[`postgres/lease/ownership`](../postgres/lease/ownership/README.md). The standalone
-lease and [shared retry lifecycle](../postgres/retry/README.md) reuse grant,
-renewal and ownership guards over module-owned rows. Retry release remains part
-of the atomic domain outcome update. Existing expiry policies and token domains
-are preserved. The options below document the constraints for further runtime
-or storage consolidation; no shared resource table is introduced for work rows.
+Status: each module uses native static SQL over its own rows. Jobs and leases
+share timer scheduling and conservative deadline helpers in `internal/renew`.
+Strict resource expiry, permissive queue ownership, fencing token domains,
+transaction admission and cleanup remain module-specific. Shared dynamic SQL
+packages and their compatibility APIs have been removed.
 
 Related: [lease implementation plan](distributed-lock-plan.md) and [integration scenarios](postgres-lease-examples.md).
 

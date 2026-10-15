@@ -10,14 +10,14 @@ import (
 )
 
 const lock = `-- name: Lock :one
-with retry_args as (
-    select $1::float8 as lease_seconds,
-           $2::text as idempotency_key,
-           $3::bigint as fencing_token
-)
-select fencing_token::bigint from dbtx.idempotent_retry(
-    (select idempotency_key from retry_args), 'renew', (select fencing_token from retry_args),
-    jsonb_build_object('lease_seconds', (select lease_seconds from retry_args)))
+   update dbtx.idempotency_keys
+      set lease_expires_at = clock_timestamp()
+        + interval '1 second' * $1::float8,
+          updated_at = clock_timestamp()
+    where idempotency_key = $2::text
+      and fencing_token = $3::bigint
+      and status = 'in_progress'
+returning fencing_token
 `
 
 type LockParams struct {

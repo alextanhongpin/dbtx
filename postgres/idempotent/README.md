@@ -23,15 +23,16 @@ Requires Go 1.27+ (for the standard library `uuid` and `encoding/json/jsontext` 
 
 ## Schema
 
-`repository.Schema` includes the [base tables](repository/schema.sql), shared retry functions and [lifecycle adapter](repository/retry.sql):
+`repository.Schema` includes the [base tables](repository/schema.sql), native module functions:
 
 ```go
 _, err := db.ExecContext(ctx, repository.Schema)
 ```
 
-For existing tables, apply `repository.Migrations` in one transaction before
-deploying new workers. It installs the [shared lifecycle](../retry/README.md)
-without rewriting work rows; see that guide for permissions and rollout.
+When upgrading from shared SQL adapters, stop older workers and apply
+`repository.Migrations` in one transaction. It removes this module's obsolete
+adapter and view without rewriting work rows. Native queries preserve the
+existing ownership and retry rules. See the [migration guide](../../docs/postgres-native-transitions.md).
 
 > **Note:** `create type` has no `if not exists`, so the schema cannot be run twice yet. Copy it into your migrations instead of running it at every startup.
 

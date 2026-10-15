@@ -12,11 +12,15 @@ import (
 )
 
 const ack = `-- name: Ack :execrows
-with retry_args as (
-    select $1::uuid as id,
-           $2::text as locked_by
-)
-select 1 from dbtx.inbox_retry((select id from retry_args), 'complete', (select locked_by from retry_args), '{}'::jsonb)
+update dbtx.inbox
+   set status = 'done'::dbtx.inbox_status,
+       processed_at = now(),
+       locked_by = null,
+       last_error = null,
+       updated_at = now()
+ where id = $1::uuid
+   and locked_by = $2::text
+   and status = 'processing'
 `
 
 type AckParams struct {

@@ -52,17 +52,3 @@ type DbtxJobsArchive struct {
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 }
-
-type DbtxJobsRetryState struct {
-	RetryKey       uuid.UUID
-	Status         string
-	Attempts       int32
-	MaxAttempts    int32
-	LeaseOwner     sql.NullString
-	FencingToken   int64
-	RetryAt        time.Time
-	LeaseExpiresAt time.Time
-	LastError      sql.NullString
-	CompletedAt    sql.NullTime
-	UpdatedAt      time.Time
-}

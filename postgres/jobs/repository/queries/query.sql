@@ -27,81 +27,91 @@ FROM dbtx.create_job(
 -- index. MATERIALIZED stops the planner from folding the locking subquery
 -- into the outer UPDATE, which could change which rows get locked.
 -- name: FindAvailableJobs :many
-with retry_args as (
-    select sqlc.arg(worker_id)::text as worker_id,
-           sqlc.arg(lease_seconds)::float8 as lease_seconds,
-           sqlc.arg('limit')::int as "limit"
-), picked AS MATERIALIZED (
+WITH picked AS MATERIALIZED (
     SELECT sub.id
     FROM dbtx.jobs sub
     WHERE sub.status IN ('queued', 'running', 'error')   -- 'running' here = expired lease
       AND sub.visible_at <= NOW()
       AND sub.attempts < sub.max_attempts
     ORDER BY sub.visible_at
-    LIMIT (select "limit" from retry_args)
+    LIMIT sqlc.arg('limit')::int
     FOR UPDATE SKIP LOCKED
 )
-SELECT claimed.* FROM picked
-CROSS JOIN LATERAL dbtx.jobs_retry(picked.id, 'claim', (select worker_id from retry_args), null::bigint,
-    jsonb_build_object('lease_seconds', (select lease_seconds from retry_args))) claimed;
+UPDATE dbtx.jobs
+SET status        = 'running',
+    fencing_token = jobs.fencing_token + 1,   -- new owner => older tokens are now invalid
+    worker_id     = sqlc.arg(worker_id)::text,
+    visible_at    = clock_timestamp() + (INTERVAL '1 second' * sqlc.arg(lease_seconds)::float8),
+    attempts      = jobs.attempts + 1
+    -- error is intentionally NOT cleared: if this attempt's worker crashes, the
+    -- previous failure reason is still available. Complete clears it on success.
+FROM picked
+WHERE jobs.id = picked.id
+RETURNING jobs.*;
 
 -- -----------------------------------------------------------------------------
 -- Lease renewal. Zero rows => lease lost (expired and reclaimed, or finished).
 -- A worker whose lease merely expired but was NOT yet reclaimed can still
 -- heartbeat/complete: the token is unchanged, so that is correct.
 -- name: Heartbeat :one
-with retry_args as (
-    select sqlc.arg(lease_seconds)::float8 as lease_seconds,
-           sqlc.arg(id)::uuid as id,
-           sqlc.arg(fencing_token)::bigint as fencing_token,
-           sqlc.arg(worker_id)::text as worker_id
-)
-SELECT transitioned.* FROM dbtx.jobs_retry((select id from retry_args), 'renew',
-    (select worker_id from retry_args), (select fencing_token from retry_args),
-    jsonb_build_object('lease_seconds', (select lease_seconds from retry_args))) transitioned;
+UPDATE dbtx.jobs
+SET visible_at = clock_timestamp() + (INTERVAL '1 second' * sqlc.arg(lease_seconds)::float8)
+WHERE id            = sqlc.arg(id)
+  AND status        = 'running'
+  AND fencing_token = sqlc.arg(fencing_token)
+  AND worker_id     = sqlc.arg(worker_id)::text
+RETURNING *;
 
 -- -----------------------------------------------------------------------------
 -- Terminal success. (worker_id guard is redundant with the per-claim token but
 -- kept as defense in depth.)
 -- name: Complete :one
-with retry_args as (
-    select sqlc.arg(response)::jsonb as response,
-           sqlc.arg(id)::uuid as id,
-           sqlc.arg(fencing_token)::bigint as fencing_token,
-           sqlc.arg(worker_id)::text as worker_id
-)
-SELECT transitioned.* FROM dbtx.jobs_retry((select id from retry_args), 'complete',
-    (select worker_id from retry_args), (select fencing_token from retry_args),
-    jsonb_build_object('response', (select response from retry_args))) transitioned;
+UPDATE dbtx.jobs
+SET status       = 'success',
+    response     = sqlc.arg(response)::jsonb,
+    error        = NULL,
+    worker_id    = NULL,
+    visible_at   = clock_timestamp(),
+    processed_at = clock_timestamp()
+WHERE id            = sqlc.arg(id)
+  AND status        = 'running'
+  AND fencing_token = sqlc.arg(fencing_token)
+  AND worker_id     = sqlc.arg(worker_id)::text
+RETURNING *;
 
 -- -----------------------------------------------------------------------------
 -- Terminal failure (non-retryable). Sets processed_at to satisfy the CHECK.
 -- name: Fail :one
-with retry_args as (
-    select sqlc.arg(error)::text as error,
-           sqlc.arg(id)::uuid as id,
-           sqlc.arg(fencing_token)::bigint as fencing_token,
-           sqlc.arg(worker_id)::text as worker_id
-)
-SELECT transitioned.* FROM dbtx.jobs_retry((select id from retry_args), 'fail',
-    (select worker_id from retry_args), (select fencing_token from retry_args),
-    jsonb_build_object('error', (select error from retry_args))) transitioned;
+UPDATE dbtx.jobs
+SET status       = 'failed',
+    error        = sqlc.arg(error)::text,
+    worker_id    = NULL,
+    visible_at   = clock_timestamp(),
+    processed_at = clock_timestamp()
+WHERE id            = sqlc.arg(id)
+  AND status        = 'running'
+  AND fencing_token = sqlc.arg(fencing_token)
+  AND worker_id     = sqlc.arg(worker_id)::text
+RETURNING *;
 
 -- -----------------------------------------------------------------------------
 -- Retry with backoff. When attempts are exhausted the job becomes terminal
 -- ('failed') instead of sitting in 'error' forever (the claim query would
 -- never pick it up again). RHS column references see the OLD row.
 -- name: Retry :one
-with retry_args as (
-    select sqlc.arg(backoff_seconds)::float8 as backoff_seconds,
-           sqlc.arg(error)::text as error,
-           sqlc.arg(id)::uuid as id,
-           sqlc.arg(fencing_token)::bigint as fencing_token,
-           sqlc.arg(worker_id)::text as worker_id
-)
-SELECT transitioned.* FROM dbtx.jobs_retry((select id from retry_args), 'nack',
-    (select worker_id from retry_args), (select fencing_token from retry_args),
-    jsonb_build_object('error', (select error from retry_args), 'delay_seconds', (select backoff_seconds from retry_args))) transitioned;
+UPDATE dbtx.jobs
+SET status       = CASE WHEN attempts >= max_attempts
+                        THEN 'failed'::dbtx.job_status
+                        ELSE 'error'::dbtx.job_status END,
+    visible_at   = clock_timestamp() + (INTERVAL '1 second' * sqlc.arg(backoff_seconds)::float8),
+    processed_at = CASE WHEN attempts >= max_attempts THEN clock_timestamp() END,
+    worker_id    = NULL,
+    error        = sqlc.arg(error)::text
+WHERE id            = sqlc.arg(id)
+  AND status        = 'running'
+  AND fencing_token = sqlc.arg(fencing_token)
+  AND worker_id     = sqlc.arg(worker_id)::text
+RETURNING *;
 
 -- -----------------------------------------------------------------------------
 -- Reaper: a worker that crashes on its LAST attempt leaves a 'running' row with
@@ -113,16 +123,14 @@ SELECT transitioned.* FROM dbtx.jobs_retry((select id from retry_args), 'nack',
 -- the lease must have expired grace_seconds ago, giving that worker time to
 -- record its outcome.
 -- name: ReapExhausted :execrows
-WITH exhausted AS MATERIALIZED (
-    SELECT id FROM dbtx.jobs
-     WHERE status IN ('running', 'error')
-       AND visible_at <= NOW() - (INTERVAL '1 second' * sqlc.arg(grace_seconds)::float8)
-       AND attempts >= max_attempts
-       FOR UPDATE
-)
-SELECT 1 FROM exhausted
-CROSS JOIN LATERAL dbtx.jobs_retry(exhausted.id, 'expire', null::text, null::bigint,
-    jsonb_build_object('keep_error', true, 'error', 'lease expired; max attempts exceeded')) transitioned;
+UPDATE dbtx.jobs
+SET status       = 'failed',
+    worker_id    = NULL,
+    processed_at = clock_timestamp(),
+    error        = COALESCE(error, 'lease expired; max attempts exceeded')
+WHERE status IN ('running', 'error')
+  AND visible_at <= NOW() - (INTERVAL '1 second' * sqlc.arg(grace_seconds)::float8)
+  AND attempts >= max_attempts;
 
 -- -----------------------------------------------------------------------------
 -- Archive finished jobs in bounded batches. Call repeatedly until it returns 0.

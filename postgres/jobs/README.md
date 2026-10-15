@@ -14,8 +14,7 @@ go get github.com/alextanhongpin/dbtx/postgres/jobs github.com/lib/pq
 ```
 
 Apply `repository.Schema` through your migration system before submitting jobs.
-It includes the base [tables](repository/schema.sql), shared retry functions and
-[lifecycle adapter](repository/retry.sql):
+It includes the base [tables and native functions](repository/schema.sql):
 
 ```go
 if _, err := db.ExecContext(ctx, repository.Schema); err != nil {
@@ -28,9 +27,10 @@ repeat creation of its enum; existing installations still need migrations for
 schema changes. Queries and worker operations use autocommit; do not run a
 worker or janitor inside a `dbtx` transaction.
 
-Existing installations should apply `repository.Migrations` in one transaction
-before deploying new workers. It installs the [shared lifecycle](../retry/README.md)
-without rewriting work rows; see that guide for permissions and rollout.
+When upgrading from shared SQL adapters, stop older workers and apply
+`repository.Migrations` in one transaction. It removes this module's obsolete
+adapter and view without rewriting work rows. Native queries preserve the
+existing ownership and retry rules. See the [migration guide](../../docs/postgres-native-transitions.md).
 
 ## Submit and process jobs
 

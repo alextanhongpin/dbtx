@@ -12,14 +12,16 @@ import (
 )
 
 const nack = `-- name: Nack :execrows
-with retry_args as (
-    select $1::uuid as id,
-           $2::bool as dead,
-           $3::float8 as delay_seconds,
-           $4::text as last_error,
-           $5::text as locked_by
-)
-select 1 from dbtx.inbox_retry((select id from retry_args), 'nack', (select locked_by from retry_args), jsonb_build_object('force', (select dead from retry_args), 'error', (select last_error from retry_args), 'delay_seconds', (select delay_seconds from retry_args)))
+update dbtx.inbox
+   set status = (case when $2::bool then 'dead' else 'pending' end)::dbtx.inbox_status,
+       available_at = now()
+     + interval '1 second' * $3::float8,
+       locked_by = null,
+       last_error = $4::text,
+       updated_at = now()
+ where id = $1
+   and locked_by = $5::text
+   and status = 'processing'
 `
 
 type NackParams struct {

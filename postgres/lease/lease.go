@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/alextanhongpin/dbtx"
+	"github.com/alextanhongpin/dbtx/internal/renew"
 	"github.com/alextanhongpin/dbtx/postgres/lease/repository/postgres"
 	"github.com/lib/pq"
 )
@@ -168,7 +169,7 @@ func (l *Locker) acquire(ctx context.Context, key string, try bool, opts ...Lock
 			return nil, errors.Join(fmt.Errorf("lease: acquire: %w", err), context.Cause(ctx), cleanupErr)
 		}
 		if token > 0 {
-			deadline := sent.Add(o.ttl - o.ttl/6)
+			deadline := renew.Deadline(sent, o.ttl)
 			if context.Cause(ctx) != nil || !time.Now().Before(deadline) {
 				return nil, errors.Join(ErrLeaseLost, context.Cause(ctx), l.cleanupOwner(ctx, key, owner))
 			}

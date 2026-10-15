@@ -1,6 +1,6 @@
 version: "2"
 sql:
-  - schema: ["../ownership/schema.sql", "schema.sql", "ownership.sql"]
+  - schema: schema.sql
     queries: queries
     engine: postgresql
     gen:

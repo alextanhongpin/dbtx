@@ -19,7 +19,9 @@ func TestLifecycleMigrationPreservesLiveClaim(t *testing.T) {
 				return err
 			}
 			defer db.Close()
-			_, err = db.Exec(baseSchema) // Install the legacy schema only.
+			_, err = db.Exec(baseSchema + `CREATE VIEW dbtx.idempotent_retry_state AS SELECT * FROM dbtx.idempotency_keys;
+CREATE FUNCTION dbtx.idempotent_retry(text, text, bigint, jsonb) RETURNS SETOF dbtx.idempotency_keys
+LANGUAGE sql AS $$ SELECT * FROM dbtx.idempotency_keys WHERE false $$;`)
 			return err
 		},
 	})
@@ -38,19 +40,11 @@ func TestLifecycleMigrationPreservesLiveClaim(t *testing.T) {
 	_, err = tx.ExecContext(t.Context(), Migrations+Migrations)
 	require.NoError(t, err)
 	require.NoError(t, tx.Commit())
-	var viewColumns []string
-	rows, err := db.QueryContext(t.Context(), `select attname from pg_attribute
-        where attrelid = 'dbtx.idempotent_retry_state'::regclass and attnum > 0 and not attisdropped order by attnum`)
-	// Keep the same lifecycle column contract across all four module tables.
-	require.NoError(t, err)
-	for rows.Next() {
-		var column string
-		require.NoError(t, rows.Scan(&column))
-		viewColumns = append(viewColumns, column)
-	}
-	require.NoError(t, rows.Err())
-	require.NoError(t, rows.Close())
-	require.Equal(t, []string{"retry_key", "status", "attempts", "max_attempts", "lease_owner", "fencing_token", "retry_at", "lease_expires_at", "last_error", "completed_at", "updated_at"}, viewColumns)
+	var removed bool
+	require.NoError(t, db.QueryRowContext(t.Context(), "select to_regclass('dbtx.idempotent_retry_state') is null").Scan(&removed))
+	require.True(t, removed, "obsolete lifecycle view remains")
+	require.NoError(t, db.QueryRowContext(t.Context(), "select to_regprocedure('dbtx.idempotent_retry(text, text, bigint, jsonb)') is null").Scan(&removed))
+	require.True(t, removed, "obsolete adapter remains")
 
 	require.NoError(t, db.QueryRowContext(t.Context(), query, id).Scan(&after))
 	require.JSONEq(t, string(before), string(after))

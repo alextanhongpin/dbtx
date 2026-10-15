@@ -3,7 +3,8 @@ package lease
 import (
 	"context"
 	"errors"
-	"time"
+
+	"github.com/alextanhongpin/dbtx/internal/renew"
 )
 
 // Activity acquires, renews while fn runs, cancels fn's context on loss, and
@@ -60,29 +61,15 @@ func (l *Locker) activity(ctx context.Context, key string, fn func(context.Conte
 }
 
 func (h *heldLease) heartbeat(ctx context.Context, cancel context.CancelCauseFunc) {
-	ticker := time.NewTicker(h.ttl / 3)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-h.done:
-			cancel(h.Err())
-			return
-		case <-ticker.C:
-		case <-h.renewNow:
-		}
+	renew.Every(ctx, h.ttl, h.renewNow, func(ctx context.Context) bool {
 		err := h.renew(ctx, true)
 		if terminal := h.Err(); terminal != nil {
 			cancel(terminal)
-			return
+			return false
 		}
-		// Busy means a short fenced transaction/lifecycle call is in progress.
-		// Transport failures leave the existing deadline unchanged; retry next tick.
-		if err != nil && ctx.Err() != nil {
-			return
-		}
-	}
+		// Busy operations and transport failures retain the current deadline.
+		return err == nil || ctx.Err() == nil
+	})
 }
 
 // RunInFencedTx acquires a new lease, runs a short guarded transaction, and

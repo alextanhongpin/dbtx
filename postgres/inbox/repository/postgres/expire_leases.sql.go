@@ -18,8 +18,13 @@ with expired as (
        and attempts >= max_attempts
        for update skip locked
 )
-select 1 from expired
- cross join lateral dbtx.inbox_retry(expired.id, 'expire', null::text, '{}'::jsonb) transitioned
+update dbtx.inbox i
+   set status = 'dead'::dbtx.inbox_status,
+       locked_by = null,
+       last_error = 'lease expired on final attempt',
+       updated_at = now()
+  from expired
+ where i.id = expired.id
 `
 
 // Marks messages whose lease expired on their final attempt as dead.

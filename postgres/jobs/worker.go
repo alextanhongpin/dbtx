@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 	"uuid"
+
+	"github.com/alextanhongpin/dbtx/internal/renew"
 )
 
 // Handler does the actual work for one job. Requirements:
@@ -302,51 +304,72 @@ func (w *Worker) process(workCtx context.Context, job Job, claimedAt time.Time) 
 // The local deadline is enforced by its own timer, so a heartbeat that hangs
 // cannot delay it, and each heartbeat's timeout ends at the deadline.
 func (w *Worker) heartbeatLoop(ctx context.Context, cancel context.CancelCauseFunc, job Job, leaseDeadline time.Time, log *slog.Logger) {
-	// The margin covers clock drift between us and the database, and the time
-	// the handler takes to notice the cancellation.
-	margin := w.cfg.LeaseDuration / 6
-	stopAt := func() time.Duration { return time.Until(leaseDeadline) - margin }
-
-	expire := time.NewTimer(stopAt())
-	defer expire.Stop()
-	t := time.NewTicker(w.cfg.LeaseDuration / 3)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-expire.C:
-			cancel(errLeaseExpiredLocally)
-			return
-		case <-t.C:
+	var mu sync.Mutex
+	deadline := renew.Deadline(leaseDeadline.Add(-w.cfg.LeaseDuration), w.cfg.LeaseDuration)
+	var lost error
+	changed := make(chan struct{}, 1)
+	check := func() (time.Time, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if lost == nil && !time.Now().Before(deadline) {
+			lost = errLeaseExpiredLocally
 		}
-
-		timeout := min(w.cfg.HeartbeatTimeout, stopAt())
-		if timeout <= 0 {
-			cancel(errLeaseExpiredLocally)
-			return
+		return deadline, lost
+	}
+	watchCtx, stop := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := renew.Watch(watchCtx, changed, check); err != nil && watchCtx.Err() == nil {
+			cancel(err)
 		}
-		sent := time.Now() // taken BEFORE the call: a conservative lease start
-		hbCtx, c := context.WithTimeout(ctx, timeout)
-		_, err := w.repo.Heartbeat(hbCtx, HeartbeatParams{
+	}()
+	defer func() { stop(); <-done }()
+	renew.Every(ctx, w.cfg.LeaseDuration, nil, func(ctx context.Context) bool {
+		oldDeadline, err := check()
+		if err != nil {
+			cancel(err)
+			return false
+		}
+		sent := time.Now()
+		hbCtx, c := context.WithDeadline(ctx, minDeadline(oldDeadline, sent.Add(w.cfg.HeartbeatTimeout)))
+		_, err = w.repo.Heartbeat(hbCtx, HeartbeatParams{
 			ID: job.ID, FencingToken: job.FencingToken, WorkerID: w.cfg.WorkerID,
 			LeaseSeconds: w.cfg.LeaseDuration.Seconds(),
 		})
 		c()
-
+		if ctx.Err() != nil {
+			return false
+		}
+		mu.Lock()
+		// Neither a response after the old deadline nor after the new conservative
+		// deadline may restore local ownership.
+		if lost == nil && (!time.Now().Before(deadline) || !time.Now().Before(renew.Deadline(sent, w.cfg.LeaseDuration))) {
+			lost = errLeaseExpiredLocally
+		}
+		if err == nil && lost == nil {
+			deadline = renew.Deadline(sent, w.cfg.LeaseDuration)
+		}
+		terminal := lost
+		mu.Unlock()
+		if terminal != nil {
+			cancel(terminal)
+			return false
+		}
 		switch {
 		case err == nil:
-			leaseDeadline = sent.Add(w.cfg.LeaseDuration)
-			expire.Reset(stopAt())
+			select {
+			case changed <- struct{}{}:
+			default:
+			}
 		case errors.Is(err, ErrNoRows):
 			cancel(ErrLeaseLost)
-			return
-		case ctx.Err() != nil:
-			return // job finished while the heartbeat was in flight
+			return false
 		default:
 			log.Warn("heartbeat failed", "err", err)
 		}
-	}
+		return true
+	})
 }
 
 func (w *Worker) safeHandle(ctx context.Context, job Job, log *slog.Logger) (resp json.RawMessage, err error) {
@@ -410,4 +433,11 @@ func sleepCtx(ctx context.Context, d time.Duration) {
 
 func jitter(d time.Duration) time.Duration {
 	return d/2 + time.Duration(rand.Int64N(int64(d)/2+1))
+}
+
+func minDeadline(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
 }
