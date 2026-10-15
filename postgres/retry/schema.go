@@ -5,10 +5,15 @@ package retry
 
 import _ "embed"
 
+//go:generate go run ../lease/ownership/cmd/bundle/main.go -root ../..
 //go:generate go run ./cmd/bundle
 
-// Schema installs the shared functions. Install it before module lifecycle views.
-// It is safe to apply repeatedly; constructors never execute DDL.
-//
 //go:embed schema.sql
-var Schema string
+var retrySchema string
+
+//go:embed shared_ownership.sql
+var ownershipSchema string
+
+// Schema installs the shared ownership primitives and retry transitions.
+// Install before module lifecycle views. Safe to apply repeatedly.
+var Schema = ownershipSchema + retrySchema

@@ -67,8 +67,14 @@ retention queries. Typed adapters write domain responses/TTL in the same
 transaction as the shared transition. Handler savepoints, business writes and
 Ack/Nack transaction boundaries are unchanged.
 
-Advisory locks and resource leases remain separate primitives: they do not have
-the persisted attempt/outcome state required by this interface.
+Grant, renewal and ownership guards use the shared functions sourced from
+[`postgres/lease/ownership`](../lease/ownership/README.md). Resource leases use
+the same primitives with strict expiry. Retry workers retain their existing
+expiry policies. Outcome and ownership release are updated together to preserve
+constraints coupling status, completion and ownership. Idempotency's atomic
+insert-or-claim/result-replay protocol remains local.
+
+Advisory locks remain a separate transaction-scoped PostgreSQL primitive.
 
 ## Install and upgrade
 
@@ -112,8 +118,9 @@ and views can remain, and older queries still use the same rows and columns.
 
 ## Source, generation and verification
 
-`postgres/retry/schema.sql` is the only source of the shared functions. The
-bundle generator copies it into the four independently released modules so
+`postgres/retry/schema.sql` owns retry transitions;
+`postgres/lease/ownership/schema.sql` owns shared ownership primitives. The
+bundle generator copies both into the four independently released modules so
 their existing dependency pins remain usable. Generated SQL is distribution
 material, not a second implementation. Schema-bundle tests detect drift.
 

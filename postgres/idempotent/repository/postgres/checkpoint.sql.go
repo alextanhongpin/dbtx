@@ -30,8 +30,7 @@ const checkpoint = `-- name: Checkpoint :one
           lease_expires_at = clock_timestamp()
         + interval '1 second' * $3::float8
     where idempotency_key = $4::text
-      and fencing_token = $5::bigint
-      and status = 'in_progress'
+      and dbtx.ownership_lock('dbtx.idempotent_retry_state'::regclass, $4::text, NULL, NULL, $5::bigint, 'in_progress', false, false, true)
 returning fencing_token
 `
 

@@ -159,7 +159,9 @@ commit and rollback so repositories cannot finish the caller's transaction.
 
 The inbox, outbox, jobs and idempotency repositories share [PostgreSQL retry
 lifecycle functions](postgres/retry/README.md) through updatable views over their
-existing tables. Their Go APIs and table ownership remain separate.
+existing tables. Ownership primitives come from
+[`postgres/lease/ownership`](postgres/lease/ownership/README.md).
+Their Go APIs and table ownership remain separate.
 
 ## Modules
 

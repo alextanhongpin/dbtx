@@ -80,15 +80,26 @@ begin
     execute format(
         'select %s from %s r where retry_key = $1::%s
          and status::text = any($2)
-         and ($3 or lease_owner = $4)
-         and ($5 or fencing_token = $6)
          for update %s',
         projection, p_relation, key_type,
         case when p_action in ('claim', 'expire') then 'skip locked' else '' end)
-    into state using p_key, expected,
-        p_action in ('claim', 'requeue', 'expire') or not coalesce((p_policy->>'check_owner')::boolean, true), p_owner,
-        p_action in ('claim', 'requeue', 'expire') or not coalesce((p_policy->>'check_token')::boolean, false), p_token;
+    into state using p_key, expected;
     if state is null then return; end if;
+
+    if p_action not in ('claim','requeue','expire') and not dbtx.ownership_lock(
+        p_relation,p_key,NULL,p_owner,p_token,p_policy->>'running',false,
+        coalesce((p_policy->>'check_owner')::boolean,true),
+        coalesce((p_policy->>'check_token')::boolean,false)) then return; end if;
+
+    if p_action='renew' then
+        if not dbtx.ownership_renew(p_relation,p_key,NULL,p_owner,p_token,p_policy->>'running',false,
+            coalesce((p_policy->>'check_owner')::boolean,true),coalesce((p_policy->>'check_token')::boolean,false),
+            interval '1 second' * (p_options->>'lease_seconds')::float8,true,p_now) then return; end if;
+        execute format('select %s from %s where retry_key=$1::%s',projection,p_relation,key_type)
+            into result using p_key;
+        return next result;
+        return;
+    end if;
 
     next_attempts := (state->>'attempts')::integer;
     max_attempts := coalesce((p_options->>'max_attempts')::integer, (state->>'max_attempts')::integer);
@@ -109,8 +120,6 @@ begin
         next_status := p_policy->>'running';
         next_owner := p_owner;
         next_attempts := next_attempts + 1;
-    elsif p_action = 'renew' then
-        null; -- Ownership was checked while locking the row.
     elsif p_action = 'nack' then
         if max_attempts is null then
             raise exception 'retry: nack requires an attempt limit' using errcode = '22023';
@@ -161,21 +170,19 @@ begin
         if coalesce((p_policy->>'complete_failure')::boolean, false) then next_completed := p_now; end if;
     end if;
 
-    if p_action in ('claim', 'renew') then
-        -- Do not assign retry_at too: legacy views may map both timestamps to
-        -- the same base column. Idempotency claim itself stays domain-owned.
-        assignments := 'status = $1::' || status_type || ', lease_owner = $2,
-            attempts = $3, lease_expires_at = $4, updated_at = $7';
-        next_at := p_now + interval '1 second' * (p_options->>'lease_seconds')::float8;
-        if coalesce((p_policy->>'increment_token')::boolean, false) and p_action = 'claim' then
-            assignments := assignments || ', fencing_token = fencing_token + 1';
-        end if;
+    if p_action='claim' then
+        if dbtx.ownership_grant(p_relation,p_key,NULL,p_owner,
+            interval '1 second' * (p_options->>'lease_seconds')::float8,NULL::regclass,
+            coalesce((p_policy->>'increment_token')::boolean,false),true,p_now)=0 then return; end if;
+        assignments := 'status=$1::'||status_type||', attempts=$3, updated_at=$7';
     else
-        assignments := 'status = $1::' || status_type || ', lease_owner = $2,
-            attempts = $3, retry_at = $4, last_error = $5,
-            completed_at = $6, updated_at = $7';
-        if coalesce((p_policy->>'separate_lease')::boolean, false) then
-            assignments := assignments || ', lease_expires_at = null';
+        -- Domain constraints couple status/completion and ownership. Clear them
+        -- in one UPDATE after the shared ownership guard, never in two writes.
+        assignments := 'status=$1::'||status_type||', lease_owner=$2, attempts=$3,last_error=$5,completed_at=$6,updated_at=$7';
+        if coalesce((p_policy->>'separate_lease')::boolean,false) then
+            assignments := assignments||', retry_at=$4, lease_expires_at=NULL';
+        else
+            assignments := assignments||', lease_expires_at=$4';
         end if;
     end if;
     execute format('update %s r set %s where retry_key = $8::%s returning %s',

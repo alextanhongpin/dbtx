@@ -21,6 +21,5 @@
           lease_expires_at = clock_timestamp()
         + interval '1 second' * sqlc.arg(lease_seconds)::float8
     where idempotency_key = sqlc.arg(idempotency_key)::text
-      and fencing_token = sqlc.arg(fencing_token)::bigint
-      and status = 'in_progress'
+      and dbtx.ownership_lock('dbtx.idempotent_retry_state'::regclass, sqlc.arg(idempotency_key)::text, NULL, NULL, sqlc.arg(fencing_token)::bigint, 'in_progress', false, false, true)
 returning fencing_token;

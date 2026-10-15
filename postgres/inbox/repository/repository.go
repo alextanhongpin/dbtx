@@ -30,6 +30,9 @@ var Schema = sharedRetrySchema + baseSchema + lifecycleSchema
 // Apply with workers stopped, in one transaction, before deploying new workers.
 var Migrations = sharedRetrySchema + lifecycleSchema
 
+// OwnershipMigrations installs the shared lease and retry adapters without rewriting work.
+var OwnershipMigrations = Migrations
+
 var _ inbox.Repository = (*Repository)(nil)
 
 type Repository struct {

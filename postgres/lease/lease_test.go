@@ -679,7 +679,7 @@ type failReleaseDB struct {
 }
 
 func (d *failReleaseDB) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
-	if strings.Contains(query, "UPDATE dbtx.leases SET owner_id = NULL") {
+	if strings.Contains(query, "-- name: ReleaseLease ") {
 		return nil, d.err
 	}
 	return d.DBTX.ExecContext(ctx, query, args...)

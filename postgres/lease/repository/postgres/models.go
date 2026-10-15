@@ -16,3 +16,11 @@ type DbtxLease struct {
 	FencingToken int64
 	ExpiresAt    time.Time
 }
+
+type DbtxResourceOwnership struct {
+	Namespace      string
+	ID             string
+	OwnerID        sql.NullString
+	Token          int64
+	LeaseExpiresAt time.Time
+}

@@ -11,10 +11,12 @@ across failover. Constructors do not install schema or own/close your pool.
 
 ## Setup
 
-Apply [repository/schema.sql](repository/schema.sql) through migrations. Its SQL
-is also exported as `repository.Schema`. Rows retain fencing history permanently;
-do not purge expired rows. Reapplying Schema updates functions but does not
-migrate an existing table definition.
+Apply `repository.Schema` through migrations. It installs the shared
+[ownership functions](ownership/README.md), base table and resource adapter.
+For an existing installation, stop workers and apply
+`repository.OwnershipMigrations` in one transaction before deploying new callers.
+Rows retain fencing history permanently; do not purge expired rows. Reapplying
+Schema does not migrate an existing table definition.
 
 ```go
 import (

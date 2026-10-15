@@ -53,9 +53,16 @@ func (q *Queries) LockLeaseRow(ctx context.Context, arg LockLeaseRowParams) (int
 }
 
 const releaseLease = `-- name: ReleaseLease :execrows
-UPDATE dbtx.leases SET owner_id = NULL, expires_at = '-infinity'
-WHERE namespace = $1 AND key = $2
-  AND owner_id = $3 AND fencing_token = $4
+with ownership_args as (
+    select $1::text as "namespace",
+           $2::text as "key",
+           $3::text as "owner_id",
+           $4::bigint as "token"
+)
+select 1 where dbtx.ownership_release('dbtx.resource_ownership'::regclass,
+    (select "key" from ownership_args), (select "namespace" from ownership_args),
+    (select "owner_id" from ownership_args), (select "token" from ownership_args),
+    null::text, false, true, true, '-infinity'::timestamptz, false, null::timestamptz)
 `
 
 type ReleaseLeaseParams struct {
@@ -79,9 +86,15 @@ func (q *Queries) ReleaseLease(ctx context.Context, arg ReleaseLeaseParams) (int
 }
 
 const releaseOwner = `-- name: ReleaseOwner :execrows
-UPDATE dbtx.leases SET owner_id = NULL, expires_at = '-infinity'
-WHERE namespace = $1 AND key = $2
-  AND owner_id = $3
+with ownership_args as (
+    select $1::text as "namespace",
+           $2::text as "key",
+           $3::text as "owner_id"
+)
+select 1 where dbtx.ownership_release('dbtx.resource_ownership'::regclass,
+    (select "key" from ownership_args), (select "namespace" from ownership_args),
+    (select "owner_id" from ownership_args), null::bigint,
+    null::text, false, true, false, '-infinity'::timestamptz, false, null::timestamptz)
 `
 
 type ReleaseOwnerParams struct {
@@ -139,12 +152,16 @@ func (q *Queries) SetTransactionTimeouts(ctx context.Context, timeout string) er
 }
 
 const validateLease = `-- name: ValidateLease :one
-SELECT EXISTS (
-    SELECT 1 FROM dbtx.leases
-    WHERE namespace = $1 AND key = $2
-      AND owner_id = $3 AND fencing_token = $4
-      AND expires_at > clock_timestamp()
-)::boolean AS valid
+with ownership_args as (
+    select $1::text as "namespace",
+           $2::text as "key",
+           $3::text as "owner_id",
+           $4::bigint as "token"
+)
+select dbtx.ownership_lock('dbtx.resource_ownership'::regclass,
+    (select "key" from ownership_args), (select "namespace" from ownership_args),
+    (select "owner_id" from ownership_args), (select "token" from ownership_args),
+    null::text, true, true, true)::boolean as valid
 `
 
 type ValidateLeaseParams struct {
