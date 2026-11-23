@@ -19,7 +19,7 @@ one fencing-token sequence and one error vocabulary:
 | `outbox` | Transactional event publishing; unordered topics, or ordered topics with a gapless sequence per aggregate and head-of-line policies (`HeadBlock`, `HeadPark`, `HeadStop`) |
 | `inbox` | Apply incoming messages once: `ModeDedup`, `ModeSequenced` (buffers out-of-order messages and drains in order), `ModeVersioned` (newer wins); `Enqueue` hands a message to a job |
 | `schedule` | Cron and interval schedules that submit one job per tick, however many schedulers run |
-| `cache` | Typed cache with stampede protection, stale-while-revalidate and versioned writes |
+| `cache` | Typed cache with stampede protection, stale-while-revalidate and versioned writes; key-value operations (`LoadOrStore`, `StoreOnce`, `CompareAndSwap`, `CompareAndDelete`, `LoadAndDelete`, `Expire`, `TTL`, `Exists`) and the `Func`/`Idempotent` memoizers |
 | `durabletest` | Test helpers: isolated database per test, pause gates for fault injection, recording publisher |
 
 Docs, in `docs/`: [learning guide](docs/learning-guide.md) (start here),
@@ -117,7 +117,7 @@ is retried with exponential backoff and jitter until `MaxAttempts`.
 | Idempotency key retention | 24h for `keys`, 7 days for job keys |
 | Outbox | 10 attempts per event or stream head, batch 100, `HeadBlock`, advance per event |
 | Scheduler | missed runs `MissedLatest`, overlap `OverlapSkip` |
-| Cache | compute lease 30s; waiting callers poll every 50ms, then compute themselves |
+| Cache | compute lease 30s, renewed every 10s while `fn` runs; waiting callers poll every 50ms until the value appears or the lease ends (`MaxWait` bounds the wait) |
 
 Unregistered job kinds and outbox topics are rejected, so a typo cannot create
 work nobody processes.

@@ -11,6 +11,20 @@ import (
 	"github.com/alextanhongpin/dbtx/postgres/durable/internal/pg"
 )
 
+const cacheEntryTTL = `-- name: CacheEntryTTL :one
+SELECT (EXTRACT(EPOCH FROM (expires_at - clock_timestamp())) * 1000000)::bigint AS ttl_us
+FROM durable.cache
+WHERE key = $1 AND value IS NOT NULL AND expires_at > clock_timestamp()
+`
+
+// Remaining fresh time of a fresh value, in microseconds.
+func (q *Queries) CacheEntryTTL(ctx context.Context, key string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, cacheEntryTTL, key)
+	var ttl_us int64
+	err := row.Scan(&ttl_us)
+	return ttl_us, err
+}
+
 const claimCompute = `-- name: ClaimCompute :one
 INSERT INTO durable.cache AS c (key, compute_owner, compute_expires_at)
 VALUES ($1, $2::text, clock_timestamp() + $3::bigint * interval '1 microsecond')
@@ -36,6 +50,85 @@ func (q *Queries) ClaimCompute(ctx context.Context, arg ClaimComputeParams) (int
 	return token, err
 }
 
+const compareAndInvalidateCacheEntry = `-- name: CompareAndInvalidateCacheEntry :execrows
+UPDATE durable.cache
+SET value = NULL, version = nextval('durable.fencing_seq'),
+    expires_at = NULL, stale_until = NULL, updated_at = now()
+WHERE key = $1 AND value IS NOT NULL AND expires_at > clock_timestamp()
+  AND value = $2::jsonb
+`
+
+type CompareAndInvalidateCacheEntryParams struct {
+	Key      string
+	OldValue pg.JSON
+}
+
+// Tombstones a fresh value equal (as jsonb) to old, with a new version (D17).
+func (q *Queries) CompareAndInvalidateCacheEntry(ctx context.Context, arg CompareAndInvalidateCacheEntryParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, compareAndInvalidateCacheEntry, arg.Key, arg.OldValue)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const compareAndSwapCacheEntry = `-- name: CompareAndSwapCacheEntry :execrows
+UPDATE durable.cache
+SET value = $1::jsonb, version = nextval('durable.fencing_seq'),
+    expires_at = clock_timestamp() + $2::bigint * interval '1 microsecond',
+    stale_until = clock_timestamp() + $3::bigint * interval '1 microsecond',
+    updated_at = now()
+WHERE key = $4 AND value IS NOT NULL AND expires_at > clock_timestamp()
+  AND value = $5::jsonb
+`
+
+type CompareAndSwapCacheEntryParams struct {
+	NewValue pg.JSON
+	TtlUs    int64
+	StaleUs  int64
+	Key      string
+	OldValue pg.JSON
+}
+
+// Replaces a fresh value equal (as jsonb) to old, with a new version.
+func (q *Queries) CompareAndSwapCacheEntry(ctx context.Context, arg CompareAndSwapCacheEntryParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, compareAndSwapCacheEntry,
+		arg.NewValue,
+		arg.TtlUs,
+		arg.StaleUs,
+		arg.Key,
+		arg.OldValue,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const expireCacheEntry = `-- name: ExpireCacheEntry :execrows
+UPDATE durable.cache
+SET expires_at = clock_timestamp() + $1::bigint * interval '1 microsecond',
+    stale_until = clock_timestamp() + $2::bigint * interval '1 microsecond',
+    updated_at = now()
+WHERE key = $3 AND value IS NOT NULL AND expires_at > clock_timestamp()
+`
+
+type ExpireCacheEntryParams struct {
+	TtlUs   int64
+	StaleUs int64
+	Key     string
+}
+
+// Sets a new TTL and stale window on a fresh value. The version is kept: the
+// value itself does not change.
+func (q *Queries) ExpireCacheEntry(ctx context.Context, arg ExpireCacheEntryParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, expireCacheEntry, arg.TtlUs, arg.StaleUs, arg.Key)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const invalidateCacheEntry = `-- name: InvalidateCacheEntry :exec
 UPDATE durable.cache
 SET value = NULL, version = nextval('durable.fencing_seq'),
@@ -47,6 +140,32 @@ WHERE key = $1
 func (q *Queries) InvalidateCacheEntry(ctx context.Context, key string) error {
 	_, err := q.db.ExecContext(ctx, invalidateCacheEntry, key)
 	return err
+}
+
+const loadAndInvalidateCacheEntry = `-- name: LoadAndInvalidateCacheEntry :one
+WITH old AS (
+    SELECT o.key, o.value, (o.value IS NOT NULL AND o.expires_at > clock_timestamp())::boolean AS fresh
+    FROM durable.cache o WHERE o.key = $1 FOR UPDATE
+)
+UPDATE durable.cache c
+SET value = NULL, version = nextval('durable.fencing_seq'),
+    expires_at = NULL, stale_until = NULL, updated_at = now()
+FROM old WHERE c.key = old.key
+RETURNING old.value AS old_value, old.fresh
+`
+
+type LoadAndInvalidateCacheEntryRow struct {
+	OldValue pg.JSON
+	Fresh    bool
+}
+
+// Tombstones key (D17) and returns the value it held, and whether that value
+// was fresh.
+func (q *Queries) LoadAndInvalidateCacheEntry(ctx context.Context, key string) (LoadAndInvalidateCacheEntryRow, error) {
+	row := q.db.QueryRowContext(ctx, loadAndInvalidateCacheEntry, key)
+	var i LoadAndInvalidateCacheEntryRow
+	err := row.Scan(&i.OldValue, &i.Fresh)
+	return i, err
 }
 
 const loadCacheEntry = `-- name: LoadCacheEntry :one
@@ -100,6 +219,28 @@ func (q *Queries) ReleaseCompute(ctx context.Context, arg ReleaseComputeParams) 
 	return err
 }
 
+const renewCompute = `-- name: RenewCompute :execrows
+UPDATE durable.cache
+SET compute_expires_at = clock_timestamp() + $1::bigint * interval '1 microsecond'
+WHERE key = $2 AND compute_owner = $3::text
+`
+
+type RenewComputeParams struct {
+	TtlUs int64
+	Key   string
+	Owner string
+}
+
+// Extends owner's compute lease. A lease that lapsed is extended too while
+// nobody else claimed it: a claim replaces compute_owner.
+func (q *Queries) RenewCompute(ctx context.Context, arg RenewComputeParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, renewCompute, arg.TtlUs, arg.Key, arg.Owner)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const setCacheEntry = `-- name: SetCacheEntry :exec
 INSERT INTO durable.cache AS c (key, value, version, expires_at, stale_until)
 VALUES ($1, $2::jsonb, nextval('durable.fencing_seq'),
@@ -124,6 +265,38 @@ func (q *Queries) SetCacheEntry(ctx context.Context, arg SetCacheEntryParams) er
 		arg.StaleUs,
 	)
 	return err
+}
+
+const storeCacheEntryIfAbsent = `-- name: StoreCacheEntryIfAbsent :execrows
+INSERT INTO durable.cache AS c (key, value, version, expires_at, stale_until)
+VALUES ($1, $2::jsonb, nextval('durable.fencing_seq'),
+        clock_timestamp() + $3::bigint * interval '1 microsecond',
+        clock_timestamp() + $4::bigint * interval '1 microsecond')
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, version = EXCLUDED.version,
+    expires_at = EXCLUDED.expires_at, stale_until = EXCLUDED.stale_until, updated_at = now()
+WHERE NOT (c.value IS NOT NULL AND c.expires_at > clock_timestamp())
+`
+
+type StoreCacheEntryIfAbsentParams struct {
+	Key     string
+	Value   pg.JSON
+	TtlUs   int64
+	StaleUs int64
+}
+
+// Stores with a new version unless the key holds a fresh value. Stale values
+// and tombstones are replaced.
+func (q *Queries) StoreCacheEntryIfAbsent(ctx context.Context, arg StoreCacheEntryIfAbsentParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, storeCacheEntryIfAbsent,
+		arg.Key,
+		arg.Value,
+		arg.TtlUs,
+		arg.StaleUs,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const storeComputed = `-- name: StoreComputed :execrows

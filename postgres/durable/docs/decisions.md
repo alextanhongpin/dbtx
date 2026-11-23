@@ -134,7 +134,7 @@ with relay heartbeats would let a slow producer cost the relay its lease.
 | Q3 | Outbox pointer granularity | Per event by default; `AdvancePerBatch` per topic |
 | Q4 | Unregistered kinds and topics | Rejected: `ErrUnknownKind`, `ErrUnknownTopic`. `jobs.Config.Kinds` and `outbox.Config.Topics` are required |
 | Q5 | Scheduler defaults | Missed runs `MissedLatest`, overlap `OverlapSkip` |
-| Q6 | Cache contention without a stale value | Wait (poll) up to `ComputeTTL`, then compute; `ComputeAnyway` available |
+| Q6 | Cache contention without a stale value | Wait (poll) while the compute lease is live (it is renewed while `fn` runs), then compute; `MaxWait` bounds the wait; `ComputeAnyway` available |
 | Q7 | Outbox retention and replay | Published events are kept until `PurgePublished`; `Replay` works only from a retained sequence |
 | Q8 | Payload versioning | `payload_version` per execution; `OldestPayloadVersions` reports the oldest unfinished version per kind |
 | Q9 | Compensation | `KindOptions.Compensate` submits `<kind>.compensate` in the same transaction that records a final failure (including failures found by the reaper) |
