@@ -400,7 +400,7 @@ func TestReapExpiredFinalAttempt(t *testing.T) {
 	e := newEnv(t, "crash")
 	s, _ := e.client.Submit(ctx, jobs.SubmitRequest{Kind: "crash", MaxAttempts: 1})
 	e.exec(t, `UPDATE durable.executions SET status = 'running', attempts = 1, owner_id = 'dead',
-		lease_expires_at = now() - interval '1 second' WHERE id = $1`, s.ID.String())
+		lease_expires_at = now() - interval '1 hour' WHERE id = $1`, s.ID.String())
 	w := e.worker(t, jobs.WorkerConfig{})
 	_ = w.Register("crash", func(context.Context, *jobs.Execution) (jobs.Result, error) {
 		t.Fatal("must not run")
@@ -532,7 +532,7 @@ func TestReapOnlyOwnKinds(t *testing.T) {
 	e := newEnv(t, "pay", "pay.compensate", "other")
 	s, _ := e.client.Submit(ctx, jobs.SubmitRequest{Kind: "pay", MaxAttempts: 1})
 	e.exec(t, `UPDATE durable.executions SET status = 'running', attempts = 1, owner_id = 'dead',
-		token = 1, lease_expires_at = now() - interval '1 second' WHERE id = $1`, s.ID.String())
+		token = 1, lease_expires_at = now() - interval '1 hour' WHERE id = $1`, s.ID.String())
 	other := e.worker(t, jobs.WorkerConfig{})
 	_ = other.Register("other", func(context.Context, *jobs.Execution) (jobs.Result, error) { return jobs.Done(nil), nil }, jobs.KindOptions{})
 	drain(t, other)

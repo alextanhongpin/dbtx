@@ -88,8 +88,12 @@ enough, because no successor can claim the row until it commits.
 The row-lock exception lets a step run longer than the TTL, as
 `postgres/idempotent` allows.
 
-**Consequences.** Differs from `postgres/jobs`, which completes after expiry
-when nobody reclaimed the job; here that work is retried instead. One more
+**Consequences.** One exception, as in `postgres/jobs`: job completion
+accepts an expired lease whose owner and token still match under the row lock,
+because then nobody reclaimed or reaped the execution and discarding a
+successful result would only re-run it (or, on the final attempt, fail it).
+Workers wait `ReapGrace` before reaping a final attempt so that completion has
+time to land. Other job outcomes still need an unexpired lease. One more
 exception: marking unordered outbox events published needs only the owner,
 because the publish already happened and a matching owner proves no other
 relay reclaimed them (D16).

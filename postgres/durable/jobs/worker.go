@@ -41,9 +41,14 @@ type WorkerConfig struct {
 	DrainTimeout    time.Duration // how long in-flight work may finish after shutdown; default 25s
 	FinalizeTimeout time.Duration // budget to record an outcome; default 10s
 	KeyRetention    time.Duration // for compensation submissions; default 7 days
-	Backoff         durable.Backoff
-	Observer        durable.Observer
-	Hooks           *durable.Hooks
+	// ReapGrace is how long a final attempt's lease must have been expired
+	// before this worker's reaper fails it (or finishes a cancel request).
+	// Within the grace a slow owner that nobody reclaimed can still record
+	// success. Default LeaseDuration; keep it above FinalizeTimeout.
+	ReapGrace time.Duration
+	Backoff   durable.Backoff
+	Observer  durable.Observer
+	Hooks     *durable.Hooks
 }
 
 // KindOptions configure one registered kind.
@@ -73,6 +78,8 @@ type Worker struct {
 	kinds []*registration
 	next  int
 	ready atomic.Bool
+
+	afterClaim func() // test hook: runs after a claim commits, before its result is used
 }
 
 func NewWorker(cfg WorkerConfig) (*Worker, error) {
@@ -94,11 +101,12 @@ func NewWorker(cfg WorkerConfig) (*Worker, error) {
 	setDefault(&cfg.DrainTimeout, 25*time.Second)
 	setDefault(&cfg.FinalizeTimeout, 10*time.Second)
 	setDefault(&cfg.KeyRetention, 7*24*time.Hour)
+	setDefault(&cfg.ReapGrace, cfg.LeaseDuration)
 	if cfg.Backoff == nil {
 		cfg.Backoff = durable.DefaultBackoff
 	}
-	if cfg.Concurrency < 0 || cfg.LeaseDuration < 6*time.Millisecond {
-		return nil, fmt.Errorf("%w: Concurrency >= 1 and LeaseDuration >= 6ms", durable.ErrInvalidConfig)
+	if cfg.Concurrency < 0 || cfg.LeaseDuration < 6*time.Millisecond || cfg.ReapGrace < 0 {
+		return nil, fmt.Errorf("%w: Concurrency >= 1, LeaseDuration >= 6ms and ReapGrace >= 0", durable.ErrInvalidConfig)
 	}
 	return &Worker{cfg: cfg}, nil
 }
@@ -227,7 +235,8 @@ func (w *Worker) claim(ctx context.Context, limit int) ([]claimed, error) {
 	w.mu.Unlock()
 	var out []claimed
 	for i := range regs {
-		if limit <= 0 {
+		// Stop claiming once shutdown begins; what was claimed still runs.
+		if limit <= 0 || ctx.Err() != nil {
 			break
 		}
 		reg := regs[(start+i)%len(regs)]
@@ -248,10 +257,14 @@ func (w *Worker) claim(ctx context.Context, limit int) ([]claimed, error) {
 	return out, nil
 }
 
+// claimKind does not let ctx cancel the claim: a claim that commits but whose
+// result is lost (shutdown mid-call) would leave leased executions nobody
+// runs, each spending an attempt. RequestTimeout still bounds it; executions
+// claimed during shutdown run like any other in-flight work.
 func (w *Worker) claimKind(ctx context.Context, reg *registration, limit int) ([]claimed, error) {
 	owner := w.cfg.WorkerID + ":" + rand.Text()[:10]
 	sent := time.Now()
-	ctx, cancel := context.WithTimeout(ctx, w.cfg.RequestTimeout)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), w.cfg.RequestTimeout)
 	defer cancel()
 	q := postgres.New(w.cfg.DB.DB())
 	rows, err := q.ClaimExecutions(ctx, postgres.ClaimExecutionsParams{
@@ -260,6 +273,9 @@ func (w *Worker) claimKind(ctx context.Context, reg *registration, limit int) ([
 	})
 	if err != nil {
 		return nil, err
+	}
+	if w.afterClaim != nil && len(rows) > 0 {
+		w.afterClaim()
 	}
 	var out []claimed
 	for _, g := range rows {
@@ -284,15 +300,15 @@ func (w *Worker) claimKind(ctx context.Context, reg *registration, limit int) ([
 }
 
 // reap finishes running executions of registered kinds whose lease expired
-// on their final attempt (or that were cancelled), in one transaction with
-// compensation.
+// at least ReapGrace ago on their final attempt (or that were cancelled), in
+// one transaction with compensation.
 func (w *Worker) reap(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, w.cfg.RequestTimeout)
 	defer cancel()
 	return w.cfg.DB.RunInTx(ctx, func(txCtx context.Context) error {
 		q := postgres.New(w.cfg.DB.DBTx(txCtx))
 		rows, err := q.ExpiredExecutions(txCtx, postgres.ExpiredExecutionsParams{
-			Queue: w.cfg.Queue, Kinds: pg.JSON(w.kindsJSON()),
+			Queue: w.cfg.Queue, Kinds: pg.JSON(w.kindsJSON()), GraceUs: pg.Micros(w.cfg.ReapGrace),
 		})
 		if err != nil {
 			return err
@@ -428,12 +444,23 @@ func (w *Worker) processActivity(attemptCtx, ctx context.Context, c claimed) {
 		w.observe(ctx, durable.EventSucceeded, e, nil)
 		return
 	}
+	octx, cancel := w.outcomeCtx(ctx)
+	defer cancel()
 	if terminal := e.keeper.Err(); terminal != nil {
+		// The handler outlived its local lease. A success is still offered
+		// to the database, which accepts it only if nobody reclaimed or
+		// reaped the execution (see complete); anything else is dropped and
+		// left to the next claim or the reaper.
+		if fnErr == nil && !result.checkpoint {
+			if output, err := pg.Marshal(result.output); err == nil {
+				w.cfg.Hooks.CallBeforeComplete(octx, e.ID.String())
+				w.finishTx(octx, e, reg, func(txCtx context.Context, q *postgres.Queries) error { return w.complete(txCtx, q, e, output) })
+				return
+			}
+		}
 		w.observe(ctx, durable.EventLeaseLost, e, terminal)
 		return
 	}
-	octx, cancel := w.outcomeCtx(ctx)
-	defer cancel()
 	switch {
 	case fnErr == nil:
 		output, err := pg.Marshal(result.output)
@@ -580,9 +607,11 @@ func (w *Worker) finishAttempt(ctx context.Context, q *postgres.Queries, e *Exec
 // lockOutcome takes the row lock before an outcome is written, so a cancel
 // request cannot slip in between reading it and writing the status. Inside a
 // tx-mode step or Finalize the lock is already held and expiry is not
-// re-checked (D7).
-func (w *Worker) lockOutcome(ctx context.Context, q *postgres.Queries, e *Execution) (cancelRequested bool, err error) {
-	held, err := e.row().Lock(ctx, q, !e.inLockedTx)
+// re-checked (D7). strict=false accepts an expired lease whose owner and
+// token still match: under the row lock that proves nobody reclaimed or
+// reaped the execution.
+func (w *Worker) lockOutcome(ctx context.Context, q *postgres.Queries, e *Execution, strict bool) (cancelRequested bool, err error) {
+	held, err := e.row().Lock(ctx, q, strict && !e.inLockedTx)
 	if err != nil {
 		return false, err
 	}
@@ -605,9 +634,12 @@ func (w *Worker) end(ctx context.Context, q *postgres.Queries, e *Execution, f e
 }
 
 // complete marks success. It is idempotent: if an earlier COMMIT of this same
-// attempt already succeeded, it returns nil (FM-7).
+// attempt already succeeded, it returns nil (FM-7). Unlike other outcomes it
+// accepts an expired lease nobody reclaimed, so a slow but successful finish
+// is kept rather than retried or reaped (ReapGrace gives it time on the
+// final attempt).
 func (w *Worker) complete(ctx context.Context, q *postgres.Queries, e *Execution, output []byte) error {
-	if _, err := w.lockOutcome(ctx, q, e); err != nil {
+	if _, err := w.lockOutcome(ctx, q, e, false); err != nil {
 		if errors.Is(err, durable.ErrLeaseLost) {
 			if st, err2 := q.ExecutionStatusToken(ctx, e.ID); err2 == nil &&
 				st.Status == string(StatusSucceeded) && st.Token == e.Token {
@@ -627,7 +659,7 @@ func (w *Worker) complete(ctx context.Context, q *postgres.Queries, e *Execution
 }
 
 func (w *Worker) recordFailure(ctx context.Context, q *postgres.Queries, e *Execution, reg *registration, herr error) error {
-	cancelReq, err := w.lockOutcome(ctx, q, e)
+	cancelReq, err := w.lockOutcome(ctx, q, e, true)
 	if err != nil {
 		return err
 	}
@@ -661,7 +693,7 @@ func (w *Worker) recordFailure(ctx context.Context, q *postgres.Queries, e *Exec
 }
 
 func (w *Worker) recordCancelled(ctx context.Context, q *postgres.Queries, e *Execution) error {
-	if _, err := w.lockOutcome(ctx, q, e); err != nil {
+	if _, err := w.lockOutcome(ctx, q, e, true); err != nil {
 		return err
 	}
 	return w.cancelled(ctx, q, e, "")
@@ -685,7 +717,7 @@ func (w *Worker) cancelled(ctx context.Context, q *postgres.Queries, e *Executio
 // handBack returns an interrupted execution for immediate retry without
 // consuming an attempt (or cancels it if a cancel was requested meanwhile).
 func (w *Worker) handBack(ctx context.Context, q *postgres.Queries, e *Execution) error {
-	cancelReq, err := w.lockOutcome(ctx, q, e)
+	cancelReq, err := w.lockOutcome(ctx, q, e, true)
 	if err != nil {
 		return err
 	}

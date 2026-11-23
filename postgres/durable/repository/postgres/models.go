@@ -70,6 +70,31 @@ type DurableExecutionStep struct {
 	UpdatedAt   time.Time
 }
 
+type DurableExecutionsArchive struct {
+	ID             uuid.UUID
+	Queue          string
+	Kind           string
+	Scope          sql.NullString
+	Key            sql.NullString
+	Payload        pg.JSON
+	PayloadVersion int32
+	Mode           sql.NullString
+	Status         string
+	Attempts       int32
+	MaxAttempts    int32
+	RunAt          time.Time
+	Token          int64
+	CheckpointName string
+	CheckpointData pg.JSON
+	LastError      sql.NullString
+	Output         pg.JSON
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	FinishedAt     time.Time
+	AttemptLog     pg.JSON
+	ArchivedAt     time.Time
+}
+
 type DurableIdempotencyKey struct {
 	ID             uuid.UUID
 	Scope          string

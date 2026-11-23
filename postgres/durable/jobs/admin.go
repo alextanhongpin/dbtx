@@ -82,6 +82,27 @@ func (c *Client) Purge(ctx context.Context, cutoff time.Time, limit int) (int64,
 	return postgres.New(c.cfg.DB.DB()).PurgeExecutions(ctx, postgres.PurgeExecutionsParams{Cutoff: cutoff, Lim: int32(limit)})
 }
 
+// Archive moves up to limit executions that finished before cutoff into
+// durable.executions_archive, with their attempt history (steps are
+// dropped). Unlike Purge it does not wait for idempotency keys to expire:
+// keys keep pointing at the ID, and Submit, Get and GetByKey read the archive.
+// This keeps the hot table small while the idempotency window stays long.
+func (c *Client) Archive(ctx context.Context, cutoff time.Time, limit int) (int64, error) {
+	if limit <= 0 {
+		limit = 1000
+	}
+	return postgres.New(c.cfg.DB.DB()).ArchiveExecutions(ctx, postgres.ArchiveExecutionsParams{Cutoff: cutoff, Lim: int32(limit)})
+}
+
+// PurgeArchive deletes up to limit archived executions archived before
+// cutoff whose idempotency key (if any) has expired.
+func (c *Client) PurgeArchive(ctx context.Context, cutoff time.Time, limit int) (int64, error) {
+	if limit <= 0 {
+		limit = 1000
+	}
+	return postgres.New(c.cfg.DB.DB()).PurgeArchivedExecutions(ctx, postgres.PurgeArchivedExecutionsParams{Cutoff: cutoff, Lim: int32(limit)})
+}
+
 // PurgeKeys deletes up to limit expired idempotency keys that are not in
 // flight, including keys of synchronous requests (package keys).
 func (c *Client) PurgeKeys(ctx context.Context, limit int) (int64, error) {
@@ -91,12 +112,21 @@ func (c *Client) PurgeKeys(ctx context.Context, limit int) (int64, error) {
 	return postgres.New(c.cfg.DB.DB()).PurgeKeys(ctx, int32(limit))
 }
 
-// Janitor periodically purges finished executions and expired keys.
+// Janitor periodically purges (or archives) finished executions and purges
+// expired keys. Every statement uses SKIP LOCKED, so several instances may run.
 type Janitor struct {
-	Client    *Client
-	Interval  time.Duration // default 1 minute
-	Retention time.Duration // finished executions kept this long; default 24h
-	Observer  durable.Observer
+	Client   *Client
+	Interval time.Duration // default 1 minute
+	// Retention is how long finished executions stay in durable.executions;
+	// default 24h. Without Archive, an execution whose key is still
+	// remembered (Config.KeyRetention) is kept until the key expires.
+	Retention time.Duration
+	// Archive moves executions past Retention to the archive instead of
+	// deleting them; archived rows are purged after ArchiveRetention once
+	// their key has expired.
+	Archive          bool
+	ArchiveRetention time.Duration // default 30 days
+	Observer         durable.Observer
 }
 
 // Run purges until ctx ends. Each pass repeats a purge while it fills a batch.
@@ -111,19 +141,26 @@ func (j *Janitor) Run(ctx context.Context) error {
 	if retention <= 0 {
 		retention = 24 * time.Hour
 	}
+	archiveRetention := j.ArchiveRetention
+	if archiveRetention <= 0 {
+		archiveRetention = 30 * 24 * time.Hour
+	}
+	batches := func(fn func() (int64, error)) {
+		for {
+			n, err := fn()
+			if err != nil || n < 1000 || ctx.Err() != nil {
+				return
+			}
+		}
+	}
 	for {
-		for {
-			n, err := j.Client.Purge(ctx, time.Now().Add(-retention), 1000)
-			if err != nil || n < 1000 {
-				break
-			}
+		if j.Archive {
+			batches(func() (int64, error) { return j.Client.Archive(ctx, time.Now().Add(-retention), 1000) })
+			batches(func() (int64, error) { return j.Client.PurgeArchive(ctx, time.Now().Add(-archiveRetention), 1000) })
+		} else {
+			batches(func() (int64, error) { return j.Client.Purge(ctx, time.Now().Add(-retention), 1000) })
 		}
-		for {
-			n, err := j.Client.PurgeKeys(ctx, 1000)
-			if err != nil || n < 1000 {
-				break
-			}
-		}
+		batches(func() (int64, error) { return j.Client.PurgeKeys(ctx, 1000) })
 		t := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():

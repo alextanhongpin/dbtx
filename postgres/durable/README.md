@@ -125,7 +125,17 @@ work nobody processes.
 ## Operations
 
 - `jobs.Client`: `ListFailed`, `Requeue`, `RequeueFailed`, `OldestPayloadVersions`,
-  `Purge`, `PurgeKeys`; run a `jobs.Janitor` for periodic cleanup.
+  `Purge`, `Archive`, `PurgeArchive`, `PurgeKeys`; run a `jobs.Janitor` for
+  periodic cleanup. `Purge` keeps an execution until its idempotency key
+  (`Config.KeyRetention`) expires; `Janitor{Archive: true}` instead moves
+  finished executions to `durable.executions_archive` after `Retention`, and
+  resubmissions, `Get` and `GetByKey` are answered from the archive (apply
+  migration `0002_jobs_archive.sql`).
+- `jobs.Config` limits input: `MaxPayloadBytes` (1 MiB) and `MaxKeyLength`
+  (255 bytes, key and scope); negative disables a limit.
+- `jobs.WorkerConfig.ReapGrace` (default `LeaseDuration`): a final attempt's
+  expired lease is left alone this long before the reaper fails it, so a slow
+  owner nobody reclaimed can still record success.
 - `outbox.Outbox`: `Stream`, `Resume`, `Skip` (gap marker), `Replay`,
   `PurgePublished`, `DeadLetters`, `Requeue`.
 - `inbox.Inbox`: `Gaps`, `SkipGap`, `Drain`, `PurgeMessages`.

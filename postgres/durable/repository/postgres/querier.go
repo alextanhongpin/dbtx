@@ -19,6 +19,9 @@ type Querier interface {
 	ActivateStream(ctx context.Context, arg ActivateStreamParams) (int64, error)
 	AdvanceSchedule(ctx context.Context, arg AdvanceScheduleParams) error
 	AdvisoryXactLock(ctx context.Context, key string) error
+	// Moves finished executions to the archive in one statement, so a row is
+	// always in exactly one of the two tables. Keys keep pointing at the ID.
+	ArchiveExecutions(ctx context.Context, arg ArchiveExecutionsParams) (int64, error)
 	BeginKey(ctx context.Context, arg BeginKeyParams) (BeginKeyRow, error)
 	BufferMessage(ctx context.Context, arg BufferMessageParams) error
 	CancelExecution(ctx context.Context, id uuid.UUID) (string, error)
@@ -43,14 +46,17 @@ type Querier interface {
 	EnsureStreams(ctx context.Context, topics pg.JSON) error
 	ExecutionCancelRequested(ctx context.Context, id uuid.UUID) (bool, error)
 	ExecutionStatusToken(ctx context.Context, id uuid.UUID) (ExecutionStatusTokenRow, error)
-	// Running executions whose lease expired on the final attempt, or that were
-	// cancelled, among the kinds this worker registered.
+	// Running executions whose lease expired at least grace_us ago on the final
+	// attempt, or that were cancelled, among the kinds this worker registered.
+	// The grace lets a slow owner that nobody reclaimed still record success.
 	ExpiredExecutions(ctx context.Context, arg ExpiredExecutionsParams) ([]ExpiredExecutionsRow, error)
 	// Unordered events whose lease expired on the final attempt.
 	ExpiredUnorderedEvents(ctx context.Context) ([]ExpiredUnorderedEventsRow, error)
 	FinishAttempt(ctx context.Context, arg FinishAttemptParams) error
 	// Run after durable.lease_lock in the same transaction.
 	FinishStep(ctx context.Context, arg FinishStepParams) (int64, error)
+	GetArchivedExecution(ctx context.Context, id uuid.UUID) (DurableExecutionsArchive, error)
+	GetArchivedExecutionByKey(ctx context.Context, arg GetArchivedExecutionByKeyParams) (DurableExecutionsArchive, error)
 	GetBuffered(ctx context.Context, arg GetBufferedParams) (GetBufferedRow, error)
 	GetExecution(ctx context.Context, id uuid.UUID) (DurableExecution, error)
 	GetExecutionByKey(ctx context.Context, arg GetExecutionByKeyParams) (DurableExecution, error)
@@ -93,6 +99,8 @@ type Querier interface {
 	NextToken(ctx context.Context) (int64, error)
 	OldestPayloadVersions(ctx context.Context) ([]OldestPayloadVersionsRow, error)
 	OldestRetainedSeq(ctx context.Context, arg OldestRetainedSeqParams) (int64, error)
+	// Same key rule as PurgeExecutions: a remembered key never loses its result.
+	PurgeArchivedExecutions(ctx context.Context, arg PurgeArchivedExecutionsParams) (int64, error)
 	PurgeCache(ctx context.Context, lim int32) (int64, error)
 	PurgeExecutions(ctx context.Context, arg PurgeExecutionsParams) (int64, error)
 	PurgeInboxMessages(ctx context.Context, arg PurgeInboxMessagesParams) (int64, error)

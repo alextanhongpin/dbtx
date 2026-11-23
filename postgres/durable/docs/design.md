@@ -165,9 +165,10 @@ the same owner and reject anything older.
 
 Strict, everywhere: heartbeat, checkpoint, completion and failure all require a
 matching owner and token **and** an unexpired lease, evaluated with the database
-clock after taking the row lock. This is the `postgres/lease` policy. The laxer
-`postgres/jobs` behaviour (completing after expiry when nobody reclaimed the
-job) is intentionally not carried over; the work is retried instead.
+clock after taking the row lock. This is the `postgres/lease` policy. The one
+exception is job completion, which, as in `postgres/jobs`, is accepted after
+expiry when owner and token still match (nobody reclaimed or reaped the
+execution); workers reap an expired final attempt only after `ReapGrace` (D7).
 
 ## Execution modes
 
