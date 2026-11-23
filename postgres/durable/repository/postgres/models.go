@@ -106,6 +106,11 @@ type DurableIdempotencyKey struct {
 	LeaseExpiresAt sql.NullTime
 	Response       pg.JSON
 	ExecutionID    sql.Null[uuid.UUID]
+	Attempts       int32
+	RetryAt        sql.NullTime
+	LastError      sql.NullString
+	CheckpointName string
+	CheckpointData pg.JSON
 	ExpiresAt      time.Time
 	CreatedAt      time.Time
 	UpdatedAt      time.Time

@@ -13,6 +13,9 @@ import (
 )
 
 type Querier interface {
+	// Ends an attempt that failed. With attempts left the key waits delay_us
+	// before the next attempt; otherwise it becomes exhausted.
+	AbortKey(ctx context.Context, arg AbortKeyParams) (AbortKeyRow, error)
 	// Resource leases (package lease) use per-key generations instead.
 	AcquireResourceLease(ctx context.Context, arg AcquireResourceLeaseParams) (int64, error)
 	// Admin change: a new token fences out any relay holding the stream (D18).
@@ -116,6 +119,8 @@ type Querier interface {
 	// execution_id is set afterwards by SetMessageExecution (inbox Enqueue).
 	RecordMessage(ctx context.Context, arg RecordMessageParams) (int64, error)
 	ReleaseCompute(ctx context.Context, arg ReleaseComputeParams) error
+	// Gives the attempt back. A key with nothing to keep (no other attempt and
+	// no checkpoint) is deleted, so it can be reused with any request.
 	ReleaseKey(ctx context.Context, arg ReleaseKeyParams) error
 	ReleaseResourceLease(ctx context.Context, arg ReleaseResourceLeaseParams) (int64, error)
 	// Used only after an acquisition whose response was lost.
@@ -134,6 +139,8 @@ type Querier interface {
 	SetExecutionFinished(ctx context.Context, arg SetExecutionFinishedParams) error
 	SetInboxApplied(ctx context.Context, arg SetInboxAppliedParams) error
 	SetInboxVersion(ctx context.Context, arg SetInboxVersionParams) error
+	// Run after durable.lease_lock in the same transaction.
+	SetKeyCheckpoint(ctx context.Context, arg SetKeyCheckpointParams) error
 	// Run after durable.lease_finish in the same transaction.
 	SetKeyResponse(ctx context.Context, arg SetKeyResponseParams) error
 	SetLocalLockTimeout(ctx context.Context, timeout string) error
