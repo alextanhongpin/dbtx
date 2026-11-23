@@ -541,8 +541,16 @@ CREATE TABLE IF NOT EXISTS durable.inbox_pending (
     payload       jsonb,
     is_gap        boolean     NOT NULL DEFAULT false,
     received_at   timestamptz NOT NULL DEFAULT now(),
+    -- Failed drain attempts; parked_at is set once attempts reach the
+    -- inbox's MaxAttempts, and drains stop at it until an operator acts.
+    attempts      integer     NOT NULL DEFAULT 0,
+    last_error    text,
+    failed_at     timestamptz,
+    parked_at     timestamptz,
     PRIMARY KEY (source, aggregate_key, seq)
 );
+CREATE INDEX IF NOT EXISTS inbox_pending_parked_idx
+    ON durable.inbox_pending (parked_at) WHERE parked_at IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
 -- Schedules.

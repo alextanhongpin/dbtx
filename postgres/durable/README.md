@@ -138,7 +138,16 @@ work nobody processes.
   owner nobody reclaimed can still record success.
 - `outbox.Outbox`: `Stream`, `Resume`, `Skip` (gap marker), `Replay`,
   `PurgePublished`, `DeadLetters`, `Requeue`.
-- `inbox.Inbox`: `Gaps`, `SkipGap`, `Drain`, `PurgeMessages`.
+- `inbox.Inbox`: `Gaps`, `SkipGap`, `Drain`, `Parked`, `Unpark`, `Discard`,
+  `Job`, `PurgeMessages`. A buffered sequenced message that fails to apply
+  during a drain has its attempts and last error stored, emits
+  `EventStreamBlocked`, and after `Config.MaxAttempts` (default 10) is parked
+  (`EventStreamParked`); drains then stop at it until `Unpark` (retry) or
+  `Discard` (skip). `Drain`/`SkipGap`/`Unpark`/`Discard` return an
+  `*inbox.DrainError` (match `inbox.ErrParked`). Dedup messages are not
+  retried by the inbox: `Receive` leaves retries to the broker, and `Enqueue`
+  hands them to jobs, whose `ListFailed`/`Requeue` are the dead-letter tools
+  (`Inbox.Job` finds a message's job).
 - `keys.Keys.Purge`, `cache.Cache.Purge`.
 - Pass a `durable.Observer` (for example `durable.SlogObserver{}`) to see lease
   losses, retries, failures, blocked streams and inbox gaps.
