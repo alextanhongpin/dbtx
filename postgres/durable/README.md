@@ -1,9 +1,11 @@
 # postgres/durable
 
 Status: **experimental.** Every package below is implemented and tested
-against PostgreSQL, but the API may still change. The existing `postgres/lease`,
-`idempotent`, `jobs`, `outbox`, `inbox`, `lock` and `cache` modules are
-unaffected and remain the stable options.
+against PostgreSQL, but the API may still change. It replaces the former
+standalone `postgres/lease`, `idempotent`, `jobs`, `outbox`, `inbox`, `lock` and
+`cache` modules, which were removed from this repository; their tagged versions
+remain available from the Go module proxy. Known gaps against those modules are
+listed in [TODO](TODO.md#parity-gaps-with-the-removed-modules).
 
 One module for durable work on PostgreSQL, built on one shared lease engine,
 one fencing-token sequence and one error vocabulary:
@@ -40,7 +42,7 @@ go get github.com/alextanhongpin/dbtx/postgres/durable
 Apply [repository/schema.sql](repository/schema.sql) (exported as
 `repository.Schema`, and as numbered files in `repository.Migrations`) through
 your migrations. Everything lives in the PostgreSQL schema `durable`, so it
-never collides with the existing `dbtx.*` tables. Applying the schema twice is
+never collides with the `dbtx.*` tables of the removed standalone modules. Applying the schema twice is
 safe. Constructors never run DDL.
 
 Every component takes the same `*dbtx.DB` your repositories use, so its writes

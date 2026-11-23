@@ -15,7 +15,7 @@ the existing modules.
 **Why.** Shared engine code needs one module (nested modules cannot share
 `internal`), and one token domain, expiry policy and error vocabulary cannot be
 retrofitted onto modules whose contracts differ
-([reuse limits](../../../docs/postgres-lease-module-reuse.md)).
+(reuse limits study, removed with the standalone modules; see git history).
 
 **Consequences.** Behaviour proven in `lease`, `idempotent`, `jobs`, `inbox`
 and `outbox` is reimplemented; their READMEs and tests are the reference.
