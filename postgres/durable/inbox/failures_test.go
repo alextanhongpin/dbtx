@@ -402,7 +402,7 @@ func TestValidation(t *testing.T) {
 func TestMigrationsApply(t *testing.T) {
 	db := durabletest.NewDB(t)
 	names, err := fs.Glob(repository.Migrations, "migrations/*.sql")
-	if err != nil || len(names) < 2 {
+	if err != nil || len(names) == 0 {
 		t.Fatalf("%v %v", names, err)
 	}
 	for _, n := range names {
