@@ -27,6 +27,8 @@ type Querier interface {
 	ArchiveExecutions(ctx context.Context, arg ArchiveExecutionsParams) (int64, error)
 	BeginKey(ctx context.Context, arg BeginKeyParams) (BeginKeyRow, error)
 	BufferMessage(ctx context.Context, arg BufferMessageParams) error
+	// Remaining fresh time of a fresh value, in microseconds.
+	CacheEntryTTL(ctx context.Context, key string) (int64, error)
 	CancelExecution(ctx context.Context, id uuid.UUID) (string, error)
 	// Fails (no row) while another caller holds a live compute lease, or when a
 	// fresh value appeared since the caller looked.
@@ -42,6 +44,10 @@ type Querier interface {
 	// immutable, so reading them next to the grant in one statement is safe.
 	ClaimUnorderedEvents(ctx context.Context, arg ClaimUnorderedEventsParams) ([]ClaimUnorderedEventsRow, error)
 	ClockTimestamp(ctx context.Context) (time.Time, error)
+	// Tombstones a fresh value equal (as jsonb) to old, with a new version (D17).
+	CompareAndInvalidateCacheEntry(ctx context.Context, arg CompareAndInvalidateCacheEntryParams) (int64, error)
+	// Replaces a fresh value equal (as jsonb) to old, with a new version.
+	CompareAndSwapCacheEntry(ctx context.Context, arg CompareAndSwapCacheEntryParams) (int64, error)
 	// topic '' counts every topic.
 	CountEvents(ctx context.Context, topic string) (CountEventsRow, error)
 	CurrentLockTimeout(ctx context.Context) (string, error)
@@ -52,6 +58,9 @@ type Querier interface {
 	EnsureStreams(ctx context.Context, topics pg.JSON) error
 	ExecutionCancelRequested(ctx context.Context, id uuid.UUID) (bool, error)
 	ExecutionStatusToken(ctx context.Context, id uuid.UUID) (ExecutionStatusTokenRow, error)
+	// Sets a new TTL and stale window on a fresh value. The version is kept: the
+	// value itself does not change.
+	ExpireCacheEntry(ctx context.Context, arg ExpireCacheEntryParams) (int64, error)
 	// Running executions whose lease expired at least grace_us ago on the final
 	// attempt, or that were cancelled, among the kinds this worker registered.
 	// The grace lets a slow owner that nobody reclaimed still record success.
@@ -90,6 +99,9 @@ type Querier interface {
 	ListFailedExecutions(ctx context.Context, arg ListFailedExecutionsParams) ([]DurableExecution, error)
 	ListInboxGaps(ctx context.Context, minAgeUs int64) ([]ListInboxGapsRow, error)
 	ListParked(ctx context.Context, arg ListParkedParams) ([]ListParkedRow, error)
+	// Tombstones key (D17) and returns the value it held, and whether that value
+	// was fresh.
+	LoadAndInvalidateCacheEntry(ctx context.Context, key string) (LoadAndInvalidateCacheEntryRow, error)
 	LoadCacheEntry(ctx context.Context, key string) (LoadCacheEntryRow, error)
 	LoadStreamEvents(ctx context.Context, arg LoadStreamEventsParams) ([]LoadStreamEventsRow, error)
 	LockInboxStream(ctx context.Context, arg LockInboxStreamParams) (LockInboxStreamRow, error)
@@ -125,6 +137,9 @@ type Querier interface {
 	ReleaseResourceLease(ctx context.Context, arg ReleaseResourceLeaseParams) (int64, error)
 	// Used only after an acquisition whose response was lost.
 	ReleaseResourceOwner(ctx context.Context, arg ReleaseResourceOwnerParams) (int64, error)
+	// Extends owner's compute lease. A lease that lapsed is extended too while
+	// nobody else claimed it: a claim replaces compute_owner.
+	RenewCompute(ctx context.Context, arg RenewComputeParams) (int64, error)
 	RenewResourceLease(ctx context.Context, arg RenewResourceLeaseParams) (bool, error)
 	RequeueDeadEvent(ctx context.Context, id uuid.UUID) (int64, error)
 	RequeueExecution(ctx context.Context, id uuid.UUID) (int64, error)
@@ -151,6 +166,9 @@ type Querier interface {
 	SetStreamPosition(ctx context.Context, arg SetStreamPositionParams) (int64, error)
 	// Fixes the mode on the first claim (D8) and records the attempt.
 	StartAttempt(ctx context.Context, arg StartAttemptParams) (StartAttemptRow, error)
+	// Stores with a new version unless the key holds a fresh value. Stale values
+	// and tombstones are replaced.
+	StoreCacheEntryIfAbsent(ctx context.Context, arg StoreCacheEntryIfAbsentParams) (int64, error)
 	StoreComputed(ctx context.Context, arg StoreComputedParams) (int64, error)
 	// Transaction-scoped advisory locks (package txlock).
 	TryAdvisoryXactLock(ctx context.Context, key string) (bool, error)

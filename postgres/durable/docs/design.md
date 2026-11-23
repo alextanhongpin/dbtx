@@ -328,7 +328,12 @@ stale-while-revalidate: one caller computes under a compute lease while others
 get the stale value or wait (configurable). Writes carry the compute token and
 are rejected if a newer version exists. `Delete` and `InvalidateTx` leave a
 versioned tombstone (D17); `InvalidateTx` runs inside the caller's transaction
-so invalidation commits with the change that caused it. The table is UNLOGGED; contents are disposable.
+so invalidation commits with the change that caused it. The compute lease is
+renewed while the computation runs and released on error or panic. Key-value
+operations (`Exists`, `TTL`, `Expire`, `StoreOnce`, `LoadOrStore`,
+`CompareAndSwap`, `CompareAndDelete`, `LoadAndDelete`) see only fresh values;
+each write takes a new version, so it wins over a computation in flight.
+`Func` and `Idempotent` memoize a function through `GetOrCompute`. The table is UNLOGGED; contents are disposable.
 
 ## Cross-cutting
 
