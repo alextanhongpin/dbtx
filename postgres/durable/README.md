@@ -13,7 +13,7 @@ one fencing-token sequence and one error vocabulary:
 | Package | What it does |
 | --- | --- |
 | `lease` | Renewable fenced leases on a resource: `Activity` (long or external work, heartbeats), `RunInFencedTx` (short guarded transaction), `Try*` variants |
-| `txlock` | Transaction-scoped advisory locks; `WithLocks` sorts keys to prevent deadlocks |
+| `txlock` | Transaction-scoped advisory locks on string, int64 or pair keys: `WithLocks`/`WithKeys` (sorted to prevent deadlocks), `Lock`/`TryLock` inside an existing transaction; a timeout in a joined transaction leaves it usable |
 | `keys` | Synchronous request idempotency (`Idempotency-Key` headers): `Do`, or `Begin` + `Complete`/`Fail`/`Release` |
 | `jobs` | Durable executions: idempotent `Submit` inside your transaction, workers with `ModeTx` or `ModeActivity`, checkpoints, `RunStep` for idempotent remote calls, retries, cancel, compensation, drain on shutdown, admin and janitor |
 | `outbox` | Transactional event publishing; unordered topics, or ordered topics with a gapless sequence per aggregate and head-of-line policies (`HeadBlock`, `HeadPark`, `HeadStop`) |

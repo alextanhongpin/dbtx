@@ -212,7 +212,12 @@ All tables live in schema `durable`. Rows marked *lease* carry the lease column 
 - `txlock.WithLock(ctx, key, fn)` and `txlock.WithLocks(ctx, keys, fn)` run `fn`
   in a `dbtx` transaction holding `pg_advisory_xact_lock` for each key, sorted and
   de-duplicated to prevent deadlocks; `Try` variants return `ErrContended`;
-  `SET LOCAL lock_timeout` bounds waiting.
+  `SET LOCAL lock_timeout` bounds waiting. Keys may be strings
+  (`hashtextextended`), `Int64Key`, `PairKey` or `StringPairKey`
+  (`WithKeys`/`TryWithKeys`); `Lock`/`TryLock` lock inside the caller's
+  transaction without a callback. In a joined transaction, locking runs in a
+  savepoint so contention or a lock timeout leaves the caller's transaction
+  usable and keeps none of that call's locks.
 - `lease` reproduces the `postgres/lease` contract (Acquire/TryAcquire,
   Activity/TryActivity, RunInFencedTx/TryRunInFencedTx, `held.RunInFencedTx`,
   `TxOutcomeError`) on the shared engine. Its README and tests are the
