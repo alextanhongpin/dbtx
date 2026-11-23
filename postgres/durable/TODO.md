@@ -126,7 +126,7 @@ Found when the standalone modules were removed. Bugs:
 
 Missing features:
 
-- [ ] `keys.Do`: checkpointed multi-step requests, `MaxAttempts`, backoff with retry-after, exhausted state
+- [x] `keys.Do`: checkpointed multi-step requests, `MaxAttempts`, backoff with retry-after, exhausted state
 - [ ] `cache`: key-value surface (`CompareAndSwap`, `CompareAndDelete`, `LoadAndDelete`, `LoadOrStore`, `StoreOnce`, `Expire`, `TTL`, `Exists`) and the `Func`/`Idempotent` memoizers
 - [x] `txlock`: `int64` and pair keys; locking inside an existing transaction without a callback
 - [x] `jobs`: archive table, key TTL separate from retention, input size and key length limits
