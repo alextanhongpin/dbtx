@@ -97,6 +97,7 @@ PostgreSQL 16; 9 packages, 68 test functions). Remaining work is under
 - [ ] PostgreSQL restart and failover drill with `advance_fencing` (FM-9, FM-12); optional PgBouncer job (FM-13)
 - [ ] Load and bloat benchmarks for claim latency and retry storms (FM-32, FM-33)
 - [ ] Port the removed standalone modules' test suites as a parity bar (Q11); they are in git history before their removal
+- [ ] `lease.TestActivityHeartbeatsBeyondTTL` (150ms lease) failed once under full parallel `-race` load; passes alone and 15/15 under load. Widen its timing if it recurs
 - [ ] Optionally switch `durabletest` to `testing/dbtest` containers (D13)
 
 ### Features
@@ -120,14 +121,14 @@ Found when the standalone modules were removed. Bugs:
 - [x] `lease.Activity` does not release the lease when `fn` panics (`lease/activity.go`); the row stays held until TTL
 - [x] `outbox` relay does not recover from a `Publisher` panic (`outbox/relay.go`); post-publish writes use `WithoutCancel` with no timeout; one claim uses the largest topic batch size for all topics
 - [x] `inbox` sequenced drain swallows apply errors (`inbox/inbox.go`, `drainLocked`): a poison buffered message blocks the stream with no attempt count, observer event or dead letter
-- [ ] `cache.GetOrCompute` never renews the compute lease and does not release it on panic
+- [x] `cache.GetOrCompute` never renews the compute lease and does not release it on panic
 - [x] `jobs` worker claims with the run context, so a committed claim lost at shutdown spends an attempt; a final attempt is reaped the moment its lease expires (no reap grace)
 - [x] `txlock`: a `lock_timeout` inside a joined transaction aborts the caller's transaction; document or use a savepoint
 
 Missing features:
 
 - [x] `keys.Do`: checkpointed multi-step requests, `MaxAttempts`, backoff with retry-after, exhausted state
-- [ ] `cache`: key-value surface (`CompareAndSwap`, `CompareAndDelete`, `LoadAndDelete`, `LoadOrStore`, `StoreOnce`, `Expire`, `TTL`, `Exists`) and the `Func`/`Idempotent` memoizers
+- [x] `cache`: key-value surface (`CompareAndSwap`, `CompareAndDelete`, `LoadAndDelete`, `LoadOrStore`, `StoreOnce`, `Expire`, `TTL`, `Exists`) and the `Func`/`Idempotent` memoizers
 - [x] `txlock`: `int64` and pair keys; locking inside an existing transaction without a callback
 - [x] `jobs`: archive table, key TTL separate from retention, input size and key length limits
 - [x] `inbox`: retrying queue semantics for dedup mode (documented: broker retries for `Receive`; `Enqueue` + jobs covers attempts, backoff and dead letters; `Inbox.Job` finds a message's job)
