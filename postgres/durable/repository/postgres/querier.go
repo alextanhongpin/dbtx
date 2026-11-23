@@ -13,14 +13,22 @@ import (
 )
 
 type Querier interface {
+	// Ends an attempt that failed. With attempts left the key waits delay_us
+	// before the next attempt; otherwise it becomes exhausted.
+	AbortKey(ctx context.Context, arg AbortKeyParams) (AbortKeyRow, error)
 	// Resource leases (package lease) use per-key generations instead.
 	AcquireResourceLease(ctx context.Context, arg AcquireResourceLeaseParams) (int64, error)
 	// Admin change: a new token fences out any relay holding the stream (D18).
 	ActivateStream(ctx context.Context, arg ActivateStreamParams) (int64, error)
 	AdvanceSchedule(ctx context.Context, arg AdvanceScheduleParams) error
 	AdvisoryXactLock(ctx context.Context, key string) error
+	// Moves finished executions to the archive in one statement, so a row is
+	// always in exactly one of the two tables. Keys keep pointing at the ID.
+	ArchiveExecutions(ctx context.Context, arg ArchiveExecutionsParams) (int64, error)
 	BeginKey(ctx context.Context, arg BeginKeyParams) (BeginKeyRow, error)
 	BufferMessage(ctx context.Context, arg BufferMessageParams) error
+	// Remaining fresh time of a fresh value, in microseconds.
+	CacheEntryTTL(ctx context.Context, key string) (int64, error)
 	CancelExecution(ctx context.Context, id uuid.UUID) (string, error)
 	// Fails (no row) while another caller holds a live compute lease, or when a
 	// fresh value appeared since the caller looked.
@@ -31,10 +39,17 @@ type Querier interface {
 	// A stream is held while active with a live owner; grant counts no attempt
 	// (attempts counts consecutive failures of the head event).
 	ClaimStreams(ctx context.Context, arg ClaimStreamsParams) ([]ClaimStreamsRow, error)
-	// Columns other than token and attempts are immutable, so reading them
-	// next to the grant in one statement is safe.
+	// limits maps each topic to its batch size, so every topic gets its own
+	// limit in one statement. Columns other than token and attempts are
+	// immutable, so reading them next to the grant in one statement is safe.
 	ClaimUnorderedEvents(ctx context.Context, arg ClaimUnorderedEventsParams) ([]ClaimUnorderedEventsRow, error)
 	ClockTimestamp(ctx context.Context) (time.Time, error)
+	// Tombstones a fresh value equal (as jsonb) to old, with a new version (D17).
+	CompareAndInvalidateCacheEntry(ctx context.Context, arg CompareAndInvalidateCacheEntryParams) (int64, error)
+	// Replaces a fresh value equal (as jsonb) to old, with a new version.
+	CompareAndSwapCacheEntry(ctx context.Context, arg CompareAndSwapCacheEntryParams) (int64, error)
+	// topic '' counts every topic.
+	CountEvents(ctx context.Context, topic string) (CountEventsRow, error)
 	CurrentLockTimeout(ctx context.Context) (string, error)
 	DeadEvents(ctx context.Context, lim int32) ([]DeadEventsRow, error)
 	DeleteBuffered(ctx context.Context, arg DeleteBufferedParams) error
@@ -43,14 +58,20 @@ type Querier interface {
 	EnsureStreams(ctx context.Context, topics pg.JSON) error
 	ExecutionCancelRequested(ctx context.Context, id uuid.UUID) (bool, error)
 	ExecutionStatusToken(ctx context.Context, id uuid.UUID) (ExecutionStatusTokenRow, error)
-	// Running executions whose lease expired on the final attempt, or that were
-	// cancelled, among the kinds this worker registered.
+	// Sets a new TTL and stale window on a fresh value. The version is kept: the
+	// value itself does not change.
+	ExpireCacheEntry(ctx context.Context, arg ExpireCacheEntryParams) (int64, error)
+	// Running executions whose lease expired at least grace_us ago on the final
+	// attempt, or that were cancelled, among the kinds this worker registered.
+	// The grace lets a slow owner that nobody reclaimed still record success.
 	ExpiredExecutions(ctx context.Context, arg ExpiredExecutionsParams) ([]ExpiredExecutionsRow, error)
 	// Unordered events whose lease expired on the final attempt.
 	ExpiredUnorderedEvents(ctx context.Context) ([]ExpiredUnorderedEventsRow, error)
 	FinishAttempt(ctx context.Context, arg FinishAttemptParams) error
 	// Run after durable.lease_lock in the same transaction.
 	FinishStep(ctx context.Context, arg FinishStepParams) (int64, error)
+	GetArchivedExecution(ctx context.Context, id uuid.UUID) (DurableExecutionsArchive, error)
+	GetArchivedExecutionByKey(ctx context.Context, arg GetArchivedExecutionByKeyParams) (DurableExecutionsArchive, error)
 	GetBuffered(ctx context.Context, arg GetBufferedParams) (GetBufferedRow, error)
 	GetExecution(ctx context.Context, id uuid.UUID) (DurableExecution, error)
 	GetExecutionByKey(ctx context.Context, arg GetExecutionByKeyParams) (DurableExecution, error)
@@ -77,6 +98,10 @@ type Querier interface {
 	LinkJobKey(ctx context.Context, arg LinkJobKeyParams) (bool, error)
 	ListFailedExecutions(ctx context.Context, arg ListFailedExecutionsParams) ([]DurableExecution, error)
 	ListInboxGaps(ctx context.Context, minAgeUs int64) ([]ListInboxGapsRow, error)
+	ListParked(ctx context.Context, arg ListParkedParams) ([]ListParkedRow, error)
+	// Tombstones key (D17) and returns the value it held, and whether that value
+	// was fresh.
+	LoadAndInvalidateCacheEntry(ctx context.Context, key string) (LoadAndInvalidateCacheEntryRow, error)
 	LoadCacheEntry(ctx context.Context, key string) (LoadCacheEntryRow, error)
 	LoadStreamEvents(ctx context.Context, arg LoadStreamEventsParams) ([]LoadStreamEventsRow, error)
 	LockInboxStream(ctx context.Context, arg LockInboxStreamParams) (LockInboxStreamRow, error)
@@ -93,18 +118,28 @@ type Querier interface {
 	NextToken(ctx context.Context) (int64, error)
 	OldestPayloadVersions(ctx context.Context) ([]OldestPayloadVersionsRow, error)
 	OldestRetainedSeq(ctx context.Context, arg OldestRetainedSeqParams) (int64, error)
+	// Same key rule as PurgeExecutions: a remembered key never loses its result.
+	PurgeArchivedExecutions(ctx context.Context, arg PurgeArchivedExecutionsParams) (int64, error)
 	PurgeCache(ctx context.Context, lim int32) (int64, error)
 	PurgeExecutions(ctx context.Context, arg PurgeExecutionsParams) (int64, error)
 	PurgeInboxMessages(ctx context.Context, arg PurgeInboxMessagesParams) (int64, error)
 	PurgeKeys(ctx context.Context, lim int32) (int64, error)
 	PurgePublishedEvents(ctx context.Context, arg PurgePublishedEventsParams) (int64, error)
+	// Counts one failed drain attempt; parks the message once attempts reach
+	// max_attempts.
+	RecordBufferedFailure(ctx context.Context, arg RecordBufferedFailureParams) (RecordBufferedFailureRow, error)
 	// execution_id is set afterwards by SetMessageExecution (inbox Enqueue).
 	RecordMessage(ctx context.Context, arg RecordMessageParams) (int64, error)
 	ReleaseCompute(ctx context.Context, arg ReleaseComputeParams) error
+	// Gives the attempt back. A key with nothing to keep (no other attempt and
+	// no checkpoint) is deleted, so it can be reused with any request.
 	ReleaseKey(ctx context.Context, arg ReleaseKeyParams) error
 	ReleaseResourceLease(ctx context.Context, arg ReleaseResourceLeaseParams) (int64, error)
 	// Used only after an acquisition whose response was lost.
 	ReleaseResourceOwner(ctx context.Context, arg ReleaseResourceOwnerParams) (int64, error)
+	// Extends owner's compute lease. A lease that lapsed is extended too while
+	// nobody else claimed it: a claim replaces compute_owner.
+	RenewCompute(ctx context.Context, arg RenewComputeParams) (int64, error)
 	RenewResourceLease(ctx context.Context, arg RenewResourceLeaseParams) (bool, error)
 	RequeueDeadEvent(ctx context.Context, id uuid.UUID) (int64, error)
 	RequeueExecution(ctx context.Context, id uuid.UUID) (int64, error)
@@ -119,6 +154,8 @@ type Querier interface {
 	SetExecutionFinished(ctx context.Context, arg SetExecutionFinishedParams) error
 	SetInboxApplied(ctx context.Context, arg SetInboxAppliedParams) error
 	SetInboxVersion(ctx context.Context, arg SetInboxVersionParams) error
+	// Run after durable.lease_lock in the same transaction.
+	SetKeyCheckpoint(ctx context.Context, arg SetKeyCheckpointParams) error
 	// Run after durable.lease_finish in the same transaction.
 	SetKeyResponse(ctx context.Context, arg SetKeyResponseParams) error
 	SetLocalLockTimeout(ctx context.Context, timeout string) error
@@ -129,9 +166,13 @@ type Querier interface {
 	SetStreamPosition(ctx context.Context, arg SetStreamPositionParams) (int64, error)
 	// Fixes the mode on the first claim (D8) and records the attempt.
 	StartAttempt(ctx context.Context, arg StartAttemptParams) (StartAttemptRow, error)
+	// Stores with a new version unless the key holds a fresh value. Stale values
+	// and tombstones are replaced.
+	StoreCacheEntryIfAbsent(ctx context.Context, arg StoreCacheEntryIfAbsentParams) (int64, error)
 	StoreComputed(ctx context.Context, arg StoreComputedParams) (int64, error)
 	// Transaction-scoped advisory locks (package txlock).
 	TryAdvisoryXactLock(ctx context.Context, key string) (bool, error)
+	UnparkBuffered(ctx context.Context, arg UnparkBufferedParams) (int64, error)
 	UpsertSchedule(ctx context.Context, arg UpsertScheduleParams) error
 }
 

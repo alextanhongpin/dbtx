@@ -70,6 +70,31 @@ type DurableExecutionStep struct {
 	UpdatedAt   time.Time
 }
 
+type DurableExecutionsArchive struct {
+	ID             uuid.UUID
+	Queue          string
+	Kind           string
+	Scope          sql.NullString
+	Key            sql.NullString
+	Payload        pg.JSON
+	PayloadVersion int32
+	Mode           sql.NullString
+	Status         string
+	Attempts       int32
+	MaxAttempts    int32
+	RunAt          time.Time
+	Token          int64
+	CheckpointName string
+	CheckpointData pg.JSON
+	LastError      sql.NullString
+	Output         pg.JSON
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	FinishedAt     time.Time
+	AttemptLog     pg.JSON
+	ArchivedAt     time.Time
+}
+
 type DurableIdempotencyKey struct {
 	ID             uuid.UUID
 	Scope          string
@@ -81,6 +106,11 @@ type DurableIdempotencyKey struct {
 	LeaseExpiresAt sql.NullTime
 	Response       pg.JSON
 	ExecutionID    sql.Null[uuid.UUID]
+	Attempts       int32
+	RetryAt        sql.NullTime
+	LastError      sql.NullString
+	CheckpointName string
+	CheckpointData pg.JSON
 	ExpiresAt      time.Time
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
@@ -106,6 +136,10 @@ type DurableInboxPending struct {
 	Payload      pg.JSON
 	IsGap        bool
 	ReceivedAt   time.Time
+	Attempts     int32
+	LastError    sql.NullString
+	FailedAt     sql.NullTime
+	ParkedAt     sql.NullTime
 }
 
 type DurableInboxStream struct {

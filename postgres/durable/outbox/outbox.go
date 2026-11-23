@@ -3,6 +3,11 @@
 // are either unordered (events published independently) or ordered (events
 // of one aggregate get a gapless sequence and are published one stream at a
 // time, in order).
+//
+// A Relay delivers events either to a broker through a Publisher (at least
+// once), or to an in-process TxHandler that runs inside the transaction that
+// records the event as published, so the handler's own writes commit
+// atomically with the acknowledgement.
 package outbox
 
 import (
@@ -49,7 +54,7 @@ type TopicConfig struct {
 	OnHeadFailure HeadPolicy      // ordered only; default HeadBlock
 	Advance       Advance         // ordered only; default AdvancePerEvent
 	MaxAttempts   int             // per event (unordered) or per head (ordered); default 10
-	BatchSize     int             // default 100
+	BatchSize     int             // events per claim (unordered) or load (ordered); default 100
 	Backoff       durable.Backoff // default durable.DefaultBackoff
 }
 

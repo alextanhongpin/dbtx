@@ -14,6 +14,44 @@ import (
 	"uuid"
 )
 
+const archiveExecutions = `-- name: ArchiveExecutions :execrows
+WITH picked AS (
+    SELECT e.id FROM durable.executions e
+    WHERE e.finished_at < $1::timestamptz
+    ORDER BY e.finished_at
+    LIMIT $2::integer FOR UPDATE SKIP LOCKED),
+moved AS (
+    DELETE FROM durable.executions e USING picked WHERE e.id = picked.id
+    RETURNING e.id, e.queue, e.kind, e.scope, e.key, e.payload, e.payload_version, e.mode, e.status, e.attempts, e.max_attempts, e.run_at, e.owner_id, e.token, e.lease_expires_at, e.cancel_requested, e.checkpoint_name, e.checkpoint_data, e.last_error, e.output, e.created_at, e.updated_at, e.finished_at)
+INSERT INTO durable.executions_archive (id, queue, kind, scope, key, payload, payload_version,
+    mode, status, attempts, max_attempts, run_at, token, checkpoint_name, checkpoint_data,
+    last_error, output, created_at, updated_at, finished_at, attempt_log)
+SELECT m.id, m.queue, m.kind, m.scope, m.key, m.payload, m.payload_version, m.mode, m.status,
+       m.attempts, m.max_attempts, m.run_at, m.token, m.checkpoint_name, m.checkpoint_data,
+       m.last_error, m.output, m.created_at, m.updated_at, m.finished_at,
+       coalesce((SELECT jsonb_agg(jsonb_build_object(
+                    'attempt', a.attempt, 'owner_id', a.owner_id, 'token', a.token,
+                    'started_at', a.started_at, 'finished_at', a.finished_at,
+                    'outcome', a.outcome, 'error', a.error) ORDER BY a.attempt)
+                 FROM durable.execution_attempts a WHERE a.execution_id = m.id), '[]'::jsonb)
+FROM moved m
+`
+
+type ArchiveExecutionsParams struct {
+	Cutoff time.Time
+	Lim    int32
+}
+
+// Moves finished executions to the archive in one statement, so a row is
+// always in exactly one of the two tables. Keys keep pointing at the ID.
+func (q *Queries) ArchiveExecutions(ctx context.Context, arg ArchiveExecutionsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, archiveExecutions, arg.Cutoff, arg.Lim)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const cancelExecution = `-- name: CancelExecution :one
 UPDATE durable.executions
 SET status = CASE WHEN status = 'pending' THEN 'cancelled' ELSE status END,
@@ -124,14 +162,16 @@ SELECT e.id, e.owner_id, e.token, e.kind, e.cancel_requested, e.payload,
 FROM durable.executions e
 WHERE e.queue = $1::text
   AND e.kind IN (SELECT jsonb_array_elements_text($2::jsonb))
-  AND e.status = 'running' AND e.lease_expires_at <= now()
+  AND e.status = 'running'
+  AND e.lease_expires_at <= now() - $3::bigint * interval '1 microsecond'
   AND (e.attempts >= e.max_attempts OR e.cancel_requested)
 LIMIT 100 FOR UPDATE SKIP LOCKED
 `
 
 type ExpiredExecutionsParams struct {
-	Queue string
-	Kinds pg.JSON
+	Queue   string
+	Kinds   pg.JSON
+	GraceUs int64
 }
 
 type ExpiredExecutionsRow struct {
@@ -145,10 +185,11 @@ type ExpiredExecutionsRow struct {
 	Attempts        int32
 }
 
-// Running executions whose lease expired on the final attempt, or that were
-// cancelled, among the kinds this worker registered.
+// Running executions whose lease expired at least grace_us ago on the final
+// attempt, or that were cancelled, among the kinds this worker registered.
+// The grace lets a slow owner that nobody reclaimed still record success.
 func (q *Queries) ExpiredExecutions(ctx context.Context, arg ExpiredExecutionsParams) ([]ExpiredExecutionsRow, error) {
-	rows, err := q.db.QueryContext(ctx, expiredExecutions, arg.Queue, arg.Kinds)
+	rows, err := q.db.QueryContext(ctx, expiredExecutions, arg.Queue, arg.Kinds, arg.GraceUs)
 	if err != nil {
 		return nil, err
 	}
@@ -221,6 +262,81 @@ func (q *Queries) FinishStep(ctx context.Context, arg FinishStepParams) (int64, 
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const getArchivedExecution = `-- name: GetArchivedExecution :one
+SELECT id, queue, kind, scope, key, payload, payload_version, mode, status, attempts, max_attempts, run_at, token, checkpoint_name, checkpoint_data, last_error, output, created_at, updated_at, finished_at, attempt_log, archived_at FROM durable.executions_archive WHERE id = $1
+`
+
+func (q *Queries) GetArchivedExecution(ctx context.Context, id uuid.UUID) (DurableExecutionsArchive, error) {
+	row := q.db.QueryRowContext(ctx, getArchivedExecution, id)
+	var i DurableExecutionsArchive
+	err := row.Scan(
+		&i.ID,
+		&i.Queue,
+		&i.Kind,
+		&i.Scope,
+		&i.Key,
+		&i.Payload,
+		&i.PayloadVersion,
+		&i.Mode,
+		&i.Status,
+		&i.Attempts,
+		&i.MaxAttempts,
+		&i.RunAt,
+		&i.Token,
+		&i.CheckpointName,
+		&i.CheckpointData,
+		&i.LastError,
+		&i.Output,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.FinishedAt,
+		&i.AttemptLog,
+		&i.ArchivedAt,
+	)
+	return i, err
+}
+
+const getArchivedExecutionByKey = `-- name: GetArchivedExecutionByKey :one
+SELECT a.id, a.queue, a.kind, a.scope, a.key, a.payload, a.payload_version, a.mode, a.status, a.attempts, a.max_attempts, a.run_at, a.token, a.checkpoint_name, a.checkpoint_data, a.last_error, a.output, a.created_at, a.updated_at, a.finished_at, a.attempt_log, a.archived_at FROM durable.executions_archive a
+JOIN durable.idempotency_keys k ON k.execution_id = a.id
+WHERE k.scope = $1 AND k.key = $2 AND k.status = 'linked'
+`
+
+type GetArchivedExecutionByKeyParams struct {
+	Scope string
+	Key   string
+}
+
+func (q *Queries) GetArchivedExecutionByKey(ctx context.Context, arg GetArchivedExecutionByKeyParams) (DurableExecutionsArchive, error) {
+	row := q.db.QueryRowContext(ctx, getArchivedExecutionByKey, arg.Scope, arg.Key)
+	var i DurableExecutionsArchive
+	err := row.Scan(
+		&i.ID,
+		&i.Queue,
+		&i.Kind,
+		&i.Scope,
+		&i.Key,
+		&i.Payload,
+		&i.PayloadVersion,
+		&i.Mode,
+		&i.Status,
+		&i.Attempts,
+		&i.MaxAttempts,
+		&i.RunAt,
+		&i.Token,
+		&i.CheckpointName,
+		&i.CheckpointData,
+		&i.LastError,
+		&i.Output,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.FinishedAt,
+		&i.AttemptLog,
+		&i.ArchivedAt,
+	)
+	return i, err
 }
 
 const getExecution = `-- name: GetExecution :one
@@ -543,6 +659,29 @@ func (q *Queries) OldestPayloadVersions(ctx context.Context) ([]OldestPayloadVer
 		return nil, err
 	}
 	return items, nil
+}
+
+const purgeArchivedExecutions = `-- name: PurgeArchivedExecutions :execrows
+DELETE FROM durable.executions_archive WHERE id IN (
+    SELECT a.id FROM durable.executions_archive a
+    WHERE a.archived_at < $1::timestamptz
+      AND NOT EXISTS (SELECT 1 FROM durable.idempotency_keys k
+                      WHERE k.execution_id = a.id AND k.expires_at > clock_timestamp())
+    LIMIT $2::integer FOR UPDATE SKIP LOCKED)
+`
+
+type PurgeArchivedExecutionsParams struct {
+	Cutoff time.Time
+	Lim    int32
+}
+
+// Same key rule as PurgeExecutions: a remembered key never loses its result.
+func (q *Queries) PurgeArchivedExecutions(ctx context.Context, arg PurgeArchivedExecutionsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, purgeArchivedExecutions, arg.Cutoff, arg.Lim)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const purgeExecutions = `-- name: PurgeExecutions :execrows

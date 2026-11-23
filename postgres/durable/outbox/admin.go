@@ -152,3 +152,17 @@ func expectOne(n int64, err error, what string) error {
 	}
 	return nil
 }
+
+// Counts are event totals by status. Published events are not counted.
+type Counts struct {
+	Pending int64 // waiting to be published, including delayed events
+	Running int64 // unordered events leased by a relay
+	Dead    int64 // unordered events that ran out of attempts
+}
+
+// Count returns event totals for topic, or for every topic when topic is "".
+// It scans the unpublished events, so call it for monitoring, not per event.
+func (o *Outbox) Count(ctx context.Context, topic string) (Counts, error) {
+	c, err := postgres.New(o.cfg.DB.DBTx(ctx)).CountEvents(ctx, topic)
+	return Counts{Pending: c.Pending, Running: c.Running, Dead: c.Dead}, err
+}

@@ -8,17 +8,72 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"time"
 
 	"github.com/alextanhongpin/dbtx/postgres/durable/internal/pg"
 	"uuid"
 )
 
+const abortKey = `-- name: AbortKey :one
+UPDATE durable.idempotency_keys k
+SET status = CASE WHEN k.attempts >= $1::integer
+                  THEN 'exhausted' ELSE 'in_flight' END,
+    owner_id = NULL, lease_expires_at = NULL,
+    last_error = $2::text,
+    retry_at = CASE WHEN $3::bigint > 0
+                    THEN clock_timestamp() + $3::bigint * interval '1 microsecond' END,
+    expires_at = CASE WHEN k.attempts >= $1::integer
+                      THEN clock_timestamp() + $4::bigint * interval '1 microsecond'
+                      ELSE k.expires_at END,
+    updated_at = now()
+WHERE k.id = $5 AND k.owner_id = $6 AND k.token = $7
+  AND k.status = 'in_flight'
+RETURNING k.status, k.retry_at
+`
+
+type AbortKeyParams struct {
+	MaxAttempts int32
+	LastError   string
+	DelayUs     int64
+	RetentionUs int64
+	ID          uuid.UUID
+	OwnerID     sql.NullString
+	Token       int64
+}
+
+type AbortKeyRow struct {
+	Status  string
+	RetryAt sql.NullTime
+}
+
+// Ends an attempt that failed. With attempts left the key waits delay_us
+// before the next attempt; otherwise it becomes exhausted.
+func (q *Queries) AbortKey(ctx context.Context, arg AbortKeyParams) (AbortKeyRow, error) {
+	row := q.db.QueryRowContext(ctx, abortKey,
+		arg.MaxAttempts,
+		arg.LastError,
+		arg.DelayUs,
+		arg.RetentionUs,
+		arg.ID,
+		arg.OwnerID,
+		arg.Token,
+	)
+	var i AbortKeyRow
+	err := row.Scan(&i.Status, &i.RetryAt)
+	return i, err
+}
+
 const beginKey = `-- name: BeginKey :one
 SELECT outcome::text AS outcome, key_id::uuid AS key_id, token::bigint AS token,
        response::jsonb AS response,
-       coalesce(execution_id, '00000000-0000-0000-0000-000000000000')::uuid AS execution_id
+       coalesce(execution_id, '00000000-0000-0000-0000-000000000000')::uuid AS execution_id,
+       attempts::integer AS attempts,
+       coalesce(retry_at, 'epoch')::timestamptz AS retry_at, -- epoch means none
+       coalesce(last_error, '')::text AS last_error,
+       checkpoint_name::text AS checkpoint_name, checkpoint_data::jsonb AS checkpoint_data
 FROM durable.begin_key($1::text, $2::text, $3::jsonb,
-    $4::text, $5::bigint, $6::bigint)
+    $4::text, $5::bigint, $6::bigint,
+    $7::integer)
 `
 
 type BeginKeyParams struct {
@@ -28,14 +83,20 @@ type BeginKeyParams struct {
 	OwnerID     string
 	LeaseUs     int64
 	RetentionUs int64
+	MaxAttempts int32
 }
 
 type BeginKeyRow struct {
-	Outcome     string
-	KeyID       uuid.UUID
-	Token       int64
-	Response    pg.JSON
-	ExecutionID uuid.UUID
+	Outcome        string
+	KeyID          uuid.UUID
+	Token          int64
+	Response       pg.JSON
+	ExecutionID    uuid.UUID
+	Attempts       int32
+	RetryAt        time.Time
+	LastError      string
+	CheckpointName string
+	CheckpointData pg.JSON
 }
 
 func (q *Queries) BeginKey(ctx context.Context, arg BeginKeyParams) (BeginKeyRow, error) {
@@ -46,6 +107,7 @@ func (q *Queries) BeginKey(ctx context.Context, arg BeginKeyParams) (BeginKeyRow
 		arg.OwnerID,
 		arg.LeaseUs,
 		arg.RetentionUs,
+		arg.MaxAttempts,
 	)
 	var i BeginKeyRow
 	err := row.Scan(
@@ -54,6 +116,11 @@ func (q *Queries) BeginKey(ctx context.Context, arg BeginKeyParams) (BeginKeyRow
 		&i.Token,
 		&i.Response,
 		&i.ExecutionID,
+		&i.Attempts,
+		&i.RetryAt,
+		&i.LastError,
+		&i.CheckpointName,
+		&i.CheckpointData,
 	)
 	return i, err
 }
@@ -75,9 +142,16 @@ func (q *Queries) PurgeKeys(ctx context.Context, lim int32) (int64, error) {
 }
 
 const releaseKey = `-- name: ReleaseKey :exec
-DELETE FROM durable.idempotency_keys
-WHERE id = $1 AND owner_id = $2 AND token = $3
-  AND status = 'in_flight'
+WITH del AS (
+    DELETE FROM durable.idempotency_keys
+    WHERE id = $1 AND owner_id = $2 AND token = $3
+      AND status = 'in_flight' AND attempts <= 1 AND checkpoint_name = ''
+)
+UPDATE durable.idempotency_keys k
+SET owner_id = NULL, lease_expires_at = NULL, attempts = greatest(k.attempts - 1, 0),
+    updated_at = now()
+WHERE k.id = $1 AND k.owner_id = $2 AND k.token = $3
+  AND k.status = 'in_flight' AND NOT (k.attempts <= 1 AND k.checkpoint_name = '')
 `
 
 type ReleaseKeyParams struct {
@@ -86,8 +160,29 @@ type ReleaseKeyParams struct {
 	Token   int64
 }
 
+// Gives the attempt back. A key with nothing to keep (no other attempt and
+// no checkpoint) is deleted, so it can be reused with any request.
 func (q *Queries) ReleaseKey(ctx context.Context, arg ReleaseKeyParams) error {
 	_, err := q.db.ExecContext(ctx, releaseKey, arg.ID, arg.OwnerID, arg.Token)
+	return err
+}
+
+const setKeyCheckpoint = `-- name: SetKeyCheckpoint :exec
+UPDATE durable.idempotency_keys
+SET checkpoint_name = $1::text,
+    checkpoint_data = $2::jsonb, updated_at = now()
+WHERE id = $3
+`
+
+type SetKeyCheckpointParams struct {
+	CheckpointName string
+	CheckpointData pg.JSON
+	ID             uuid.UUID
+}
+
+// Run after durable.lease_lock in the same transaction.
+func (q *Queries) SetKeyCheckpoint(ctx context.Context, arg SetKeyCheckpointParams) error {
+	_, err := q.db.ExecContext(ctx, setKeyCheckpoint, arg.CheckpointName, arg.CheckpointData, arg.ID)
 	return err
 }
 

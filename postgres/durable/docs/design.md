@@ -8,8 +8,9 @@ implementation differs from the original plan, the
 same material from first principles.
 
 Related: [decisions](decisions.md),
-[failure modes](failure-modes.md), [usage scenarios](scenarios.md),
-[lease plan](../../../docs/distributed-lock-plan.md), and [lease reuse limits](../../../docs/postgres-lease-module-reuse.md).
+[failure modes](failure-modes.md), and [usage scenarios](scenarios.md).
+The earlier lease plan and lease reuse study were removed with the standalone
+modules; they remain in git history.
 
 ## Purpose
 
@@ -23,13 +24,13 @@ Related: [decisions](decisions.md),
 - a scheduler, and a cache with stampede protection;
 - shared observability, fault-injection hooks and a test harness.
 
-It is a fresh implementation, not a wrapper. The existing `postgres/lease`,
-`idempotent`, `jobs`, `outbox`, `inbox`, `lock` and `cache` modules stay as they
-are; see [Coexistence](#coexistence-with-existing-modules).
+It is a fresh implementation, not a wrapper. It replaced the standalone
+`postgres/lease`, `idempotent`, `jobs`, `outbox`, `inbox`, `lock` and `cache`
+modules, which have since been removed; see [Coexistence](#coexistence-with-existing-modules).
 
 ### Why one module instead of reusing the siblings
 
-The [lease reuse document](../../../docs/postgres-lease-module-reuse.md) found that separate
+An earlier lease reuse study (since removed) found that separate
 nested modules cannot share an `internal` package, that token domains differ
 (per-key generation, per-job counter, global sequence), and that expiry policies
 differ (jobs may complete after expiry; leases may not). One module lets every
@@ -164,9 +165,10 @@ the same owner and reject anything older.
 
 Strict, everywhere: heartbeat, checkpoint, completion and failure all require a
 matching owner and token **and** an unexpired lease, evaluated with the database
-clock after taking the row lock. This is the `postgres/lease` policy. The laxer
-`postgres/jobs` behaviour (completing after expiry when nobody reclaimed the
-job) is intentionally not carried over; the work is retried instead.
+clock after taking the row lock. This is the `postgres/lease` policy. The one
+exception is job completion, which, as in `postgres/jobs`, is accepted after
+expiry when owner and token still match (nobody reclaimed or reaped the
+execution); workers reap an expired final attempt only after `ReapGrace` (D7).
 
 ## Execution modes
 
@@ -211,7 +213,12 @@ All tables live in schema `durable`. Rows marked *lease* carry the lease column 
 - `txlock.WithLock(ctx, key, fn)` and `txlock.WithLocks(ctx, keys, fn)` run `fn`
   in a `dbtx` transaction holding `pg_advisory_xact_lock` for each key, sorted and
   de-duplicated to prevent deadlocks; `Try` variants return `ErrContended`;
-  `SET LOCAL lock_timeout` bounds waiting.
+  `SET LOCAL lock_timeout` bounds waiting. Keys may be strings
+  (`hashtextextended`), `Int64Key`, `PairKey` or `StringPairKey`
+  (`WithKeys`/`TryWithKeys`); `Lock`/`TryLock` lock inside the caller's
+  transaction without a callback. In a joined transaction, locking runs in a
+  savepoint so contention or a lock timeout leaves the caller's transaction
+  usable and keeps none of that call's locks.
 - `lease` reproduces the `postgres/lease` contract (Acquire/TryAcquire,
   Activity/TryActivity, RunInFencedTx/TryRunInFencedTx, `held.RunInFencedTx`,
   `TxOutcomeError`) on the shared engine. Its README and tests are the
@@ -321,7 +328,12 @@ stale-while-revalidate: one caller computes under a compute lease while others
 get the stale value or wait (configurable). Writes carry the compute token and
 are rejected if a newer version exists. `Delete` and `InvalidateTx` leave a
 versioned tombstone (D17); `InvalidateTx` runs inside the caller's transaction
-so invalidation commits with the change that caused it. The table is UNLOGGED; contents are disposable.
+so invalidation commits with the change that caused it. The compute lease is
+renewed while the computation runs and released on error or panic. Key-value
+operations (`Exists`, `TTL`, `Expire`, `StoreOnce`, `LoadOrStore`,
+`CompareAndSwap`, `CompareAndDelete`, `LoadAndDelete`) see only fresh values;
+each write takes a new version, so it wins over a computation in flight.
+`Func` and `Idempotent` memoize a function through `GetOrCompute`. The table is UNLOGGED; contents are disposable.
 
 ## Cross-cutting
 
@@ -353,8 +365,13 @@ so invalidation commits with the change that caused it. The table is UNLOGGED; c
 
 ## Coexistence with existing modules
 
-- The new module uses schema `durable` and new tables; existing `dbtx.*` tables
-  and modules are untouched and keep working.
+The standalone modules have been removed from this repository; their tagged
+versions remain on the Go module proxy. The notes below describe the original
+coexistence plan; remaining parity gaps are tracked in
+[TODO](../TODO.md#parity-gaps-with-the-removed-modules).
+
+- The new module uses schema `durable` and new tables; the old `dbtx.*` tables
+  are never touched.
 - Each feature reaches parity against the matching module's documented
   behaviour and tests before it is recommended; differences are recorded in
   [decisions](decisions.md).

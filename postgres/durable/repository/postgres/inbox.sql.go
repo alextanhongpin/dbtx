@@ -76,7 +76,7 @@ func (q *Queries) EnsureInboxStream(ctx context.Context, arg EnsureInboxStreamPa
 }
 
 const getBuffered = `-- name: GetBuffered :one
-SELECT seq, message_id, type, payload, is_gap FROM durable.inbox_pending
+SELECT seq, message_id, type, payload, is_gap, attempts, last_error, parked_at FROM durable.inbox_pending
 WHERE source = $1 AND aggregate_key = $2 AND seq = $3
 `
 
@@ -92,6 +92,9 @@ type GetBufferedRow struct {
 	Type      string
 	Payload   pg.JSON
 	IsGap     bool
+	Attempts  int32
+	LastError sql.NullString
+	ParkedAt  sql.NullTime
 }
 
 func (q *Queries) GetBuffered(ctx context.Context, arg GetBufferedParams) (GetBufferedRow, error) {
@@ -103,6 +106,9 @@ func (q *Queries) GetBuffered(ctx context.Context, arg GetBufferedParams) (GetBu
 		&i.Type,
 		&i.Payload,
 		&i.IsGap,
+		&i.Attempts,
+		&i.LastError,
+		&i.ParkedAt,
 	)
 	return i, err
 }
@@ -141,6 +147,70 @@ func (q *Queries) ListInboxGaps(ctx context.Context, minAgeUs int64) ([]ListInbo
 			&i.LastAppliedSeq,
 			&i.NextBuffered,
 			&i.GapSince,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listParked = `-- name: ListParked :many
+SELECT source, aggregate_key, seq, message_id, type, payload, is_gap, attempts,
+       coalesce(last_error, '')::text AS last_error, received_at, parked_at::timestamptz AS parked_at
+FROM durable.inbox_pending
+WHERE parked_at IS NOT NULL
+  AND ($1::text = '' OR source = $1::text)
+ORDER BY parked_at, source, aggregate_key, seq
+LIMIT $2::integer
+`
+
+type ListParkedParams struct {
+	Source string
+	Lim    int32
+}
+
+type ListParkedRow struct {
+	Source       string
+	AggregateKey string
+	Seq          int64
+	MessageID    string
+	Type         string
+	Payload      pg.JSON
+	IsGap        bool
+	Attempts     int32
+	LastError    string
+	ReceivedAt   time.Time
+	ParkedAt     time.Time
+}
+
+func (q *Queries) ListParked(ctx context.Context, arg ListParkedParams) ([]ListParkedRow, error) {
+	rows, err := q.db.QueryContext(ctx, listParked, arg.Source, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListParkedRow{}
+	for rows.Next() {
+		var i ListParkedRow
+		if err := rows.Scan(
+			&i.Source,
+			&i.AggregateKey,
+			&i.Seq,
+			&i.MessageID,
+			&i.Type,
+			&i.Payload,
+			&i.IsGap,
+			&i.Attempts,
+			&i.LastError,
+			&i.ReceivedAt,
+			&i.ParkedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -231,6 +301,42 @@ func (q *Queries) PurgeInboxMessages(ctx context.Context, arg PurgeInboxMessages
 	return result.RowsAffected()
 }
 
+const recordBufferedFailure = `-- name: RecordBufferedFailure :one
+UPDATE durable.inbox_pending
+SET attempts = attempts + 1, last_error = $1::text, failed_at = now(),
+    parked_at = CASE WHEN attempts + 1 >= $2::integer THEN now() END
+WHERE source = $3 AND aggregate_key = $4 AND seq = $5
+RETURNING attempts, (parked_at IS NOT NULL)::boolean AS parked
+`
+
+type RecordBufferedFailureParams struct {
+	LastError    string
+	MaxAttempts  int32
+	Source       string
+	AggregateKey string
+	Seq          int64
+}
+
+type RecordBufferedFailureRow struct {
+	Attempts int32
+	Parked   bool
+}
+
+// Counts one failed drain attempt; parks the message once attempts reach
+// max_attempts.
+func (q *Queries) RecordBufferedFailure(ctx context.Context, arg RecordBufferedFailureParams) (RecordBufferedFailureRow, error) {
+	row := q.db.QueryRowContext(ctx, recordBufferedFailure,
+		arg.LastError,
+		arg.MaxAttempts,
+		arg.Source,
+		arg.AggregateKey,
+		arg.Seq,
+	)
+	var i RecordBufferedFailureRow
+	err := row.Scan(&i.Attempts, &i.Parked)
+	return i, err
+}
+
 const recordMessage = `-- name: RecordMessage :execrows
 INSERT INTO durable.inbox_messages (source, message_id, aggregate_key, seq, version, status)
 VALUES ($1, $2, $3, $4,
@@ -313,4 +419,23 @@ type SetMessageExecutionParams struct {
 func (q *Queries) SetMessageExecution(ctx context.Context, arg SetMessageExecutionParams) error {
 	_, err := q.db.ExecContext(ctx, setMessageExecution, arg.ExecutionID, arg.Source, arg.MessageID)
 	return err
+}
+
+const unparkBuffered = `-- name: UnparkBuffered :execrows
+UPDATE durable.inbox_pending SET attempts = 0, parked_at = NULL
+WHERE source = $1 AND aggregate_key = $2 AND seq = $3
+`
+
+type UnparkBufferedParams struct {
+	Source       string
+	AggregateKey string
+	Seq          int64
+}
+
+func (q *Queries) UnparkBuffered(ctx context.Context, arg UnparkBufferedParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, unparkBuffered, arg.Source, arg.AggregateKey, arg.Seq)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }

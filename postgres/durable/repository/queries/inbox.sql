@@ -24,7 +24,7 @@ UPDATE durable.inbox_streams SET gap_since = coalesce(gap_since, now()), updated
 WHERE source = sqlc.arg(source) AND aggregate_key = sqlc.arg(aggregate_key);
 
 -- name: GetBuffered :one
-SELECT seq, message_id, type, payload, is_gap FROM durable.inbox_pending
+SELECT seq, message_id, type, payload, is_gap, attempts, last_error, parked_at FROM durable.inbox_pending
 WHERE source = sqlc.arg(source) AND aggregate_key = sqlc.arg(aggregate_key) AND seq = sqlc.arg(seq);
 
 -- name: DeleteBuffered :exec
@@ -67,3 +67,25 @@ DELETE FROM durable.inbox_messages m WHERE (m.source, m.message_id) IN (
     WHERE x.source = sqlc.arg(source) AND x.received_at < sqlc.arg(cutoff)::timestamptz
       AND x.status <> 'buffered'
     LIMIT sqlc.arg(lim)::integer);
+
+-- name: RecordBufferedFailure :one
+-- Counts one failed drain attempt; parks the message once attempts reach
+-- max_attempts.
+UPDATE durable.inbox_pending
+SET attempts = attempts + 1, last_error = sqlc.arg(last_error)::text, failed_at = now(),
+    parked_at = CASE WHEN attempts + 1 >= sqlc.arg(max_attempts)::integer THEN now() END
+WHERE source = sqlc.arg(source) AND aggregate_key = sqlc.arg(aggregate_key) AND seq = sqlc.arg(seq)
+RETURNING attempts, (parked_at IS NOT NULL)::boolean AS parked;
+
+-- name: UnparkBuffered :execrows
+UPDATE durable.inbox_pending SET attempts = 0, parked_at = NULL
+WHERE source = sqlc.arg(source) AND aggregate_key = sqlc.arg(aggregate_key) AND seq = sqlc.arg(seq);
+
+-- name: ListParked :many
+SELECT source, aggregate_key, seq, message_id, type, payload, is_gap, attempts,
+       coalesce(last_error, '')::text AS last_error, received_at, parked_at::timestamptz AS parked_at
+FROM durable.inbox_pending
+WHERE parked_at IS NOT NULL
+  AND (sqlc.arg(source)::text = '' OR source = sqlc.arg(source)::text)
+ORDER BY parked_at, source, aggregate_key, seq
+LIMIT sqlc.arg(lim)::integer;

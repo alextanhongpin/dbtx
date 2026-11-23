@@ -20,16 +20,32 @@ import (
 
 // RelayConfig is copied at construction. Zero values select defaults.
 type RelayConfig struct {
-	Publisher      Publisher
+	// Publisher sends batches to a broker. Exactly one of Publisher and
+	// Handler is required.
+	Publisher Publisher
+	// Handler consumes events in-process instead: each event is handled in
+	// its own transaction, which also records the event as published, so
+	// the handler's writes (made through ctx) commit atomically with the
+	// acknowledgement. A failed or panicking handler rolls its writes back
+	// and spends an attempt.
+	Handler        TxHandler
 	Owner          string        // identifies this relay in lease rows; default random
 	Concurrency    int           // ordered streams in parallel; default 8
 	PollInterval   time.Duration // default 500ms
 	LeaseDuration  time.Duration // default 30s
 	RequestTimeout time.Duration // default 5s
-	PublishTimeout time.Duration // per Publisher call; default 10s
-	Observer       durable.Observer
-	Hooks          *durable.Hooks
+	PublishTimeout time.Duration // per Publisher call or Handler transaction; default 10s
+	// RecordTimeout bounds the writes that record a publish outcome
+	// (published, retry, dead, released). They run even after ctx ends, so
+	// a shutdown does not lose the outcome; default RequestTimeout.
+	RecordTimeout time.Duration
+	Observer      durable.Observer
+	Hooks         *durable.Hooks
 }
+
+// TxHandler handles one message inside the transaction that acknowledges
+// it. ctx carries that transaction (see dbtx.DB.RunInTx).
+type TxHandler func(ctx context.Context, m Message) error
 
 // Relay publishes stored events. Run any number of relays; they coordinate
 // through row leases.
@@ -37,11 +53,12 @@ type Relay struct {
 	o      *Outbox
 	cfg    RelayConfig
 	topics string // JSON array of topic names
+	limits string // JSON object: topic name -> batch size
 }
 
 func NewRelay(o *Outbox, cfg RelayConfig) (*Relay, error) {
-	if o == nil || cfg.Publisher == nil {
-		return nil, fmt.Errorf("%w: outbox and publisher are required", durable.ErrInvalidConfig)
+	if o == nil || (cfg.Publisher == nil) == (cfg.Handler == nil) {
+		return nil, fmt.Errorf("%w: outbox and exactly one of Publisher and Handler are required", durable.ErrInvalidConfig)
 	}
 	if cfg.Owner == "" {
 		cfg.Owner = "relay-" + rand.Text()[:10]
@@ -61,6 +78,9 @@ func NewRelay(o *Outbox, cfg RelayConfig) (*Relay, error) {
 	if cfg.PublishTimeout <= 0 {
 		cfg.PublishTimeout = 10 * time.Second
 	}
+	if cfg.RecordTimeout <= 0 {
+		cfg.RecordTimeout = cfg.RequestTimeout
+	}
 	if cfg.LeaseDuration < 6*time.Millisecond {
 		return nil, fmt.Errorf("%w: LeaseDuration >= 6ms", durable.ErrInvalidConfig)
 	}
@@ -68,12 +88,17 @@ func NewRelay(o *Outbox, cfg RelayConfig) (*Relay, error) {
 	// publish must end well before their lease does.
 	cfg.PublishTimeout = min(cfg.PublishTimeout, cfg.LeaseDuration/2)
 	names := make([]string, 0, len(o.cfg.Topics))
-	for n := range o.cfg.Topics {
+	limits := make(map[string]int, len(o.cfg.Topics))
+	for n, t := range o.cfg.Topics {
 		names = append(names, n)
+		if !t.Ordered {
+			limits[n] = t.BatchSize
+		}
 	}
 	slices.Sort(names)
 	b, _ := json.Marshal(names)
-	return &Relay{o: o, cfg: cfg, topics: string(b)}, nil
+	l, _ := json.Marshal(limits)
+	return &Relay{o: o, cfg: cfg, topics: string(b), limits: string(l)}, nil
 }
 
 // Run publishes until ctx ends.
@@ -108,6 +133,45 @@ const (
 )
 
 func (r *Relay) q() *postgres.Queries { return postgres.New(r.o.cfg.DB.DB()) }
+
+// recordCtx outlives ctx, bounded by RecordTimeout, for writes that record
+// an outcome: ctx ending is a common reason to be recording one.
+func (r *Relay) recordCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), r.cfg.RecordTimeout)
+}
+
+// publish calls the Publisher, turning a panic into a failed publish of the
+// first message so that the relay keeps running.
+func (r *Relay) publish(ctx context.Context, msgs []Message) (n int, err error) {
+	pctx, cancel := context.WithTimeout(ctx, r.cfg.PublishTimeout)
+	defer cancel()
+	defer func() {
+		if p := recover(); p != nil {
+			n, err = 0, fmt.Errorf("outbox: publisher panic: %v", p)
+		}
+	}()
+	n, err = r.cfg.Publisher.Publish(pctx, msgs)
+	return max(0, min(n, len(msgs))), err
+}
+
+// handlerError marks an error returned (or a panic raised) by the Handler,
+// as opposed to a failure of the surrounding transaction.
+type handlerError struct{ err error }
+
+func (e *handlerError) Error() string { return e.err.Error() }
+func (e *handlerError) Unwrap() error { return e.err }
+
+func (r *Relay) callHandler(ctx context.Context, m Message) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			err = fmt.Errorf("outbox: handler panic: %v", p)
+		}
+		if err != nil {
+			err = &handlerError{err}
+		}
+	}()
+	return r.cfg.Handler(ctx, m)
+}
 
 func (r *Relay) observe(ctx context.Context, t durable.EventType, topic, key string, seq int64, err error) {
 	durable.Observe(ctx, r.cfg.Observer, durable.Event{Type: t, Component: "outbox", Kind: topic, Key: key, Seq: seq, Err: err})
@@ -159,8 +223,7 @@ func (r *Relay) runUnordered(ctx context.Context) (int, error) {
 		}
 	}
 	claimed, err := q.ClaimUnorderedEvents(qctx, postgres.ClaimUnorderedEventsParams{
-		Topics: pg.JSON(r.topics), Lim: int32(r.maxBatch()),
-		OwnerID: owner, TtlUs: pg.Micros(r.cfg.LeaseDuration),
+		Limits: pg.JSON(r.limits), OwnerID: owner, TtlUs: pg.Micros(r.cfg.LeaseDuration),
 	})
 	if err != nil {
 		return 0, err
@@ -182,14 +245,17 @@ func (r *Relay) runUnordered(ctx context.Context) (int, error) {
 	for _, topic := range topics {
 		events := byTopic[topic]
 		t := r.o.cfg.Topics[topic]
+		if r.cfg.Handler != nil {
+			n, err := r.handleUnordered(ctx, owner, t, events)
+			total += n
+			errs = append(errs, err)
+			continue
+		}
 		msgs := make([]Message, len(events))
 		for i, e := range events {
 			msgs[i] = e.message()
 		}
-		pctx, cancel := context.WithTimeout(ctx, r.cfg.PublishTimeout)
-		n, perr := r.cfg.Publisher.Publish(pctx, msgs)
-		cancel()
-		n = max(0, min(n, len(msgs)))
+		n, perr := r.publish(ctx, msgs)
 		if n > 0 {
 			r.cfg.Hooks.CallAfterPublishBeforeAdvance(ctx, events[n-1].id.String(), 0)
 			ids := make([]string, n)
@@ -199,9 +265,11 @@ func (r *Relay) runUnordered(ctx context.Context) (int, error) {
 			b, _ := json.Marshal(ids)
 			// Owner match is enough (D7): while it matches, no other relay
 			// reclaimed the events. Reclaimed ones are published again.
-			m, err := q.MarkEventsPublished(context.WithoutCancel(ctx), postgres.MarkEventsPublishedParams{
+			rctx, cancel := r.recordCtx(ctx)
+			m, err := q.MarkEventsPublished(rctx, postgres.MarkEventsPublishedParams{
 				Ids: b, OwnerID: sql.NullString{String: owner, Valid: true},
 			})
+			cancel()
 			if err != nil {
 				errs = append(errs, err)
 			} else if int(m) < n {
@@ -234,12 +302,70 @@ func (r *Relay) runUnordered(ctx context.Context) (int, error) {
 	return total, errors.Join(errs...)
 }
 
-func (r *Relay) maxBatch() int {
-	m := 0
-	for _, t := range r.o.cfg.Topics {
-		m = max(m, t.BatchSize)
+// handleUnordered runs the Handler on each claimed event of one topic, each
+// in its own transaction that also marks the event published.
+func (r *Relay) handleUnordered(ctx context.Context, owner string, t TopicConfig, events []eventRow) (int, error) {
+	handled := 0
+	var errs []error
+	for i, e := range events {
+		if ctx.Err() != nil {
+			// Shutdown: give back what was not tried, without spending attempts.
+			for _, e := range events[i:] {
+				errs = append(errs, r.returnEvent(ctx, owner, e))
+			}
+			break
+		}
+		err := r.handleEventTx(ctx, owner, e)
+		var herr *handlerError
+		switch {
+		case err == nil:
+			handled++
+		case errors.Is(err, durable.ErrLeaseLost):
+			r.observe(ctx, durable.EventLeaseLost, e.topic, e.id.String(), 0, err)
+		case errors.As(err, &herr) && ctx.Err() == nil:
+			errs = append(errs, r.failEvent(ctx, owner, e, t, herr.err))
+		default:
+			// The transaction failed, or ctx ended mid-handler: nothing was
+			// recorded and no attempt is spent.
+			if ctx.Err() == nil && herr == nil {
+				errs = append(errs, err)
+			}
+			errs = append(errs, r.returnEvent(ctx, owner, e))
+		}
 	}
-	return m
+	return handled, errors.Join(errs...)
+}
+
+func (r *Relay) handleEventTx(ctx context.Context, owner string, e eventRow) error {
+	tctx, cancel := context.WithTimeout(ctx, r.cfg.PublishTimeout)
+	defer cancel()
+	db := r.o.cfg.DB
+	return db.RunInTx(tctx, func(txCtx context.Context) error {
+		q := postgres.New(db.DBTx(txCtx))
+		// The row lock keeps the event from being reclaimed while the
+		// handler runs; an expired lease means another relay may have it.
+		held, err := e.lease(owner).Lock(txCtx, q, true)
+		if err != nil {
+			return err
+		}
+		if !held {
+			return durable.ErrLeaseLost
+		}
+		if err := r.callHandler(txCtx, e.message()); err != nil {
+			return err
+		}
+		b, _ := json.Marshal([]string{e.id.String()})
+		n, err := q.MarkEventsPublished(txCtx, postgres.MarkEventsPublishedParams{
+			Ids: b, OwnerID: sql.NullString{String: owner, Valid: true},
+		})
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return durable.ErrLeaseLost
+		}
+		return nil
+	})
 }
 
 func (r *Relay) failEvent(ctx context.Context, owner string, e eventRow, t TopicConfig, perr error) error {
@@ -253,7 +379,9 @@ func (r *Relay) failEvent(ctx context.Context, owner string, e eventRow, t Topic
 		r.observe(ctx, durable.EventRetryScheduled, e.topic, e.id.String(), 0, perr)
 	}
 	msg := perr.Error()
-	_, err := e.lease(owner).Finish(context.WithoutCancel(ctx), r.q(), engine.Finish{
+	rctx, cancel := r.recordCtx(ctx)
+	defer cancel()
+	_, err := e.lease(owner).Finish(rctx, r.q(), engine.Finish{
 		Status: status, Delay: &delay, LastError: &msg,
 	})
 	return err
@@ -262,7 +390,9 @@ func (r *Relay) failEvent(ctx context.Context, owner string, e eventRow, t Topic
 // returnEvent gives back an event that was claimed but never offered to the
 // publisher, without consuming an attempt.
 func (r *Relay) returnEvent(ctx context.Context, owner string, e eventRow) error {
-	_, err := e.lease(owner).Finish(context.WithoutCancel(ctx), r.q(), engine.Finish{
+	rctx, cancel := r.recordCtx(ctx)
+	defer cancel()
+	_, err := e.lease(owner).Finish(rctx, r.q(), engine.Finish{
 		Status: "pending", Delay: engine.Ptr(time.Duration(0)), AttemptDelta: -1,
 	})
 	return err
@@ -370,6 +500,14 @@ func (r *Relay) drainStream(ctx context.Context, s *stream, t TopicConfig) (int,
 			err := fmt.Errorf("outbox: stream %s/%s expected seq %d, found %d", s.topic, s.key, s.last+1, events[0].seq)
 			return published, errors.Join(err, r.releaseStream(ctx, s, time.Second, err.Error()))
 		}
+		if r.cfg.Handler != nil {
+			n, done, err := r.handleStream(ctx, s, t, events)
+			published += n
+			if done || err != nil {
+				return published, err
+			}
+			continue
+		}
 		size := 1
 		if t.Advance == AdvancePerBatch {
 			size = len(events)
@@ -381,10 +519,7 @@ func (r *Relay) drainStream(ctx context.Context, s *stream, t TopicConfig) (int,
 				msgs[j] = e.message()
 				msgs[j].Attempt = s.attempts + 1
 			}
-			pctx, cancel := context.WithTimeout(ctx, r.cfg.PublishTimeout)
-			n, perr := r.cfg.Publisher.Publish(pctx, msgs)
-			cancel()
-			n = max(0, min(n, len(msgs)))
+			n, perr := r.publish(ctx, msgs)
 			if n > 0 {
 				seq := chunk[n-1].seq
 				r.cfg.Hooks.CallAfterPublishBeforeAdvance(ctx, s.topic+"/"+s.key, seq)
@@ -406,6 +541,54 @@ func (r *Relay) drainStream(ctx context.Context, s *stream, t TopicConfig) (int,
 			}
 		}
 	}
+}
+
+// handleStream runs the Handler on events in order, each in a transaction
+// that holds the stream lease and advances the stream. done reports that the
+// stream was given up (failed head, shutdown or lost lease).
+func (r *Relay) handleStream(ctx context.Context, s *stream, t TopicConfig, events []eventRow) (n int, done bool, err error) {
+	for _, e := range events {
+		m := e.message()
+		m.Attempt = s.attempts + 1
+		tctx, cancel := context.WithTimeout(ctx, r.cfg.PublishTimeout)
+		err := r.locked(tctx, s, func(txCtx context.Context, q *postgres.Queries) error {
+			if err := r.callHandler(txCtx, m); err != nil {
+				return err
+			}
+			return r.setPosition(txCtx, q, s, e.seq)
+		})
+		cancel()
+		if err == nil {
+			s.last, s.attempts = e.seq, 0
+			n++
+			continue
+		}
+		var herr *handlerError
+		if !errors.As(err, &herr) || ctx.Err() != nil || s.keeper.Err() != nil {
+			if errors.Is(err, durable.ErrLeaseLost) || s.keeper.Err() != nil {
+				return n, true, err
+			}
+			// Shutdown or a failed transaction, not a handler rejection:
+			// give the stream back without spending an attempt.
+			return n, true, errors.Join(err, r.releaseStream(ctx, s, 0, ""))
+		}
+		return n, true, r.headFailed(ctx, s, t, e, herr.err)
+	}
+	return n, false, nil
+}
+
+func (r *Relay) setPosition(ctx context.Context, q *postgres.Queries, s *stream, seq int64) error {
+	n, err := q.SetStreamPosition(ctx, postgres.SetStreamPositionParams{Seq: seq, ID: s.id})
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return durable.ErrLeaseLost
+	}
+	return q.MarkStreamPublished(ctx, postgres.MarkStreamPublishedParams{
+		Topic: s.topic, AggregateKey: s.key,
+		AfterSeq: s.last, UpToSeq: seq,
+	})
 }
 
 func (r *Relay) loadStream(ctx context.Context, s *stream, limit int) ([]eventRow, error) {
@@ -445,20 +628,14 @@ func (r *Relay) locked(ctx context.Context, s *stream, fn func(txCtx context.Con
 	return err
 }
 
-// advance records progress under the stream lease.
+// advance records progress under the stream lease. It outlives ctx (bounded
+// by RecordTimeout) so that a shutdown right after a publish still records
+// it; the lease lock fences out a relay that lost the stream.
 func (r *Relay) advance(ctx context.Context, s *stream, seq int64) error {
-	err := r.locked(ctx, s, func(txCtx context.Context, q *postgres.Queries) error {
-		n, err := q.SetStreamPosition(txCtx, postgres.SetStreamPositionParams{Seq: seq, ID: s.id})
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return durable.ErrLeaseLost
-		}
-		return q.MarkStreamPublished(txCtx, postgres.MarkStreamPublishedParams{
-			Topic: s.topic, AggregateKey: s.key,
-			AfterSeq: s.last, UpToSeq: seq,
-		})
+	rctx, cancel := r.recordCtx(ctx)
+	defer cancel()
+	err := r.locked(rctx, s, func(txCtx context.Context, q *postgres.Queries) error {
+		return r.setPosition(txCtx, q, s, seq)
 	})
 	if err != nil {
 		return err
@@ -473,7 +650,9 @@ func (r *Relay) releaseStream(ctx context.Context, s *stream, delay time.Duratio
 	if lastErr != "" {
 		f.LastError = &lastErr
 	}
-	_, err := s.lease().Finish(context.WithoutCancel(ctx), r.q(), f)
+	rctx, cancel := r.recordCtx(ctx)
+	defer cancel()
+	_, err := s.lease().Finish(rctx, r.q(), f)
 	return err
 }
 
@@ -481,7 +660,8 @@ func (r *Relay) releaseStream(ctx context.Context, s *stream, delay time.Duratio
 // write is fenced: a relay that lost its stream changes nothing.
 func (r *Relay) headFailed(ctx context.Context, s *stream, t TopicConfig, head eventRow, perr error) error {
 	attempts := s.attempts + 1
-	ctx = context.WithoutCancel(ctx)
+	ctx, cancel := r.recordCtx(ctx)
+	defer cancel()
 	msg := perr.Error()
 	finish := func(ctx context.Context, q *postgres.Queries, f engine.Finish) error {
 		ok, err := s.lease().Finish(ctx, q, f)

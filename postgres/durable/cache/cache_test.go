@@ -103,8 +103,11 @@ func TestSlowComputeDoesNotOverwriteNewer(t *testing.T) {
 		})
 	}()
 	<-started
-	time.Sleep(150 * time.Millisecond) // the slow caller's compute lease expires
-	if _, err := c.GetOrCompute(ctx, "k", opts, func(context.Context) (chart, error) {
+	// The slow caller keeps its lease, so a second caller only computes when
+	// told to.
+	fast := opts
+	fast.OnContention = cache.ComputeAnyway
+	if _, err := c.GetOrCompute(ctx, "k", fast, func(context.Context) (chart, error) {
 		return chart{Items: []string{"fast"}}, nil
 	}); err != nil {
 		t.Fatal(err)

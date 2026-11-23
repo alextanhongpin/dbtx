@@ -3,6 +3,12 @@
 // it under a compute lease while others serve the stale value or wait.
 // Writes are versioned, so a slow computation can never overwrite a newer
 // value. Contents are disposable: a database crash empties the table.
+//
+// The compute lease is renewed while fn runs and released when fn fails or
+// panics. Key-value operations (Exists, TTL, Expire, StoreOnce, LoadOrStore,
+// CompareAndSwap, CompareAndDelete, LoadAndDelete) treat only fresh values as
+// present; deletes leave versioned tombstones (see Delete). Func and
+// Idempotent memoize functions on top of GetOrCompute.
 package cache
 
 import (
@@ -40,8 +46,9 @@ func New(cfg Config) (*Cache, error) {
 type Contention string
 
 const (
-	// Wait polls for the other computation for up to ComputeTTL, then
-	// computes itself (default, Q6).
+	// Wait polls while another caller holds a live compute lease, and
+	// computes itself once that lease ends without a value (its holder
+	// failed or died) or after MaxWait (default, Q6).
 	Wait Contention = "wait"
 	// ComputeAnyway computes immediately; versioning keeps the newest write.
 	ComputeAnyway Contention = "compute"
@@ -51,10 +58,14 @@ const (
 type Options struct {
 	TTL          time.Duration // how long a value is fresh; required
 	StaleFor     time.Duration // after TTL, how long it may be served while one caller recomputes
-	ComputeTTL   time.Duration // compute lease; default 30s
+	ComputeTTL   time.Duration // compute lease, renewed every ComputeTTL/3 while fn runs; default 30s
 	OnContention Contention    // default Wait
 	PollInterval time.Duration // while waiting; default 50ms
+	MaxWait      time.Duration // with Wait, compute anyway after this long; 0 waits as long as ctx allows
 }
+
+// minRenew bounds how often a compute lease is renewed.
+const minRenew = 10 * time.Millisecond
 
 func (c *Cache) key(k string) string { return c.cfg.Prefix + k }
 
@@ -130,9 +141,11 @@ func (c *Cache) releaseCompute(ctx context.Context, key, owner string) error {
 
 // GetOrCompute returns a fresh value, or computes it with fn. Only one caller
 // computes at a time; others get the stale value (within StaleFor) or follow
-// OnContention. A computation that finishes after a newer value was written
-// returns its own result but does not overwrite the newer one. T is inferred
-// from fn.
+// OnContention. The compute lease is renewed every ComputeTTL/3 while fn
+// runs, so a slow fn keeps it; if fn returns an error or panics, the lease is
+// released (before the panic propagates) so the next caller computes at once.
+// A computation that finishes after a newer value was written returns its
+// own result but does not overwrite the newer one. T is inferred from fn.
 func (c *Cache) GetOrCompute[T any](ctx context.Context, key string, o Options, fn func(ctx context.Context) (T, error)) (T, error) {
 	var zero T
 	if o.TTL <= 0 || o.StaleFor < 0 || fn == nil {
@@ -147,12 +160,22 @@ func (c *Cache) GetOrCompute[T any](ctx context.Context, key string, o Options, 
 	if o.PollInterval <= 0 {
 		o.PollInterval = 50 * time.Millisecond
 	}
-	compute := func(token int64, owner string) (T, error) {
-		v, err := fn(ctx)
+	compute := func(token int64, owner string) (v T, err error) {
+		stored := false
+		if owner != "" {
+			// Keep the lease while fn runs, and release it unless a store
+			// ended it: on error, on panic (the deferred release runs before
+			// the panic propagates) and on a failed store.
+			stop := c.keepCompute(ctx, key, owner, o.ComputeTTL)
+			defer func() {
+				stop()
+				if !stored {
+					_ = c.releaseCompute(ctx, key, owner)
+				}
+			}()
+		}
+		v, err = fn(ctx)
 		if err != nil {
-			if owner != "" {
-				_ = c.releaseCompute(ctx, key, owner)
-			}
 			return zero, err
 		}
 		b, err := json.Marshal(v)
@@ -167,9 +190,13 @@ func (c *Cache) GetOrCompute[T any](ctx context.Context, key string, o Options, 
 			}
 		}
 		_, err = c.store(ctx, key, owner, token, b, o)
+		stored = err == nil
 		return v, err
 	}
-	deadline := time.Now().Add(o.ComputeTTL)
+	var deadline time.Time
+	if o.MaxWait > 0 {
+		deadline = time.Now().Add(o.MaxWait)
+	}
 	for {
 		r, err := c.load(ctx, key)
 		if err != nil {
@@ -189,7 +216,7 @@ func (c *Cache) GetOrCompute[T any](ctx context.Context, key string, o Options, 
 		if r.StaleOk {
 			return decode[T](r.Value)
 		}
-		if o.OnContention == ComputeAnyway || !time.Now().Before(deadline) {
+		if o.OnContention == ComputeAnyway || (!deadline.IsZero() && !time.Now().Before(deadline)) {
 			return compute(0, "")
 		}
 		t := time.NewTimer(o.PollInterval)
@@ -200,6 +227,35 @@ func (c *Cache) GetOrCompute[T any](ctx context.Context, key string, o Options, 
 		case <-t.C:
 		}
 	}
+}
+
+// keepCompute renews owner's compute lease every ttl/3 until stop is called
+// or the lease is lost. stop waits for an in-flight renewal to finish.
+func (c *Cache) keepCompute(ctx context.Context, key, owner string, ttl time.Duration) (stop func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		t := time.NewTicker(max(ttl/3, minRenew))
+		defer t.Stop()
+		q := postgres.New(c.cfg.DB.DB())
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+			n, err := q.RenewCompute(ctx, postgres.RenewComputeParams{
+				Key: c.key(key), Owner: owner, TtlUs: pg.Micros(ttl),
+			})
+			if err == nil && n == 0 {
+				// Lost: another caller claimed the lapsed lease, or a store
+				// ended it. Our store is still fenced by its version token.
+				return
+			}
+		}
+	}()
+	return func() { cancel(); <-done }
 }
 
 // Delete invalidates key. It joins a transaction in ctx, so invalidation

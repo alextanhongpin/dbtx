@@ -15,7 +15,7 @@ the existing modules.
 **Why.** Shared engine code needs one module (nested modules cannot share
 `internal`), and one token domain, expiry policy and error vocabulary cannot be
 retrofitted onto modules whose contracts differ
-([reuse limits](../../../docs/postgres-lease-module-reuse.md)).
+(reuse limits study, removed with the standalone modules; see git history).
 
 **Consequences.** Behaviour proven in `lease`, `idempotent`, `jobs`, `inbox`
 and `outbox` is reimplemented; their READMEs and tests are the reference.
@@ -88,8 +88,12 @@ enough, because no successor can claim the row until it commits.
 The row-lock exception lets a step run longer than the TTL, as
 `postgres/idempotent` allows.
 
-**Consequences.** Differs from `postgres/jobs`, which completes after expiry
-when nobody reclaimed the job; here that work is retried instead. One more
+**Consequences.** One exception, as in `postgres/jobs`: job completion
+accepts an expired lease whose owner and token still match under the row lock,
+because then nobody reclaimed or reaped the execution and discarding a
+successful result would only re-run it (or, on the final attempt, fail it).
+Workers wait `ReapGrace` before reaping a final attempt so that completion has
+time to land. Other job outcomes still need an unexpired lease. One more
 exception: marking unordered outbox events published needs only the owner,
 because the publish already happened and a matching owner proves no other
 relay reclaimed them (D16).
@@ -134,7 +138,7 @@ with relay heartbeats would let a slow producer cost the relay its lease.
 | Q3 | Outbox pointer granularity | Per event by default; `AdvancePerBatch` per topic |
 | Q4 | Unregistered kinds and topics | Rejected: `ErrUnknownKind`, `ErrUnknownTopic`. `jobs.Config.Kinds` and `outbox.Config.Topics` are required |
 | Q5 | Scheduler defaults | Missed runs `MissedLatest`, overlap `OverlapSkip` |
-| Q6 | Cache contention without a stale value | Wait (poll) up to `ComputeTTL`, then compute; `ComputeAnyway` available |
+| Q6 | Cache contention without a stale value | Wait (poll) while the compute lease is live (it is renewed while `fn` runs), then compute; `MaxWait` bounds the wait; `ComputeAnyway` available |
 | Q7 | Outbox retention and replay | Published events are kept until `PurgePublished`; `Replay` works only from a retained sequence |
 | Q8 | Payload versioning | `payload_version` per execution; `OldestPayloadVersions` reports the oldest unfinished version per kind |
 | Q9 | Compensation | `KindOptions.Compensate` submits `<kind>.compensate` in the same transaction that records a final failure (including failures found by the reaper) |

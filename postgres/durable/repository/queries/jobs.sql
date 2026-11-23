@@ -72,14 +72,16 @@ SELECT u.id, u.queue, u.kind, u.scope, u.key, u.payload, u.payload_version, u.mo
 FROM u;
 
 -- name: ExpiredExecutions :many
--- Running executions whose lease expired on the final attempt, or that were
--- cancelled, among the kinds this worker registered.
+-- Running executions whose lease expired at least grace_us ago on the final
+-- attempt, or that were cancelled, among the kinds this worker registered.
+-- The grace lets a slow owner that nobody reclaimed still record success.
 SELECT e.id, e.owner_id, e.token, e.kind, e.cancel_requested, e.payload,
        coalesce(e.last_error, '')::text AS last_error, e.attempts
 FROM durable.executions e
 WHERE e.queue = sqlc.arg(queue)::text
   AND e.kind IN (SELECT jsonb_array_elements_text(sqlc.arg(kinds)::jsonb))
-  AND e.status = 'running' AND e.lease_expires_at <= now()
+  AND e.status = 'running'
+  AND e.lease_expires_at <= now() - sqlc.arg(grace_us)::bigint * interval '1 microsecond'
   AND (e.attempts >= e.max_attempts OR e.cancel_requested)
 LIMIT 100 FOR UPDATE SKIP LOCKED;
 
@@ -154,4 +156,45 @@ DELETE FROM durable.executions WHERE id IN (
     WHERE e.finished_at < sqlc.arg(cutoff)::timestamptz
       AND NOT EXISTS (SELECT 1 FROM durable.idempotency_keys k
                       WHERE k.execution_id = e.id AND k.expires_at > clock_timestamp())
+    LIMIT sqlc.arg(lim)::integer FOR UPDATE SKIP LOCKED);
+
+-- name: ArchiveExecutions :execrows
+-- Moves finished executions to the archive in one statement, so a row is
+-- always in exactly one of the two tables. Keys keep pointing at the ID.
+WITH picked AS (
+    SELECT e.id FROM durable.executions e
+    WHERE e.finished_at < sqlc.arg(cutoff)::timestamptz
+    ORDER BY e.finished_at
+    LIMIT sqlc.arg(lim)::integer FOR UPDATE SKIP LOCKED),
+moved AS (
+    DELETE FROM durable.executions e USING picked WHERE e.id = picked.id
+    RETURNING e.*)
+INSERT INTO durable.executions_archive (id, queue, kind, scope, key, payload, payload_version,
+    mode, status, attempts, max_attempts, run_at, token, checkpoint_name, checkpoint_data,
+    last_error, output, created_at, updated_at, finished_at, attempt_log)
+SELECT m.id, m.queue, m.kind, m.scope, m.key, m.payload, m.payload_version, m.mode, m.status,
+       m.attempts, m.max_attempts, m.run_at, m.token, m.checkpoint_name, m.checkpoint_data,
+       m.last_error, m.output, m.created_at, m.updated_at, m.finished_at,
+       coalesce((SELECT jsonb_agg(jsonb_build_object(
+                    'attempt', a.attempt, 'owner_id', a.owner_id, 'token', a.token,
+                    'started_at', a.started_at, 'finished_at', a.finished_at,
+                    'outcome', a.outcome, 'error', a.error) ORDER BY a.attempt)
+                 FROM durable.execution_attempts a WHERE a.execution_id = m.id), '[]'::jsonb)
+FROM moved m;
+
+-- name: GetArchivedExecution :one
+SELECT * FROM durable.executions_archive WHERE id = sqlc.arg(id);
+
+-- name: GetArchivedExecutionByKey :one
+SELECT a.* FROM durable.executions_archive a
+JOIN durable.idempotency_keys k ON k.execution_id = a.id
+WHERE k.scope = sqlc.arg(scope) AND k.key = sqlc.arg(key) AND k.status = 'linked';
+
+-- name: PurgeArchivedExecutions :execrows
+-- Same key rule as PurgeExecutions: a remembered key never loses its result.
+DELETE FROM durable.executions_archive WHERE id IN (
+    SELECT a.id FROM durable.executions_archive a
+    WHERE a.archived_at < sqlc.arg(cutoff)::timestamptz
+      AND NOT EXISTS (SELECT 1 FROM durable.idempotency_keys k
+                      WHERE k.execution_id = a.id AND k.expires_at > clock_timestamp())
     LIMIT sqlc.arg(lim)::integer FOR UPDATE SKIP LOCKED);

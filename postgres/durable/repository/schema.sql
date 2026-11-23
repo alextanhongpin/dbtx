@@ -264,12 +264,21 @@ CREATE TABLE IF NOT EXISTS durable.idempotency_keys (
     key              text        NOT NULL,
     request          jsonb       NOT NULL,
     status           text        NOT NULL
-        CHECK (status IN ('in_flight', 'completed', 'failed', 'linked')),
+        CONSTRAINT idempotency_keys_status_check
+        CHECK (status IN ('in_flight', 'completed', 'failed', 'linked', 'exhausted')),
     owner_id         text,
     token            bigint      NOT NULL DEFAULT 0,
     lease_expires_at timestamptz,
     response         jsonb,
     execution_id     uuid,
+    -- Attempts granted so far; a released claim gives its attempt back.
+    attempts         integer     NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    -- No new attempt before retry_at (backoff after a failed attempt).
+    retry_at         timestamptz,
+    last_error       text,
+    -- Last finished step of a multi-step request; '' means none.
+    checkpoint_name  text        NOT NULL DEFAULT '',
+    checkpoint_data  jsonb,
     expires_at       timestamptz NOT NULL,
     created_at       timestamptz NOT NULL DEFAULT now(),
     updated_at       timestamptz NOT NULL DEFAULT now(),
@@ -281,11 +290,16 @@ CREATE INDEX IF NOT EXISTS idempotency_keys_expires_at_idx
 CREATE INDEX IF NOT EXISTS idempotency_keys_execution_idx
     ON durable.idempotency_keys (execution_id) WHERE execution_id IS NOT NULL;
 
--- Returns outcome: acquired, in_flight, completed, failed, linked, mismatch.
+-- Returns outcome: acquired, in_flight, backoff, completed, failed, linked,
+-- exhausted, mismatch. Every grant counts an attempt; a key whose holder
+-- crashed after using the last attempt becomes exhausted instead of being
+-- granted again. An acquired outcome carries the last saved checkpoint.
 CREATE OR REPLACE FUNCTION durable.begin_key(
     p_scope text, p_key text, p_request jsonb, p_owner text,
-    p_lease_us bigint, p_retention_us bigint
-) RETURNS TABLE (outcome text, key_id uuid, token bigint, response jsonb, execution_id uuid)
+    p_lease_us bigint, p_retention_us bigint, p_max_attempts integer
+) RETURNS TABLE (outcome text, key_id uuid, token bigint, response jsonb, execution_id uuid,
+                 attempts integer, retry_at timestamptz, last_error text,
+                 checkpoint_name text, checkpoint_data jsonb)
 LANGUAGE plpgsql AS $$
 #variable_conflict use_column
 DECLARE
@@ -293,6 +307,7 @@ DECLARE
     v_now timestamptz := clock_timestamp();
     v_token bigint;
     v_id uuid;
+    v_error text;
 BEGIN
     LOOP
         SELECT * INTO v_row FROM durable.idempotency_keys k
@@ -302,20 +317,23 @@ BEGIN
             v_token := nextval('durable.fencing_seq');
             BEGIN
                 INSERT INTO durable.idempotency_keys AS k (scope, key, request, status,
-                    owner_id, token, lease_expires_at, expires_at)
+                    owner_id, token, lease_expires_at, expires_at, attempts)
                 VALUES (p_scope, p_key, p_request, 'in_flight', p_owner, v_token,
                     v_now + p_lease_us * interval '1 microsecond',
-                    v_now + p_retention_us * interval '1 microsecond')
+                    v_now + p_retention_us * interval '1 microsecond', 1)
                 ON CONFLICT ON CONSTRAINT idempotency_keys_pkey DO UPDATE
                 SET request = EXCLUDED.request, status = 'in_flight',
                     owner_id = EXCLUDED.owner_id, token = EXCLUDED.token,
                     lease_expires_at = EXCLUDED.lease_expires_at, response = NULL,
                     execution_id = NULL, expires_at = EXCLUDED.expires_at,
+                    attempts = 1, retry_at = NULL, last_error = NULL,
+                    checkpoint_name = '', checkpoint_data = NULL,
                     created_at = now(), updated_at = now()
                 WHERE k.expires_at <= clock_timestamp()
                 RETURNING k.id INTO v_id;
                 IF FOUND THEN
-                    RETURN QUERY SELECT 'acquired'::text, v_id, v_token, NULL::jsonb, NULL::uuid;
+                    RETURN QUERY SELECT 'acquired'::text, v_id, v_token, NULL::jsonb, NULL::uuid,
+                        1, NULL::timestamptz, NULL::text, ''::text, NULL::jsonb;
                     RETURN;
                 END IF;
             EXCEPTION WHEN unique_violation THEN
@@ -324,24 +342,49 @@ BEGIN
             CONTINUE;
         END IF;
         IF v_row.request <> p_request THEN
-            RETURN QUERY SELECT 'mismatch'::text, v_row.id, 0::bigint, NULL::jsonb, NULL::uuid;
+            RETURN QUERY SELECT 'mismatch'::text, v_row.id, 0::bigint, NULL::jsonb, NULL::uuid,
+                0, NULL::timestamptz, NULL::text, ''::text, NULL::jsonb;
             RETURN;
         END IF;
-        IF v_row.status IN ('completed', 'failed', 'linked') THEN
-            RETURN QUERY SELECT v_row.status, v_row.id, v_row.token, v_row.response, v_row.execution_id;
+        IF v_row.status IN ('completed', 'failed', 'linked', 'exhausted') THEN
+            RETURN QUERY SELECT v_row.status, v_row.id, v_row.token, v_row.response,
+                v_row.execution_id, v_row.attempts, NULL::timestamptz, v_row.last_error,
+                ''::text, NULL::jsonb;
             RETURN;
         END IF;
         IF v_row.lease_expires_at > v_now THEN
-            RETURN QUERY SELECT 'in_flight'::text, v_row.id, 0::bigint, NULL::jsonb, NULL::uuid;
+            RETURN QUERY SELECT 'in_flight'::text, v_row.id, 0::bigint, NULL::jsonb, NULL::uuid,
+                v_row.attempts, NULL::timestamptz, NULL::text, ''::text, NULL::jsonb;
+            RETURN;
+        END IF;
+        -- No live owner. A set owner_id means the holder's lease expired.
+        IF v_row.attempts >= p_max_attempts THEN
+            v_error := concat_ws(': ',
+                CASE WHEN v_row.owner_id IS NOT NULL THEN 'lease expired' END, v_row.last_error);
+            UPDATE durable.idempotency_keys k
+            SET status = 'exhausted', owner_id = NULL, lease_expires_at = NULL,
+                last_error = v_error,
+                expires_at = v_now + p_retention_us * interval '1 microsecond',
+                updated_at = now()
+            WHERE k.id = v_row.id;
+            RETURN QUERY SELECT 'exhausted'::text, v_row.id, v_row.token, NULL::jsonb, NULL::uuid,
+                v_row.attempts, NULL::timestamptz, v_error, ''::text, NULL::jsonb;
+            RETURN;
+        END IF;
+        IF v_row.retry_at > v_now THEN
+            RETURN QUERY SELECT 'backoff'::text, v_row.id, 0::bigint, NULL::jsonb, NULL::uuid,
+                v_row.attempts, v_row.retry_at, v_row.last_error, ''::text, NULL::jsonb;
             RETURN;
         END IF;
         v_token := nextval('durable.fencing_seq');
         UPDATE durable.idempotency_keys k
         SET owner_id = p_owner, token = v_token,
             lease_expires_at = v_now + p_lease_us * interval '1 microsecond',
-            updated_at = now()
-        WHERE k.scope = p_scope AND k.key = p_key;
-        RETURN QUERY SELECT 'acquired'::text, v_row.id, v_token, NULL::jsonb, NULL::uuid;
+            attempts = k.attempts + 1, retry_at = NULL, updated_at = now()
+        WHERE k.id = v_row.id;
+        RETURN QUERY SELECT 'acquired'::text, v_row.id, v_token, NULL::jsonb, NULL::uuid,
+            v_row.attempts + 1, NULL::timestamptz, v_row.last_error,
+            v_row.checkpoint_name, v_row.checkpoint_data;
         RETURN;
     END LOOP;
 END;
@@ -407,6 +450,37 @@ CREATE TABLE IF NOT EXISTS durable.execution_attempts (
     error        text,
     PRIMARY KEY (execution_id, attempt)
 );
+
+-- Finished executions moved out of the hot table by jobs.Client.Archive, so
+-- durable.executions stays small while idempotency keys (which keep pointing
+-- at the execution ID) are remembered for longer. attempt_log holds the
+-- execution_attempts rows as a JSON array; steps are not kept.
+CREATE TABLE IF NOT EXISTS durable.executions_archive (
+    id               uuid        PRIMARY KEY,
+    queue            text        NOT NULL,
+    kind             text        NOT NULL,
+    scope            text,
+    key              text,
+    payload          jsonb       NOT NULL,
+    payload_version  integer     NOT NULL,
+    mode             text,
+    status           text        NOT NULL CHECK (status IN ('succeeded', 'failed', 'cancelled')),
+    attempts         integer     NOT NULL,
+    max_attempts     integer     NOT NULL,
+    run_at           timestamptz NOT NULL,
+    token            bigint      NOT NULL,
+    checkpoint_name  text        NOT NULL DEFAULT '',
+    checkpoint_data  jsonb,
+    last_error       text,
+    output           jsonb,
+    created_at       timestamptz NOT NULL,
+    updated_at       timestamptz NOT NULL,
+    finished_at      timestamptz NOT NULL,
+    attempt_log      jsonb       NOT NULL DEFAULT '[]',
+    archived_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS executions_archive_archived_idx
+    ON durable.executions_archive (archived_at);
 
 -- ---------------------------------------------------------------------------
 -- Outbox. Unordered events are queue rows. Ordered events get a gapless seq
@@ -508,8 +582,16 @@ CREATE TABLE IF NOT EXISTS durable.inbox_pending (
     payload       jsonb,
     is_gap        boolean     NOT NULL DEFAULT false,
     received_at   timestamptz NOT NULL DEFAULT now(),
+    -- Failed drain attempts; parked_at is set once attempts reach the
+    -- inbox's MaxAttempts, and drains stop at it until an operator acts.
+    attempts      integer     NOT NULL DEFAULT 0,
+    last_error    text,
+    failed_at     timestamptz,
+    parked_at     timestamptz,
     PRIMARY KEY (source, aggregate_key, seq)
 );
+CREATE INDEX IF NOT EXISTS inbox_pending_parked_idx
+    ON durable.inbox_pending (parked_at) WHERE parked_at IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
 -- Schedules.

@@ -23,20 +23,22 @@ WHERE aggregate_key IS NULL AND status = 'running'
 LIMIT 100 FOR UPDATE SKIP LOCKED;
 
 -- name: ClaimUnorderedEvents :many
--- Columns other than token and attempts are immutable, so reading them
--- next to the grant in one statement is safe.
+-- limits maps each topic to its batch size, so every topic gets its own
+-- limit in one statement. Columns other than token and attempts are
+-- immutable, so reading them next to the grant in one statement is safe.
 SELECT g.id::uuid AS id, g.token::bigint AS token, g.attempts::integer AS attempts,
        e.topic, e.type, coalesce(e.partition_key, '')::text AS partition_key,
        e.headers, e.payload, e.max_attempts, e.run_at
 FROM durable.lease_grant('durable.outbox_events', ARRAY(
-        SELECT c.id FROM durable.outbox_events c
-        WHERE c.aggregate_key IS NULL
-          AND c.topic IN (SELECT jsonb_array_elements_text(sqlc.arg(topics)::jsonb))
-          AND ((c.status = 'pending' AND c.run_at <= now())
-            OR (c.status = 'running' AND c.lease_expires_at <= now() AND c.attempts < c.max_attempts))
-        ORDER BY c.run_at, c.id
-        LIMIT sqlc.arg(lim)::integer
-        FOR UPDATE SKIP LOCKED),
+        SELECT x.id FROM jsonb_each_text(sqlc.arg(limits)::jsonb) AS t(topic, lim)
+        CROSS JOIN LATERAL (
+            SELECT c.id FROM durable.outbox_events c
+            WHERE c.aggregate_key IS NULL AND c.topic = t.topic
+              AND ((c.status = 'pending' AND c.run_at <= now())
+                OR (c.status = 'running' AND c.lease_expires_at <= now() AND c.attempts < c.max_attempts))
+            ORDER BY c.run_at, c.id
+            LIMIT t.lim::integer
+            FOR UPDATE SKIP LOCKED) x),
     sqlc.arg(owner_id)::text, sqlc.arg(ttl_us)::bigint, 'pending', 'running', true) g
 JOIN durable.outbox_events e ON e.id = g.id
 ORDER BY e.run_at, e.id;
@@ -146,3 +148,12 @@ FROM durable.outbox_events WHERE status = 'dead' ORDER BY created_at LIMIT sqlc.
 -- name: RequeueDeadEvent :execrows
 UPDATE durable.outbox_events SET status = 'pending', attempts = 0, run_at = clock_timestamp(), updated_at = now()
 WHERE id = sqlc.arg(id) AND status = 'dead';
+
+-- name: CountEvents :one
+-- topic '' counts every topic.
+SELECT count(*) FILTER (WHERE status = 'pending')::bigint AS pending,
+       count(*) FILTER (WHERE status = 'running')::bigint AS running,
+       count(*) FILTER (WHERE status = 'dead')::bigint AS dead
+FROM durable.outbox_events
+WHERE status IN ('pending', 'running', 'dead')
+  AND (sqlc.arg(topic)::text = '' OR topic = sqlc.arg(topic)::text);

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/alextanhongpin/dbtx"
@@ -56,6 +57,13 @@ func Example_keys() {
 			w.WriteHeader(http.StatusUnprocessableEntity)
 		case errors.Is(err, durable.ErrInFlight):
 			w.WriteHeader(http.StatusConflict)
+		case errors.Is(err, keys.ErrBackoff):
+			var be *keys.BackoffError
+			errors.As(err, &be)
+			w.Header().Set("Retry-After", strconv.Itoa(int(time.Until(be.RetryAfter).Seconds())+1))
+			w.WriteHeader(http.StatusServiceUnavailable)
+		case errors.Is(err, keys.ErrExhausted):
+			w.WriteHeader(http.StatusInternalServerError)
 		default:
 			w.WriteHeader(resp.Status)
 			_, _ = w.Write(resp.Body)

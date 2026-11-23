@@ -1,6 +1,18 @@
 // Package jobs runs durable executions: submitted once per idempotency key,
 // claimed by workers with fenced leases, retried with backoff, resumable from
 // checkpoints, and able to call remote APIs through idempotent steps.
+//
+// Completion is the one outcome accepted on an expired lease, and only while
+// owner and token still match under the row lock (nobody reclaimed or reaped
+// the execution), so a slow but successful finish is kept. Workers reap an
+// expired final attempt only after WorkerConfig.ReapGrace. Claims are not
+// cancelled by the worker's context, so shutdown cannot strand a committed
+// claim.
+//
+// Finished executions are deleted by Client.Purge once their idempotency key
+// expires, or moved to durable.executions_archive by Client.Archive after any
+// retention; keys keep answering from the archive. Config bounds payload size
+// and key length.
 package jobs
 
 import (
@@ -68,9 +80,25 @@ type Job struct {
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 	FinishedAt      *time.Time
+	// ArchivedAt is set when the execution was read from the archive
+	// (Client.Archive); archived executions cannot be requeued.
+	ArchivedAt *time.Time
 }
 
 const executionsTable = "durable.executions"
+
+func jobFromArchive(a postgres.DurableExecutionsArchive) Job {
+	j := jobFrom(postgres.DurableExecution{
+		ID: a.ID, Queue: a.Queue, Kind: a.Kind, Scope: a.Scope, Key: a.Key, Payload: a.Payload,
+		PayloadVersion: a.PayloadVersion, Mode: a.Mode, Status: a.Status, Attempts: a.Attempts,
+		MaxAttempts: a.MaxAttempts, RunAt: a.RunAt, Token: a.Token,
+		CheckpointName: a.CheckpointName, CheckpointData: a.CheckpointData,
+		LastError: a.LastError, Output: a.Output, CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt,
+		FinishedAt: sql.NullTime{Time: a.FinishedAt, Valid: true},
+	})
+	j.ArchivedAt = &a.ArchivedAt
+	return j
+}
 
 func jobFrom(e postgres.DurableExecution) Job {
 	j := Job{
@@ -96,8 +124,18 @@ type Config struct {
 	Kinds []string
 	// Queue for submissions that do not name one. Default "default".
 	Queue string
-	// KeyRetention is how long idempotency keys are remembered. Default 7 days.
+	// KeyRetention is the idempotency window (key TTL): how long a key is
+	// remembered after submission. Default 7 days. It is independent of how
+	// long finished executions stay in the hot table (Janitor.Retention):
+	// Purge never deletes an execution whose key is still remembered, while
+	// Archive moves it out and resubmissions are answered from the archive.
 	KeyRetention time.Duration
+	// MaxPayloadBytes bounds the encoded payload. Default 1 MiB; negative
+	// means no limit.
+	MaxPayloadBytes int
+	// MaxKeyLength bounds Key and Scope in bytes. Default 255; negative means
+	// no limit.
+	MaxKeyLength int
 	// RequireTx makes Submit fail with ErrNotInTx unless ctx carries a
 	// transaction, so the job always commits with the caller's writes.
 	RequireTx bool
@@ -119,6 +157,11 @@ func NewClient(cfg Config) (*Client, error) {
 	if cfg.KeyRetention == 0 {
 		cfg.KeyRetention = 7 * 24 * time.Hour
 	}
+	if cfg.KeyRetention < 0 {
+		return nil, fmt.Errorf("%w: negative KeyRetention", durable.ErrInvalidConfig)
+	}
+	setDefault(&cfg.MaxPayloadBytes, 1<<20)
+	setDefault(&cfg.MaxKeyLength, 255)
 	cfg.Kinds = slices.Clone(cfg.Kinds)
 	return &Client{cfg: cfg}, nil
 }
@@ -156,6 +199,19 @@ func (c *Client) Submit(ctx context.Context, req SubmitRequest) (SubmitResult, e
 	}
 	if c.cfg.RequireTx && !c.cfg.DB.IsTx(ctx) {
 		return SubmitResult{}, durable.ErrNotInTx
+	}
+	if n := c.cfg.MaxKeyLength; n >= 0 && (len(req.Key) > n || len(req.Scope) > n) {
+		return SubmitResult{}, fmt.Errorf("%w: key or scope longer than %d bytes", durable.ErrInvalidArgument, n)
+	}
+	if n := c.cfg.MaxPayloadBytes; n >= 0 {
+		payload, err := pg.Marshal(req.Payload)
+		if err != nil {
+			return SubmitResult{}, fmt.Errorf("%w: payload: %v", durable.ErrInvalidArgument, err)
+		}
+		if len(payload) > n {
+			return SubmitResult{}, fmt.Errorf("%w: payload of %d bytes exceeds %d", durable.ErrInvalidArgument, len(payload), n)
+		}
+		req.Payload = json.RawMessage(payload)
 	}
 	return submit(ctx, c.cfg.DB, c.cfg.Queue, c.cfg.KeyRetention, req)
 }
@@ -210,8 +266,16 @@ func submit(ctx context.Context, db *dbtx.DB, defaultQueue string, keyRetention 
 				}
 				e, err := q.GetExecution(txCtx, k.ExecutionID.V)
 				if errors.Is(err, sql.ErrNoRows) {
-					// The execution was purged while its key is still remembered.
-					res = SubmitResult{ID: k.ExecutionID.V, Status: StatusSucceeded}
+					// Archived (or, if deleted by hand, gone) while its key is
+					// still remembered.
+					a, err := q.GetArchivedExecution(txCtx, k.ExecutionID.V)
+					if errors.Is(err, sql.ErrNoRows) {
+						return fmt.Errorf("%w: execution %s of key %q", durable.ErrNotFound, k.ExecutionID.V, req.Key)
+					}
+					if err != nil {
+						return err
+					}
+					res = SubmitResult{ID: a.ID, Status: Status(a.Status), Output: a.Output.Raw(), Error: a.LastError.String}
 					return nil
 				}
 				if err != nil {
@@ -241,11 +305,19 @@ func submit(ctx context.Context, db *dbtx.DB, defaultQueue string, keyRetention 
 	return res, err
 }
 
-// Get returns an execution by ID.
+// Get returns an execution by ID, from the archive if it was archived.
 func (c *Client) Get(ctx context.Context, id uuid.UUID) (Job, error) {
-	e, err := postgres.New(c.cfg.DB.DBTx(ctx)).GetExecution(ctx, id)
+	q := postgres.New(c.cfg.DB.DBTx(ctx))
+	e, err := q.GetExecution(ctx, id)
 	if errors.Is(err, sql.ErrNoRows) {
-		return Job{}, durable.ErrNotFound
+		a, err := q.GetArchivedExecution(ctx, id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return Job{}, durable.ErrNotFound
+		}
+		if err != nil {
+			return Job{}, err
+		}
+		return jobFromArchive(a), nil
 	}
 	if err != nil {
 		return Job{}, err
@@ -253,14 +325,23 @@ func (c *Client) Get(ctx context.Context, id uuid.UUID) (Job, error) {
 	return jobFrom(e), nil
 }
 
-// GetByKey returns the execution submitted with scope and key.
+// GetByKey returns the execution submitted with scope and key, from the
+// archive if it was archived.
 func (c *Client) GetByKey(ctx context.Context, scope, key string) (Job, error) {
 	if scope == "" {
 		scope = "jobs"
 	}
-	e, err := postgres.New(c.cfg.DB.DBTx(ctx)).GetExecutionByKey(ctx, postgres.GetExecutionByKeyParams{Scope: scope, Key: key})
+	q := postgres.New(c.cfg.DB.DBTx(ctx))
+	e, err := q.GetExecutionByKey(ctx, postgres.GetExecutionByKeyParams{Scope: scope, Key: key})
 	if errors.Is(err, sql.ErrNoRows) {
-		return Job{}, durable.ErrNotFound
+		a, err := q.GetArchivedExecutionByKey(ctx, postgres.GetArchivedExecutionByKeyParams{Scope: scope, Key: key})
+		if errors.Is(err, sql.ErrNoRows) {
+			return Job{}, durable.ErrNotFound
+		}
+		if err != nil {
+			return Job{}, err
+		}
+		return jobFromArchive(a), nil
 	}
 	if err != nil {
 		return Job{}, err
