@@ -34,10 +34,13 @@ type Querier interface {
 	// A stream is held while active with a live owner; grant counts no attempt
 	// (attempts counts consecutive failures of the head event).
 	ClaimStreams(ctx context.Context, arg ClaimStreamsParams) ([]ClaimStreamsRow, error)
-	// Columns other than token and attempts are immutable, so reading them
-	// next to the grant in one statement is safe.
+	// limits maps each topic to its batch size, so every topic gets its own
+	// limit in one statement. Columns other than token and attempts are
+	// immutable, so reading them next to the grant in one statement is safe.
 	ClaimUnorderedEvents(ctx context.Context, arg ClaimUnorderedEventsParams) ([]ClaimUnorderedEventsRow, error)
 	ClockTimestamp(ctx context.Context) (time.Time, error)
+	// topic '' counts every topic.
+	CountEvents(ctx context.Context, topic string) (CountEventsRow, error)
 	CurrentLockTimeout(ctx context.Context) (string, error)
 	DeadEvents(ctx context.Context, lim int32) ([]DeadEventsRow, error)
 	DeleteBuffered(ctx context.Context, arg DeleteBufferedParams) error

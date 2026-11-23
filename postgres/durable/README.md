@@ -115,7 +115,7 @@ is retried with exponential backoff and jitter until `MaxAttempts`.
 | Job attempts | 10, backoff 1s doubling to 1h with up to 25% jitter |
 | Job drain on shutdown | 25s, then unfinished activity-mode work is handed back without spending an attempt |
 | Idempotency key retention | 24h for `keys`, 7 days for job keys |
-| Outbox | 10 attempts per event or stream head, batch 100, `HeadBlock`, advance per event |
+| Outbox | 10 attempts per event or stream head, batch 100 per topic, `HeadBlock`, advance per event; publish 10s, outcome writes bounded by `RecordTimeout` (default `RequestTimeout`, 5s) |
 | Scheduler | missed runs `MissedLatest`, overlap `OverlapSkip` |
 | Cache | compute lease 30s; waiting callers poll every 50ms, then compute themselves |
 
@@ -137,7 +137,12 @@ work nobody processes.
   expired lease is left alone this long before the reaper fails it, so a slow
   owner nobody reclaimed can still record success.
 - `outbox.Outbox`: `Stream`, `Resume`, `Skip` (gap marker), `Replay`,
-  `PurgePublished`, `DeadLetters`, `Requeue`.
+  `PurgePublished`, `DeadLetters`, `Requeue`, `Count` (pending, running and
+  dead events per topic).
+- `outbox.Relay` publishes to a broker through a `Publisher`, or consumes
+  in-process through a `Handler` whose writes commit in the same transaction
+  as the acknowledgement. A panicking publisher or handler counts as a failed
+  attempt; the relay keeps running.
 - `inbox.Inbox`: `Gaps`, `SkipGap`, `Drain`, `Parked`, `Unpark`, `Discard`,
   `Job`, `PurgeMessages`. A buffered sequenced message that fails to apply
   during a drain has its attempts and last error stored, emits
