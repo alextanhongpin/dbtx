@@ -121,7 +121,7 @@ Found when the standalone modules were removed. Bugs:
 - [ ] `outbox` relay does not recover from a `Publisher` panic (`outbox/relay.go`); post-publish writes use `WithoutCancel` with no timeout; one claim uses the largest topic batch size for all topics
 - [ ] `inbox` sequenced drain swallows apply errors (`inbox/inbox.go`, `drainLocked`): a poison buffered message blocks the stream with no attempt count, observer event or dead letter
 - [ ] `cache.GetOrCompute` never renews the compute lease and does not release it on panic
-- [ ] `jobs` worker claims with the run context, so a committed claim lost at shutdown spends an attempt; a final attempt is reaped the moment its lease expires (no reap grace)
+- [x] `jobs` worker claims with the run context, so a committed claim lost at shutdown spends an attempt; a final attempt is reaped the moment its lease expires (no reap grace)
 - [ ] `txlock`: a `lock_timeout` inside a joined transaction aborts the caller's transaction; document or use a savepoint
 
 Missing features:
@@ -129,7 +129,7 @@ Missing features:
 - [ ] `keys.Do`: checkpointed multi-step requests, `MaxAttempts`, backoff with retry-after, exhausted state
 - [ ] `cache`: key-value surface (`CompareAndSwap`, `CompareAndDelete`, `LoadAndDelete`, `LoadOrStore`, `StoreOnce`, `Expire`, `TTL`, `Exists`) and the `Func`/`Idempotent` memoizers
 - [ ] `txlock`: `int64` and pair keys; locking inside an existing transaction without a callback
-- [ ] `jobs`: archive table, key TTL separate from retention, input size and key length limits
+- [x] `jobs`: archive table, key TTL separate from retention, input size and key length limits
 - [ ] `inbox`: retrying queue semantics (attempts, backoff, dead letters, requeue) for dedup mode
 - [ ] `outbox`: optional handler-in-transaction consumption, `Count`
 - [ ] `lease`: validate `TransactionTimeout` against PostgreSQL's maximum
