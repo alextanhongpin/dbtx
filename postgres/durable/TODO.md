@@ -117,19 +117,20 @@ PostgreSQL 16; 9 packages, 68 test functions). Remaining work is under
 
 Found when the standalone modules were removed. Bugs:
 
-- [ ] `lease.Activity` does not release the lease when `fn` panics (`lease/activity.go`); the row stays held until TTL
-- [ ] `outbox` relay does not recover from a `Publisher` panic (`outbox/relay.go`); post-publish writes use `WithoutCancel` with no timeout; one claim uses the largest topic batch size for all topics
+- [x] `lease.Activity` does not release the lease when `fn` panics (`lease/activity.go`); the row stays held until TTL
+- [x] `outbox` relay does not recover from a `Publisher` panic (`outbox/relay.go`); post-publish writes use `WithoutCancel` with no timeout; one claim uses the largest topic batch size for all topics
 - [x] `inbox` sequenced drain swallows apply errors (`inbox/inbox.go`, `drainLocked`): a poison buffered message blocks the stream with no attempt count, observer event or dead letter
 - [ ] `cache.GetOrCompute` never renews the compute lease and does not release it on panic
 - [x] `jobs` worker claims with the run context, so a committed claim lost at shutdown spends an attempt; a final attempt is reaped the moment its lease expires (no reap grace)
-- [ ] `txlock`: a `lock_timeout` inside a joined transaction aborts the caller's transaction; document or use a savepoint
+- [x] `txlock`: a `lock_timeout` inside a joined transaction aborts the caller's transaction; document or use a savepoint
 
 Missing features:
 
 - [ ] `keys.Do`: checkpointed multi-step requests, `MaxAttempts`, backoff with retry-after, exhausted state
 - [ ] `cache`: key-value surface (`CompareAndSwap`, `CompareAndDelete`, `LoadAndDelete`, `LoadOrStore`, `StoreOnce`, `Expire`, `TTL`, `Exists`) and the `Func`/`Idempotent` memoizers
-- [ ] `txlock`: `int64` and pair keys; locking inside an existing transaction without a callback
+- [x] `txlock`: `int64` and pair keys; locking inside an existing transaction without a callback
 - [x] `jobs`: archive table, key TTL separate from retention, input size and key length limits
 - [x] `inbox`: retrying queue semantics for dedup mode (documented: broker retries for `Receive`; `Enqueue` + jobs covers attempts, backoff and dead letters; `Inbox.Job` finds a message's job)
-- [ ] `outbox`: optional handler-in-transaction consumption, `Count`
-- [ ] `lease`: validate `TransactionTimeout` against PostgreSQL's maximum
+- [x] `outbox`: optional handler-in-transaction consumption, `Count`
+- [ ] `outbox`: `(topic, run_at, id)` index for the per-topic claim; purge for dead events
+- [x] `lease`: validate `TransactionTimeout` against PostgreSQL's maximum
