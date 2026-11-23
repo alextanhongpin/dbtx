@@ -77,6 +77,7 @@ type Querier interface {
 	LinkJobKey(ctx context.Context, arg LinkJobKeyParams) (bool, error)
 	ListFailedExecutions(ctx context.Context, arg ListFailedExecutionsParams) ([]DurableExecution, error)
 	ListInboxGaps(ctx context.Context, minAgeUs int64) ([]ListInboxGapsRow, error)
+	ListParked(ctx context.Context, arg ListParkedParams) ([]ListParkedRow, error)
 	LoadCacheEntry(ctx context.Context, key string) (LoadCacheEntryRow, error)
 	LoadStreamEvents(ctx context.Context, arg LoadStreamEventsParams) ([]LoadStreamEventsRow, error)
 	LockInboxStream(ctx context.Context, arg LockInboxStreamParams) (LockInboxStreamRow, error)
@@ -98,6 +99,9 @@ type Querier interface {
 	PurgeInboxMessages(ctx context.Context, arg PurgeInboxMessagesParams) (int64, error)
 	PurgeKeys(ctx context.Context, lim int32) (int64, error)
 	PurgePublishedEvents(ctx context.Context, arg PurgePublishedEventsParams) (int64, error)
+	// Counts one failed drain attempt; parks the message once attempts reach
+	// max_attempts.
+	RecordBufferedFailure(ctx context.Context, arg RecordBufferedFailureParams) (RecordBufferedFailureRow, error)
 	// execution_id is set afterwards by SetMessageExecution (inbox Enqueue).
 	RecordMessage(ctx context.Context, arg RecordMessageParams) (int64, error)
 	ReleaseCompute(ctx context.Context, arg ReleaseComputeParams) error
@@ -132,6 +136,7 @@ type Querier interface {
 	StoreComputed(ctx context.Context, arg StoreComputedParams) (int64, error)
 	// Transaction-scoped advisory locks (package txlock).
 	TryAdvisoryXactLock(ctx context.Context, key string) (bool, error)
+	UnparkBuffered(ctx context.Context, arg UnparkBufferedParams) (int64, error)
 	UpsertSchedule(ctx context.Context, arg UpsertScheduleParams) error
 }
 

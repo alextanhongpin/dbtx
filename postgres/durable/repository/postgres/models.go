@@ -106,6 +106,10 @@ type DurableInboxPending struct {
 	Payload      pg.JSON
 	IsGap        bool
 	ReceivedAt   time.Time
+	Attempts     int32
+	LastError    sql.NullString
+	FailedAt     sql.NullTime
+	ParkedAt     sql.NullTime
 }
 
 type DurableInboxStream struct {
