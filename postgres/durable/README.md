@@ -14,7 +14,7 @@ one fencing-token sequence and one error vocabulary:
 | --- | --- |
 | `lease` | Renewable fenced leases on a resource: `Activity` (long or external work, heartbeats), `RunInFencedTx` (short guarded transaction), `Try*` variants |
 | `txlock` | Transaction-scoped advisory locks; `WithLocks` sorts keys to prevent deadlocks |
-| `keys` | Synchronous request idempotency (`Idempotency-Key` headers): `Do`, or `Begin` + `Complete`/`Fail`/`Release` |
+| `keys` | Synchronous request idempotency (`Idempotency-Key` headers): `Do`, or `Begin` + `Complete`/`Fail`/`Abort`/`Release`; `MaxAttempts` with an exhausted state, backoff with `BackoffError` (retry-after), checkpointed multi-step requests with `DoSteps` |
 | `jobs` | Durable executions: idempotent `Submit` inside your transaction, workers with `ModeTx` or `ModeActivity`, checkpoints, `RunStep` for idempotent remote calls, retries, cancel, compensation, drain on shutdown, admin and janitor |
 | `outbox` | Transactional event publishing; unordered topics, or ordered topics with a gapless sequence per aggregate and head-of-line policies (`HeadBlock`, `HeadPark`, `HeadStop`) |
 | `inbox` | Apply incoming messages once: `ModeDedup`, `ModeSequenced` (buffers out-of-order messages and drains in order), `ModeVersioned` (newer wins); `Enqueue` hands a message to a job |
@@ -115,6 +115,7 @@ is retried with exponential backoff and jitter until `MaxAttempts`.
 | Job attempts | 10, backoff 1s doubling to 1h with up to 25% jitter |
 | Job drain on shutdown | 25s, then unfinished activity-mode work is handed back without spending an attempt |
 | Idempotency key retention | 24h for `keys`, 7 days for job keys |
+| `keys` attempts | 10 per key (a crashed holder's attempt counts; `Release` gives one back), no backoff unless `Backoff` is set or the error carries `durable.RetryAfter` |
 | Outbox | 10 attempts per event or stream head, batch 100, `HeadBlock`, advance per event |
 | Scheduler | missed runs `MissedLatest`, overlap `OverlapSkip` |
 | Cache | compute lease 30s; waiting callers poll every 50ms, then compute themselves |
