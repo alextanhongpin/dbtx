@@ -113,22 +113,22 @@ SELECT g.id::uuid AS id, g.token::bigint AS token, g.attempts::integer AS attemp
        e.topic, e.type, coalesce(e.partition_key, '')::text AS partition_key,
        e.headers, e.payload, e.max_attempts, e.run_at
 FROM durable.lease_grant('durable.outbox_events', ARRAY(
-        SELECT c.id FROM durable.outbox_events c
-        WHERE c.aggregate_key IS NULL
-          AND c.topic IN (SELECT jsonb_array_elements_text($1::jsonb))
-          AND ((c.status = 'pending' AND c.run_at <= now())
-            OR (c.status = 'running' AND c.lease_expires_at <= now() AND c.attempts < c.max_attempts))
-        ORDER BY c.run_at, c.id
-        LIMIT $2::integer
-        FOR UPDATE SKIP LOCKED),
-    $3::text, $4::bigint, 'pending', 'running', true) g
+        SELECT x.id FROM jsonb_each_text($1::jsonb) AS t(topic, lim)
+        CROSS JOIN LATERAL (
+            SELECT c.id FROM durable.outbox_events c
+            WHERE c.aggregate_key IS NULL AND c.topic = t.topic
+              AND ((c.status = 'pending' AND c.run_at <= now())
+                OR (c.status = 'running' AND c.lease_expires_at <= now() AND c.attempts < c.max_attempts))
+            ORDER BY c.run_at, c.id
+            LIMIT t.lim::integer
+            FOR UPDATE SKIP LOCKED) x),
+    $2::text, $3::bigint, 'pending', 'running', true) g
 JOIN durable.outbox_events e ON e.id = g.id
 ORDER BY e.run_at, e.id
 `
 
 type ClaimUnorderedEventsParams struct {
-	Topics  pg.JSON
-	Lim     int32
+	Limits  pg.JSON
 	OwnerID string
 	TtlUs   int64
 }
@@ -146,15 +146,11 @@ type ClaimUnorderedEventsRow struct {
 	RunAt        time.Time
 }
 
-// Columns other than token and attempts are immutable, so reading them
-// next to the grant in one statement is safe.
+// limits maps each topic to its batch size, so every topic gets its own
+// limit in one statement. Columns other than token and attempts are
+// immutable, so reading them next to the grant in one statement is safe.
 func (q *Queries) ClaimUnorderedEvents(ctx context.Context, arg ClaimUnorderedEventsParams) ([]ClaimUnorderedEventsRow, error) {
-	rows, err := q.db.QueryContext(ctx, claimUnorderedEvents,
-		arg.Topics,
-		arg.Lim,
-		arg.OwnerID,
-		arg.TtlUs,
-	)
+	rows, err := q.db.QueryContext(ctx, claimUnorderedEvents, arg.Limits, arg.OwnerID, arg.TtlUs)
 	if err != nil {
 		return nil, err
 	}
@@ -185,6 +181,29 @@ func (q *Queries) ClaimUnorderedEvents(ctx context.Context, arg ClaimUnorderedEv
 		return nil, err
 	}
 	return items, nil
+}
+
+const countEvents = `-- name: CountEvents :one
+SELECT count(*) FILTER (WHERE status = 'pending')::bigint AS pending,
+       count(*) FILTER (WHERE status = 'running')::bigint AS running,
+       count(*) FILTER (WHERE status = 'dead')::bigint AS dead
+FROM durable.outbox_events
+WHERE status IN ('pending', 'running', 'dead')
+  AND ($1::text = '' OR topic = $1::text)
+`
+
+type CountEventsRow struct {
+	Pending int64
+	Running int64
+	Dead    int64
+}
+
+// topic ” counts every topic.
+func (q *Queries) CountEvents(ctx context.Context, topic string) (CountEventsRow, error) {
+	row := q.db.QueryRowContext(ctx, countEvents, topic)
+	var i CountEventsRow
+	err := row.Scan(&i.Pending, &i.Running, &i.Dead)
+	return i, err
 }
 
 const deadEvents = `-- name: DeadEvents :many
