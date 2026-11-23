@@ -44,7 +44,7 @@ type WorkerConfig struct {
 	// ReapGrace is how long a final attempt's lease must have been expired
 	// before this worker's reaper fails it (or finishes a cancel request).
 	// Within the grace a slow owner that nobody reclaimed can still record
-	// success. Default LeaseDuration; keep it above FinalizeTimeout.
+	// success. Default max(LeaseDuration, FinalizeTimeout).
 	ReapGrace time.Duration
 	Backoff   durable.Backoff
 	Observer  durable.Observer
@@ -101,7 +101,7 @@ func NewWorker(cfg WorkerConfig) (*Worker, error) {
 	setDefault(&cfg.DrainTimeout, 25*time.Second)
 	setDefault(&cfg.FinalizeTimeout, 10*time.Second)
 	setDefault(&cfg.KeyRetention, 7*24*time.Hour)
-	setDefault(&cfg.ReapGrace, cfg.LeaseDuration)
+	setDefault(&cfg.ReapGrace, max(cfg.LeaseDuration, cfg.FinalizeTimeout))
 	if cfg.Backoff == nil {
 		cfg.Backoff = durable.DefaultBackoff
 	}
@@ -444,23 +444,16 @@ func (w *Worker) processActivity(attemptCtx, ctx context.Context, c claimed) {
 		w.observe(ctx, durable.EventSucceeded, e, nil)
 		return
 	}
-	octx, cancel := w.outcomeCtx(ctx)
-	defer cancel()
-	if terminal := e.keeper.Err(); terminal != nil {
-		// The handler outlived its local lease. A success is still offered
-		// to the database, which accepts it only if nobody reclaimed or
-		// reaped the execution (see complete); anything else is dropped and
-		// left to the next claim or the reaper.
-		if fnErr == nil && !result.checkpoint {
-			if output, err := pg.Marshal(result.output); err == nil {
-				w.cfg.Hooks.CallBeforeComplete(octx, e.ID.String())
-				w.finishTx(octx, e, reg, func(txCtx context.Context, q *postgres.Queries) error { return w.complete(txCtx, q, e, output) })
-				return
-			}
-		}
+	// If the handler outlived its local lease, a success is still offered to
+	// the database, which accepts it only if nobody reclaimed or reaped the
+	// execution (see complete). Anything else is left to the next claim or
+	// the reaper.
+	if terminal := e.keeper.Err(); terminal != nil && fnErr != nil {
 		w.observe(ctx, durable.EventLeaseLost, e, terminal)
 		return
 	}
+	octx, cancel := w.outcomeCtx(ctx)
+	defer cancel()
 	switch {
 	case fnErr == nil:
 		output, err := pg.Marshal(result.output)

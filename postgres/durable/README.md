@@ -130,11 +130,10 @@ work nobody processes.
   periodic cleanup. `Purge` keeps an execution until its idempotency key
   (`Config.KeyRetention`) expires; `Janitor{Archive: true}` instead moves
   finished executions to `durable.executions_archive` after `Retention`, and
-  resubmissions, `Get` and `GetByKey` are answered from the archive (apply
-  migration `0002_jobs_archive.sql`).
+  resubmissions, `Get` and `GetByKey` are answered from the archive.
 - `jobs.Config` limits input: `MaxPayloadBytes` (1 MiB) and `MaxKeyLength`
   (255 bytes, key and scope); negative disables a limit.
-- `jobs.WorkerConfig.ReapGrace` (default `LeaseDuration`): a final attempt's
+- `jobs.WorkerConfig.ReapGrace` (default `max(LeaseDuration, FinalizeTimeout)`): a final attempt's
   expired lease is left alone this long before the reaper fails it, so a slow
   owner nobody reclaimed can still record success.
 - `outbox.Outbox`: `Stream`, `Resume`, `Skip` (gap marker), `Replay`,

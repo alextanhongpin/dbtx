@@ -35,7 +35,6 @@ SELECT m.id, m.queue, m.kind, m.scope, m.key, m.payload, m.payload_version, m.mo
                     'outcome', a.outcome, 'error', a.error) ORDER BY a.attempt)
                  FROM durable.execution_attempts a WHERE a.execution_id = m.id), '[]'::jsonb)
 FROM moved m
-ON CONFLICT (id) DO NOTHING
 `
 
 type ArchiveExecutionsParams struct {

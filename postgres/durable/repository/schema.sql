@@ -481,8 +481,6 @@ CREATE TABLE IF NOT EXISTS durable.executions_archive (
 );
 CREATE INDEX IF NOT EXISTS executions_archive_archived_idx
     ON durable.executions_archive (archived_at);
-CREATE INDEX IF NOT EXISTS executions_archive_key_idx
-    ON durable.executions_archive (scope, key) WHERE key IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
 -- Outbox. Unordered events are queue rows. Ordered events get a gapless seq

@@ -180,8 +180,7 @@ SELECT m.id, m.queue, m.kind, m.scope, m.key, m.payload, m.payload_version, m.mo
                     'started_at', a.started_at, 'finished_at', a.finished_at,
                     'outcome', a.outcome, 'error', a.error) ORDER BY a.attempt)
                  FROM durable.execution_attempts a WHERE a.execution_id = m.id), '[]'::jsonb)
-FROM moved m
-ON CONFLICT (id) DO NOTHING;
+FROM moved m;
 
 -- name: GetArchivedExecution :one
 SELECT * FROM durable.executions_archive WHERE id = sqlc.arg(id);
