@@ -7,10 +7,13 @@ import (
 	"github.com/alextanhongpin/dbtx/postgres/durable"
 )
 
+var errPanicked = errors.New("lease: activity panicked")
+
 // Activity acquires (waiting through contention), heartbeats while fn runs,
 // cancels fn's context with the cause on loss, and releases afterward. It
 // waits for fn to return even if fn ignores cancellation. No transaction or
-// connection is held while fn runs.
+// connection is held while fn runs. If fn panics, the lease is released and
+// the panic is re-raised.
 func (l *Locker) Activity(ctx context.Context, key string, fn func(context.Context, Lease) error, opts ...Option) error {
 	return l.activity(ctx, key, fn, false, opts...)
 }
@@ -28,9 +31,25 @@ func (l *Locker) activity(ctx context.Context, key string, fn func(context.Conte
 	if err != nil {
 		return err
 	}
-	fnErr, cause := h.keeper.Supervise(ctx, key, func(workCtx context.Context) error {
+	// A panic in fn is recovered inside Supervise so its goroutines are joined
+	// and the lease is released, then re-raised.
+	var panicked bool
+	var panicValue any
+	fnErr, cause := h.keeper.Supervise(ctx, key, func(workCtx context.Context) (err error) {
+		defer func() {
+			if p := recover(); p != nil {
+				panicked, panicValue = true, p
+				err = errPanicked
+			}
+		}()
 		return fn(workCtx, h)
 	})
+	if panicked {
+		cleanupCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), l.cfg.CleanupTimeout)
+		defer stop()
+		_ = h.Release(cleanupCtx)
+		panic(panicValue)
+	}
 	terminal := h.keeper.Err()
 	if terminal != nil && !errors.Is(terminal, durable.ErrReleased) {
 		durable.Observe(ctx, l.cfg.Observer, durable.Event{

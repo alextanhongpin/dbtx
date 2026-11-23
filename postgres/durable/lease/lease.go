@@ -36,7 +36,7 @@ type Config struct {
 	DB                 *dbtx.DB
 	Namespace          string
 	LeaseDuration      time.Duration // default 30s, minimum 6ms
-	TransactionTimeout time.Duration // default 2s
+	TransactionTimeout time.Duration // default 2s, at most 2147483647ms
 	RequestTimeout     time.Duration // default 5s; also capped at TTL/3
 	CleanupTimeout     time.Duration // default 2s
 	RetryInterval      time.Duration // default 50ms, jittered
@@ -63,6 +63,9 @@ func (c Config) withDefaults() Config {
 	return c
 }
 
+// maxPGTimeout is PostgreSQL's largest timeout setting (INT_MAX ms).
+const maxPGTimeout = 2147483647 * time.Millisecond
+
 func (c Config) validate() error {
 	if c.DB == nil || c.DB.Unwrap() == nil || c.DB.ID() == "" || c.Namespace == "" {
 		return fmt.Errorf("%w: DB, its ID and Namespace are required", durable.ErrInvalidConfig)
@@ -70,6 +73,11 @@ func (c Config) validate() error {
 	if c.LeaseDuration < 6*time.Millisecond || c.TransactionTimeout < time.Millisecond ||
 		c.RequestTimeout < time.Millisecond || c.CleanupTimeout < time.Millisecond || c.RetryInterval < time.Millisecond {
 		return fmt.Errorf("%w: lease duration must be >= 6ms, other durations >= 1ms", durable.ErrInvalidConfig)
+	}
+	// statement_timeout, lock_timeout and transaction_timeout are int
+	// milliseconds; larger values fail inside every fenced transaction.
+	if c.TransactionTimeout > maxPGTimeout {
+		return fmt.Errorf("%w: transaction timeout exceeds PostgreSQL's maximum of %v", durable.ErrInvalidConfig, maxPGTimeout)
 	}
 	return nil
 }
@@ -119,12 +127,20 @@ func WithLeaseDuration(ttl time.Duration) Option {
 // Acquire waits through contention until ctx ends. It does not renew
 // automatically: call Renew, or use Activity.
 func (l *Locker) Acquire(ctx context.Context, key string, opts ...Option) (Lease, error) {
-	return l.acquire(ctx, key, false, opts...)
+	return asLease(l.acquire(ctx, key, false, opts...))
 }
 
 // TryAcquire attempts once and returns ErrContended when the key is held.
 func (l *Locker) TryAcquire(ctx context.Context, key string, opts ...Option) (Lease, error) {
-	return l.acquire(ctx, key, true, opts...)
+	return asLease(l.acquire(ctx, key, true, opts...))
+}
+
+// asLease avoids returning a typed nil *held as a non-nil Lease.
+func asLease(h *held, err error) (Lease, error) {
+	if err != nil {
+		return nil, err
+	}
+	return h, nil
 }
 
 func (l *Locker) checkContext(ctx context.Context) error {
